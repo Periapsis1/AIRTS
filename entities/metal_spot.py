@@ -1,0 +1,66 @@
+from config.settings import (
+    METAL_SPOT_COLOR, METAL_SPOT_RADIUS, METAL_SPOT_CAPTURE_RATE, METAL_SPOT_CAPTURE_RADIUS, METAL_SPOT_CAPTURE_ARC_WIDTH, METAL_SPOT_CAPTURE_ARC_COLOR_T1, METAL_SPOT_CAPTURE_ARC_COLOR_T2, METAL_SPOT_CAPTURE_RANGE_COLOR,
+    TEAM1_COLOR, TEAM2_COLOR,
+)
+from entities.shapes import CircleEntity
+from entities.base import Damageable
+import pygame
+from datetime import datetime
+import math
+
+class MetalSpot(CircleEntity, Damageable):
+    def __init__(self, x: float = 0, y: float = 0):
+        super().__init__(x, y, METAL_SPOT_RADIUS)
+        self.color = METAL_SPOT_COLOR
+        self.owner: int | None = None
+        self.capture_progress: float = 0.0  # -1.0 to 1.0 representing the capture progress for each team
+
+    def update_progress(self, unit_difference: int, dt: float):
+        # unit_difference is team 1 units - team 2 units
+        if self.owner is not None:
+            return
+        
+        self.capture_progress += unit_difference * METAL_SPOT_CAPTURE_RATE * dt
+        self.capture_progress = min(1.0, max(-1.0, self.capture_progress))
+
+    def claim(self, team: int):
+        self.owner = team
+        self.capture_progress = 0.0
+
+    def release(self):
+        self.owner = None
+
+    def draw(self, surface: pygame.Surface):
+        # draw the capture range circle with radius METAL_SPOT_CAPTURE_RADIUS and color 
+        pygame.draw.circle(surface, METAL_SPOT_CAPTURE_RANGE_COLOR, self.center(), METAL_SPOT_CAPTURE_RADIUS)
+
+        # draw the base circle
+        if self.owner is None:
+            color = self.color
+        elif self.owner == 1:
+            color = TEAM1_COLOR
+        else:
+            color = TEAM2_COLOR
+        pygame.draw.circle(surface, color, self.center(), self.radius)
+
+        # draw a progress pie chart for the capture progress. positive = team 1, negative = team 2
+        # circle centered at (x, y) with radius METAL_SPOT_CAPTURE_RADIUS
+        # if owned, capture only occurs if the metal extractor is destroyed which will set owner to None
+        # progress bar should grow
+        # if progress is positive, grows clockwise
+        # if progress is negative, grows counterclockwise
+        if self.owner is not None:
+            return
+
+        progress_color = METAL_SPOT_CAPTURE_ARC_COLOR_T1 if self.capture_progress > 0 else METAL_SPOT_CAPTURE_ARC_COLOR_T2
+        arc_r = METAL_SPOT_CAPTURE_RADIUS + METAL_SPOT_CAPTURE_ARC_WIDTH
+        start_angle = math.pi / 2
+        end_angle = start_angle + self.capture_progress * math.tau
+        if self.capture_progress > 0:
+            a = start_angle
+            b = end_angle
+        else:
+            a = end_angle
+            b = start_angle
+        rect = pygame.Rect(int(self.x - arc_r), int(self.y - arc_r), int(arc_r * 2), int(arc_r * 2))
+        pygame.draw.arc(surface, progress_color, rect, a, b, int(METAL_SPOT_CAPTURE_ARC_WIDTH))
