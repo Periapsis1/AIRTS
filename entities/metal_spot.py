@@ -31,8 +31,12 @@ class MetalSpot(CircleEntity, Damageable):
         self.owner = None
 
     def draw(self, surface: pygame.Surface):
-        # draw the capture range circle with radius METAL_SPOT_CAPTURE_RADIUS and color 
-        pygame.draw.circle(surface, METAL_SPOT_CAPTURE_RANGE_COLOR, self.center(), METAL_SPOT_CAPTURE_RADIUS)
+        # draw the range circle on a temporary surface to respect alpha
+        r = int(METAL_SPOT_CAPTURE_RADIUS)
+        size = r * 2
+        temp = pygame.Surface((size, size), pygame.SRCALPHA)
+        pygame.draw.circle(temp, METAL_SPOT_CAPTURE_RANGE_COLOR, (r, r), r)
+        surface.blit(temp, (int(self.x) - r, int(self.y) - r))
 
         # draw the base circle
         if self.owner is None:
@@ -43,15 +47,10 @@ class MetalSpot(CircleEntity, Damageable):
             color = TEAM2_COLOR
         pygame.draw.circle(surface, color, self.center(), self.radius)
 
-        # draw a progress pie chart for the capture progress. positive = team 1, negative = team 2
-        # circle centered at (x, y) with radius METAL_SPOT_CAPTURE_RADIUS
-        # if owned, capture only occurs if the metal extractor is destroyed which will set owner to None
-        # progress bar should grow
-        # if progress is positive, grows clockwise
-        # if progress is negative, grows counterclockwise
         if self.owner is not None:
             return
 
+        # draw the capture progress pie chart
         progress_color = METAL_SPOT_CAPTURE_ARC_COLOR_T1 if self.capture_progress > 0 else METAL_SPOT_CAPTURE_ARC_COLOR_T2
         arc_r = METAL_SPOT_CAPTURE_RADIUS + METAL_SPOT_CAPTURE_ARC_WIDTH
         start_angle = math.pi / 2
