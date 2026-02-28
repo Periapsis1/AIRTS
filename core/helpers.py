@@ -1,9 +1,7 @@
 """Geometry helpers used across multiple systems."""
 from __future__ import annotations
 import math
-from numba import njit
 
-@njit
 def hexagon_points(radius: float) -> list[tuple[float, float]]:
     return [
         (radius * math.cos(math.radians(60 * i - 30)),
@@ -11,7 +9,7 @@ def hexagon_points(radius: float) -> list[tuple[float, float]]:
         for i in range(6)
     ]
 
-@njit
+
 def line_intersects_circle(
     x1: float, y1: float, x2: float, y2: float,
     cx: float, cy: float, r: float,
@@ -29,7 +27,7 @@ def line_intersects_circle(
     t2 = (-b + disc_sq) / (2 * a)
     return (0 < t1 < 1) or (0 < t2 < 1)
 
-@njit
+
 def _clip(denom: float, numer: float, te: float, tl: float) -> tuple[bool, float, float]:
     if abs(denom) < 1e-12:
         return numer <= 0, te, tl
@@ -41,7 +39,6 @@ def _clip(denom: float, numer: float, te: float, tl: float) -> tuple[bool, float
     return te <= tl, te, tl
 
 
-@njit
 def line_intersects_rect(
     x1: float, y1: float, x2: float, y2: float,
     rx: float, ry: float, rw: float, rh: float,
@@ -63,9 +60,3 @@ def line_intersects_rect(
     if not ok:
         return False
     return te < tl and tl > 0 and te < 1
-
-# compile all the functions above
-hexagon_points(1.0)
-line_intersects_circle(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0)
-_clip(1.0, 1.0, 0.0, 1.0)
-line_intersects_rect(0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0)
