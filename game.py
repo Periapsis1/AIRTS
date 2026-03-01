@@ -14,7 +14,7 @@ from systems.physics import (
     resolve_structure_collisions, clamp_units_to_bounds,
 )
 from systems.spawning import spawn_step
-from systems.selection import click_select, apply_circle_selection
+from systems.selection import click_select, apply_circle_selection, select_all_of_type
 from systems.ai import BaseAI, WanderAI
 from systems.map_generator import BaseMapGenerator, DefaultMapGenerator
 from systems.capturing import capture_step
@@ -30,6 +30,8 @@ from systems.replay import ReplayRecorder
 from systems.stats import GameStats
 from ui.widgets import Slider
 import gui
+
+_DBLCLICK_MS = 400
 
 # Type registry for deserialization dispatch
 _ENTITY_TYPES: dict[str, type] = {
@@ -84,6 +86,8 @@ class Game:
         self.clock = clock or pygame.time.Clock()
         self.running = False
         self.fps = 60
+        self._fps_font = pygame.font.SysFont(None, 22)
+        self._label_font = pygame.font.SysFont(None, 20)
 
         self.entities: list[Entity] = []
         self.laser_flashes: list[LaserFlash] = []
@@ -119,6 +123,10 @@ class Game:
 
         self._rdragging = False
         self._rpath: list[tuple[float, float]] = []
+
+        # Double-click detection
+        self._last_click_time: int = 0
+        self._last_click_pos: tuple[int, int] = (0, 0)
 
         self._speed_slider = Slider(width - 170, 10, 150, "Speed %", 25, 800, 100, 25)
 
@@ -294,12 +302,24 @@ class Game:
                 self._drag_end = event.pos
                 shift = pygame.key.get_mods() & pygame.KMOD_SHIFT
                 sr = self._selection_radius()
+                now = pygame.time.get_ticks()
                 if sr < 5:
-                    click_select(
-                        self.entities,
-                        float(event.pos[0]), float(event.pos[1]),
-                        additive=bool(shift),
-                    )
+                    # Double-click: select all units of the same type
+                    if (now - self._last_click_time < _DBLCLICK_MS
+                            and math.hypot(event.pos[0] - self._last_click_pos[0],
+                                           event.pos[1] - self._last_click_pos[1]) < 10):
+                        select_all_of_type(
+                            self.entities,
+                            float(event.pos[0]), float(event.pos[1]),
+                        )
+                    else:
+                        click_select(
+                            self.entities,
+                            float(event.pos[0]), float(event.pos[1]),
+                            additive=bool(shift),
+                        )
+                    self._last_click_time = now
+                    self._last_click_pos = event.pos
                 else:
                     cx, cy = self._selection_center()
                     apply_circle_selection(
@@ -431,6 +451,16 @@ class Game:
         for lf in self.laser_flashes:
             lf.draw(self.screen)
 
+        # AI / Human name labels above command centers
+        for entity in self.entities:
+            if isinstance(entity, CommandCenter) and entity.alive:
+                ai = self.team_ai.get(entity.team)
+                name = ai.ai_name if ai else "Human"
+                name_surf = self._label_font.render(name, True, (220, 220, 220))
+                nx = int(entity.x) - name_surf.get_width() // 2
+                ny = int(entity.y) - 40
+                self.screen.blit(name_surf, (nx, ny))
+
         if self._dragging:
             sr = self._selection_radius()
             if sr >= 5:
@@ -456,6 +486,11 @@ class Game:
             gui.draw_cc_gui(self.screen, self.entities, self.width, self.height)
 
         self._speed_slider.draw(self.screen)
+
+        # FPS counter
+        fps_val = self.clock.get_fps()
+        fps_surf = self._fps_font.render(f"FPS: {fps_val:.0f}", True, (200, 200, 200))
+        self.screen.blit(fps_surf, (4, 4))
 
         pygame.display.flip()
 

@@ -30,6 +30,10 @@ MACHINE_GUNNER_SYMBOL = (
     (-10, -10), (10, -10), (10, 10), (-10, 10),
 )
 
+SCOUT_SYMBOL = (
+    (0, -12), (8, 4), (-8, 4),
+)
+
 # -- type registry -----------------------------------------------------------
 
 UNIT_TYPES = {
@@ -50,7 +54,7 @@ UNIT_TYPES = {
         "symbol": TANK_SYMBOL, "can_attack": True,
     },
     "sniper": {
-        "hp": 50, "speed": 40, "radius": 5,
+        "hp": 50, "speed": 35, "radius": 5,
         "damage": 30, "range": 150, "cooldown": 6.0,
         "symbol": SNIPER_SYMBOL, "can_attack": True,
     },
@@ -58,5 +62,11 @@ UNIT_TYPES = {
         "hp": 70, "speed": 40, "radius": 5,
         "damage": 1, "range": 50, "cooldown": 0.2,
         "symbol": MACHINE_GUNNER_SYMBOL, "can_attack": True,
+    },
+    "scout": {
+        "hp": 10, "speed": 100, "radius": 4,
+        "damage": 3, "range": 15, "cooldown": 0.5,
+        "symbol": SCOUT_SYMBOL, "can_attack": True,
+        "spawn_count": 3,
     },
 }

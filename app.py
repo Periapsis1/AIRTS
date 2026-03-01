@@ -3,6 +3,7 @@ from __future__ import annotations
 import pygame
 from ui.theme import MENU_WIDTH, MENU_HEIGHT
 from systems.ai import AIRegistry
+from systems.crash_handler import log_crash
 from screens.base import ScreenResult
 from screens.main_menu import MainMenuScreen
 from screens.create_lobby import CreateLobbyScreen
@@ -11,6 +12,7 @@ from screens.unit_overview import UnitOverviewScreen
 from screens.results import ResultsScreen
 from screens.replay_list import ReplayListScreen
 from screens.replay_playback import ReplayPlaybackScreen
+from screens.crash_notice import CrashNoticeScreen
 
 
 class App:
@@ -31,7 +33,14 @@ class App:
     def run(self):
         result = ScreenResult("main_menu")
         while result.next_screen != "quit":
-            result = self._run_screen(result)
+            try:
+                result = self._run_screen(result)
+            except Exception as exc:
+                path = log_crash(exc, context="screen")
+                print(f"[AIRTS] Crash logged to {path}")
+                self._screen = pygame.display.set_mode((MENU_WIDTH, MENU_HEIGHT))
+                result = ScreenResult("crash_notice",
+                                      data={"log_path": path, "context": "screen"})
         pygame.quit()
 
     def _run_screen(self, prev: ScreenResult) -> ScreenResult:
@@ -70,6 +79,11 @@ class App:
             return ResultsScreen(self._screen, self._clock,
                                  winner, human_teams, stats=stats,
                                  replay_filepath=replay_filepath).run()
+
+        elif name == "crash_notice":
+            return CrashNoticeScreen(self._screen, self._clock,
+                                     log_path=data.get("log_path", ""),
+                                     context=data.get("context", "")).run()
 
         else:
             # Unknown or placeholder screens → back to menu
@@ -114,7 +128,15 @@ class App:
             clock=self._clock,
             replay_config=replay_config,
         )
-        result = game.run()
+
+        try:
+            result = game.run()
+        except Exception as exc:
+            path = log_crash(exc, context="game")
+            print(f"[AIRTS] Game crashed — log saved to {path}")
+            self._screen = pygame.display.set_mode((MENU_WIDTH, MENU_HEIGHT))
+            return ScreenResult("crash_notice",
+                                data={"log_path": path, "context": "game"})
 
         # Restore menu display size
         self._screen = pygame.display.set_mode((MENU_WIDTH, MENU_HEIGHT))
@@ -138,7 +160,14 @@ class App:
         # Resize display for replay: top bar + map + bottom bar
         replay_screen = pygame.display.set_mode((mw, TOP_BAR_HEIGHT + mh + BOTTOM_BAR_HEIGHT))
 
-        result = ReplayPlaybackScreen(replay_screen, self._clock, filepath).run()
+        try:
+            result = ReplayPlaybackScreen(replay_screen, self._clock, filepath).run()
+        except Exception as exc:
+            path = log_crash(exc, context="replay")
+            print(f"[AIRTS] Replay crashed — log saved to {path}")
+            self._screen = pygame.display.set_mode((MENU_WIDTH, MENU_HEIGHT))
+            return ScreenResult("crash_notice",
+                                data={"log_path": path, "context": "replay"})
 
         # Restore menu display size
         self._screen = pygame.display.set_mode((MENU_WIDTH, MENU_HEIGHT))

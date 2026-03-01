@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import pygame
 from screens.base import BaseScreen, ScreenResult
+from screens.results import _draw_3d_bar, _ease_out_cubic, _BAR_T1_COLOR, _BAR_T2_COLOR, _BAR_BORDER_T1, _BAR_BORDER_T2, _BAR_HEIGHT, _BAR_PAD_X, _BAR_GAP, _ANIM_MS
 from systems.replay import ReplayReader
 from config.settings import (
     OBSTACLE_OUTLINE, HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT,
@@ -125,6 +126,7 @@ class ReplayPlaybackScreen(BaseScreen):
         # Score Screen overlay state
         self._show_score_screen = False
         self._build_scroll: int = 0
+        self._score_anim_start: int = 0
 
         # Stats HUD state: 0=hidden, 1=show all, 2=single stat with arrows
         self._stat_mode = 0
@@ -269,6 +271,7 @@ class ReplayPlaybackScreen(BaseScreen):
 
                 if self._score_screen_btn.handle_event(event):
                     self._show_score_screen = True
+                    self._score_anim_start = pygame.time.get_ticks()
                     continue
 
                 if self._show_actions_btn.handle_event(event):
@@ -547,19 +550,45 @@ class ReplayPlaybackScreen(BaseScreen):
         dur_surf = sub_font.render(dur_str, True, (160, 160, 180))
         self.screen.blit(dur_surf, (mw - dur_surf.get_width() - 15, 15))
 
-        # Scores
+        # Animated score bars
         if self._stats_data and "final" in self._stats_data:
             final = self._stats_data["final"]
-            score_font = _get_font(SCORE_FONT_SIZE)
             s1 = final.get("1", {}).get("score", 0)
             s2 = final.get("2", {}).get("score", 0)
-            s1_surf = score_font.render(f"T1: {s1:,}", True, SCORE_T1_COLOR)
-            s2_surf = score_font.render(f"T2: {s2:,}", True, SCORE_T2_COLOR)
-            gap = 30
-            total_w = s1_surf.get_width() + gap + s2_surf.get_width()
-            sx = mw // 2 - total_w // 2
-            self.screen.blit(s1_surf, (sx, 38))
-            self.screen.blit(s2_surf, (sx + s1_surf.get_width() + gap, 38))
+            total_score = s1 + s2
+
+            elapsed = pygame.time.get_ticks() - self._score_anim_start
+            progress = _ease_out_cubic(min(1.0, elapsed / _ANIM_MS))
+
+            bar_y = 38
+            bar_area = mw - _BAR_PAD_X * 2 - _BAR_GAP
+            frac1 = s1 / total_score if total_score > 0 else 0.5
+            w1 = int(bar_area * frac1 * progress)
+            w2 = int(bar_area * (1.0 - frac1) * progress)
+
+            r1 = pygame.Rect(_BAR_PAD_X, bar_y, w1, _BAR_HEIGHT)
+            _draw_3d_bar(self.screen, r1, _BAR_T1_COLOR, _BAR_BORDER_T1)
+
+            r2_x = mw - _BAR_PAD_X - w2
+            r2 = pygame.Rect(r2_x, bar_y, w2, _BAR_HEIGHT)
+            _draw_3d_bar(self.screen, r2, _BAR_T2_COLOR, _BAR_BORDER_T2)
+
+            score_font = _get_font(SCORE_FONT_SIZE)
+            s1_surf = score_font.render(f"Team 1: {s1:,}", True, (255, 255, 255))
+            s2_surf = score_font.render(f"Team 2: {s2:,}", True, (255, 255, 255))
+
+            s1_y = bar_y + (_BAR_HEIGHT - s1_surf.get_height()) // 2
+            if w1 > s1_surf.get_width() + 16:
+                self.screen.blit(s1_surf, (_BAR_PAD_X + 10, s1_y))
+            elif progress > 0.05:
+                self.screen.blit(s1_surf, (_BAR_PAD_X + w1 + 8, s1_y))
+
+            s2_y = bar_y + (_BAR_HEIGHT - s2_surf.get_height()) // 2
+            if w2 > s2_surf.get_width() + 16:
+                self.screen.blit(s2_surf,
+                                 (r2_x + w2 - s2_surf.get_width() - 10, s2_y))
+            elif progress > 0.05:
+                self.screen.blit(s2_surf, (r2_x - s2_surf.get_width() - 8, s2_y))
 
         self._stat_tabs.draw(self.screen)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from entities.base import Entity
 from entities.command_center import CommandCenter
+from entities.unit import Unit
 
 
 def entity_in_circle(
@@ -59,6 +60,33 @@ def apply_circle_selection(
         cc.set_selected(True)
     else:  # select the entities inside the circle
         for entity in entities_to_select:
+            entity.set_selected(True)
+
+
+def select_all_of_type(entities: list[Entity], mx: float, my: float):
+    """Double-click: select all units of the same type as the one under cursor."""
+    # Find the unit under the cursor
+    best: Unit | None = None
+    best_dist = float("inf")
+    for entity in entities:
+        if not isinstance(entity, Unit) or not getattr(entity, "selectable", False):
+            continue
+        ex, ey = entity.center()
+        er = entity.collision_radius()
+        d = math.hypot(ex - mx, ey - my)
+        if d <= er and d < best_dist:
+            best_dist = d
+            best = entity
+    if best is None:
+        return
+    _deselect_all(entities)
+    target_type = best.unit_type
+    target_team = best.team
+    for entity in entities:
+        if (isinstance(entity, Unit)
+                and getattr(entity, "selectable", False)
+                and entity.unit_type == target_type
+                and entity.team == target_team):
             entity.set_selected(True)
 
 

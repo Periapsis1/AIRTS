@@ -22,4 +22,5 @@ build/
 *~
 .claude
 replays/
+logs/
 CLAUDE.md

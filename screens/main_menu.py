@@ -63,7 +63,7 @@ class MainMenuScreen(BaseScreen):
         labels = [
             ("Create Lobby", "create_lobby"),
             ("Replays", "replays"),
-            ("Guides", "guides"),
+            ("Learn to Play", "guides"),
             ("Options", "options"),
             ("Exit", "quit"),
         ]

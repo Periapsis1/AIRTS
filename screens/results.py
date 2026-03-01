@@ -26,6 +26,55 @@ _TABS = [
 
 _WHITE = (220, 220, 240)
 
+# Score bar animation
+_BAR_PAD_X = 30
+_BAR_GAP = 4
+_BAR_HEIGHT = 36
+_BAR_Y = 48
+_ANIM_MS = 3000
+_BAR_T1_COLOR = (60, 130, 255)
+_BAR_T2_COLOR = (235, 65, 65)
+_BAR_BORDER_T1 = (90, 160, 255)
+_BAR_BORDER_T2 = (255, 100, 100)
+
+
+def _ease_out_cubic(t: float) -> float:
+    return 1.0 - (1.0 - t) ** 3
+
+
+def _draw_3d_bar(surface: pygame.Surface, rect: pygame.Rect,
+                 base_color: tuple, border_color: tuple):
+    """Draw a filled bar with a vertical gradient for a 3D bevel look."""
+    if rect.w <= 0 or rect.h <= 0:
+        return
+    r, g, b = base_color[:3]
+    # Build a gradient surface: lighter at top, darker at bottom
+    bar = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+    for row in range(rect.h):
+        frac = row / max(1, rect.h - 1)
+        if frac < 0.45:
+            # Highlight zone — blend toward white
+            t = 1.0 - frac / 0.45
+            lr = min(255, r + int(45 * t))
+            lg = min(255, g + int(45 * t))
+            lb = min(255, b + int(45 * t))
+        else:
+            # Shadow zone — blend toward black
+            t = (frac - 0.45) / 0.55
+            lr = max(0, r - int(50 * t))
+            lg = max(0, g - int(50 * t))
+            lb = max(0, b - int(50 * t))
+        bar.fill((lr, lg, lb, 255), (0, row, rect.w, 1))
+    # Mask to rounded shape: draw a rounded rect on a mask surface, then composite
+    mask = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+    pygame.draw.rect(mask, (255, 255, 255, 255), (0, 0, rect.w, rect.h),
+                     border_radius=5)
+    # Apply mask: keep only pixels where the mask is opaque
+    bar.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+    surface.blit(bar, rect.topleft)
+    # Border
+    pygame.draw.rect(surface, border_color, rect, 1, border_radius=5)
+
 
 class ResultsScreen(BaseScreen):
     """Shows game outcome with tabbed stat graphs and build order."""
@@ -53,6 +102,9 @@ class ResultsScreen(BaseScreen):
 
         # Build order scroll state
         self._build_scroll: int = 0
+
+        # Score bar animation start
+        self._anim_start: int = pygame.time.get_ticks()
 
         # Tab bar and graph (only if stats available)
         self._has_stats = stats is not None and "teams" in (stats or {})
@@ -180,21 +232,51 @@ class ResultsScreen(BaseScreen):
         dur_surf = sub_font.render(dur_str, True, (160, 160, 180))
         self.screen.blit(dur_surf, (self.width - dur_surf.get_width() - 15, 15))
 
-        # -- Scores --
+        # -- Animated score bars --
         final = self._stats.get("final", {})
         score1 = final.get("1", {}).get("score", 0)
         score2 = final.get("2", {}).get("score", 0)
+        total = score1 + score2
 
+        elapsed = pygame.time.get_ticks() - self._anim_start
+        progress = _ease_out_cubic(min(1.0, elapsed / _ANIM_MS))
+
+        bar_area = self.width - _BAR_PAD_X * 2 - _BAR_GAP
+        if total > 0:
+            frac1 = score1 / total
+        else:
+            frac1 = 0.5
+        w1 = int(bar_area * frac1 * progress)
+        w2 = int(bar_area * (1.0 - frac1) * progress)
+
+        # Team 1 bar — grows from left
+        r1 = pygame.Rect(_BAR_PAD_X, _BAR_Y, w1, _BAR_HEIGHT)
+        _draw_3d_bar(self.screen, r1, _BAR_T1_COLOR, _BAR_BORDER_T1)
+
+        # Team 2 bar — grows from right
+        r2_x = self.width - _BAR_PAD_X - w2
+        r2 = pygame.Rect(r2_x, _BAR_Y, w2, _BAR_HEIGHT)
+        _draw_3d_bar(self.screen, r2, _BAR_T2_COLOR, _BAR_BORDER_T2)
+
+        # Score text on bars (white)
         score_font = _get_font(SCORE_FONT_SIZE)
-        s1_surf = score_font.render(f"Team 1: {score1:,}", True, SCORE_T1_COLOR)
-        s2_surf = score_font.render(f"Team 2: {score2:,}", True, SCORE_T2_COLOR)
+        s1_surf = score_font.render(f"Team 1: {score1:,}", True, (255, 255, 255))
+        s2_surf = score_font.render(f"Team 2: {score2:,}", True, (255, 255, 255))
 
-        gap = 40
-        total_score_w = s1_surf.get_width() + gap + s2_surf.get_width()
-        score_x = self.width // 2 - total_score_w // 2
-        score_y = 52
-        self.screen.blit(s1_surf, (score_x, score_y))
-        self.screen.blit(s2_surf, (score_x + s1_surf.get_width() + gap, score_y))
+        # Team 1 text left-aligned inside bar (or just right of bar if too narrow)
+        s1_y = _BAR_Y + (_BAR_HEIGHT - s1_surf.get_height()) // 2
+        if w1 > s1_surf.get_width() + 16:
+            self.screen.blit(s1_surf, (_BAR_PAD_X + 10, s1_y))
+        elif progress > 0.05:
+            self.screen.blit(s1_surf, (_BAR_PAD_X + w1 + 8, s1_y))
+
+        # Team 2 text right-aligned inside bar (or just left of bar if too narrow)
+        s2_y = _BAR_Y + (_BAR_HEIGHT - s2_surf.get_height()) // 2
+        if w2 > s2_surf.get_width() + 16:
+            self.screen.blit(s2_surf,
+                             (r2_x + w2 - s2_surf.get_width() - 10, s2_y))
+        elif progress > 0.05:
+            self.screen.blit(s2_surf, (r2_x - s2_surf.get_width() - 8, s2_y))
 
         # -- Tab bar --
         self._tabs.draw(self.screen)

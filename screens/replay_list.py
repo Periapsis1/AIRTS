@@ -1,6 +1,9 @@
 """Replay browser — lists saved replays with Watch / Delete actions."""
 from __future__ import annotations
 from datetime import datetime
+import os
+import subprocess
+import sys
 import pygame
 from screens.base import BaseScreen, ScreenResult
 from systems.replay import ReplayReader
@@ -90,6 +93,9 @@ class ReplayListScreen(BaseScreen):
         self._sb_dragging = False
         self._sb_drag_offset = 0
 
+        # Open Folder button (positioned in _draw)
+        self._open_folder_btn = Button(0, 0, 110, 30, "Open Folder", font_size=18)
+
         self._refresh()
 
     def _refresh(self):
@@ -133,6 +139,8 @@ class ReplayListScreen(BaseScreen):
                     return ScreenResult("main_menu")
                 if self._back.handle_event(event):
                     return ScreenResult("main_menu")
+                if self._open_folder_btn.handle_event(event):
+                    self._open_replays_folder()
 
                 # Per-card Watch/Delete buttons
                 for i, (wb, db) in enumerate(self._card_buttons):
@@ -223,6 +231,17 @@ class ReplayListScreen(BaseScreen):
         frac = max(0.0, min(1.0, frac))
         self._scroll = round(frac * self._max_scroll())
 
+    @staticmethod
+    def _open_replays_folder():
+        folder = os.path.abspath("replays")
+        os.makedirs(folder, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(folder)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", folder])
+        else:
+            subprocess.Popen(["xdg-open", folder])
+
     def _draw(self):
         self.screen.fill(MENU_BG)
         self._back.draw(self.screen)
@@ -231,6 +250,12 @@ class ReplayListScreen(BaseScreen):
         font_h = _get_font(HEADING_FONT_SIZE)
         title = font_h.render("Replays", True, CONTENT_TEXT)
         self.screen.blit(title, (self.width // 2 - title.get_width() // 2, 30))
+
+        # Open Folder button (right-aligned near title)
+        of_x = self.width - _CARD_MARGIN_X - 110
+        of_y = 28
+        self._open_folder_btn.rect = pygame.Rect(of_x, of_y, 110, 30)
+        self._open_folder_btn.draw(self.screen)
 
         font = _get_font(CONTENT_FONT_SIZE)
         small_font = _get_font(CONTENT_FONT_SIZE - 4)
