@@ -151,12 +151,13 @@ class Unit(CircleEntity, Damageable):
         if self.selected:
             pygame.draw.circle(surface, SELECTED_COLOR, (self.x, self.y), self.radius + 2, 1)
 
+        temp = pygame.Surface((int(self.attack_range * 2), int(self.attack_range * 2)), pygame.SRCALPHA)
         if self.unit_type == "medic":
-            pygame.draw.circle(surface, MEDIC_HEAL_COLOR, (int(self.x), int(self.y)),
+            pygame.draw.circle(temp, MEDIC_HEAL_COLOR, (self.heal_range, self.heal_range),
                                int(self.heal_range), 1)
 
-        pygame.draw.circle(surface, RANGE_COLOR, (self.x, self.y), self.attack_range, 1)
-
+        pygame.draw.circle(temp, RANGE_COLOR, (self.attack_range, self.attack_range), int(self.attack_range), 1)
+        surface.blit(temp, (int(self.x) - self.attack_range, int(self.y) - self.attack_range))
         self.draw_health_bar(surface, self.x, self.y, self.radius + HEALTH_BAR_OFFSET)
 
     # -- serialization --------------------------------------------------------

@@ -17,7 +17,7 @@ TEAM2_COLOR = (255, 80, 80)
 PATH_COLOR_TEAM1 = (80, 140, 255, 100)
 PATH_DOT_COLOR = (255, 255, 255, 160)
 
-RANGE_COLOR = (255, 0, 255)
+RANGE_COLOR = (255, 0, 255, 80)
 
 # -- obstacles --------------------------------------------------------------
 OBSTACLE_COLOR = (120, 120, 120)
@@ -38,7 +38,7 @@ UNIT_LASER_COLOR_T1 = (120, 180, 255)
 UNIT_LASER_COLOR_T2 = (255, 120, 120)
 CC_LASER_COLOR_T1 = (180, 220, 255)
 CC_LASER_COLOR_T2 = (255, 180, 180)
-LASER_FLASH_DURATION = 0.15
+LASER_FLASH_DURATION = 1.0
 
 # -- command center ---------------------------------------------------------
 CC_HP = 1000
