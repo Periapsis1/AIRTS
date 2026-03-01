@@ -27,7 +27,7 @@ class MyAI(BaseAI):
                     # Send idle units toward the enemy side
                     bw, _ = self.bounds
                     enemy_x = bw - cc.x
-                    unit.move(enemy_x, cc.y)
+                    self.move_unit(unit, enemy_x, cc.y)
 ```
 
 That's it! The game auto-discovers AI files in `ais/` at startup. Your AI will appear in the Create Lobby screen's dropdown menu.
@@ -76,13 +76,15 @@ if __name__ == "__main__":
 ## AI Lifecycle
 
 1. **`__init__()`** — The game constructs your AI before the world exists. Don't query game state here.
-2. **`_bind(team, game)`** — Called internally by the Game. Gives your AI its team number and a reference to the game. You never call this yourself.
+2. **`_bind(team, game, stats, command_queue)`** — Called internally by the Game. Gives your AI its team number, a reference to the game, stats tracker, and the shared command queue. You never call this yourself.
 3. **`on_start()`** — Called once after the map is generated and all entities are placed, but before the first `step()`. Use this for initial setup (e.g., choosing a starting spawn type).
 4. **`on_step(iteration)`** — Called every frame (60 FPS) with a 0-based iteration counter. This is where all your logic goes.
 
 ## World Query API
 
-All query methods are inherited from `BaseAI`. They return live objects — changes you make to returned units take effect immediately.
+All query methods are inherited from `BaseAI`. They return live objects sorted by entity ID — you can read their properties to make decisions.
+
+**Important:** To issue commands (move, attack, set build), always use the `BaseAI` helper methods (`self.move_unit()`, `self.attack_unit()`, `self.set_build()`). These route through the command system for multiplayer compatibility. Do not call `unit.move()` or set `unit.attack_target` directly.
 
 ### Properties
 
@@ -94,53 +96,60 @@ All query methods are inherited from `BaseAI`. They return live objects — chan
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `get_entities()` | `set[Entity]` | All entities (units, CCs, obstacles, metal spots, extractors) |
-| `get_units()` | `set[Unit]` | All living units on both teams |
-| `get_own_units()` | `set[Unit]` | All living units on your team |
-| `get_enemy_units()` | `set[Unit]` | All living enemy units |
-| `get_obstacles()` | `set[Entity]` | All obstacle entities |
-| `get_metal_spots()` | `set[MetalSpot]` | All metal spots (claimed and unclaimed) |
-| `get_metal_extractors()` | `set[MetalExtractor]` | All living metal extractors (both teams) |
-| `get_own_metal_extractors()` | `set[MetalExtractor]` | Your team's living metal extractors |
+| `get_entities()` | `list[Entity]` | All entities (units, CCs, obstacles, metal spots, extractors) |
+| `get_units()` | `list[Unit]` | All living units on both teams |
+| `get_own_units()` | `list[Unit]` | All living units on your team |
+| `get_enemy_units()` | `list[Unit]` | All living enemy units |
+| `get_obstacles()` | `list[Entity]` | All obstacle entities |
+| `get_metal_spots()` | `list[MetalSpot]` | All metal spots (claimed and unclaimed) |
+| `get_metal_extractors()` | `list[MetalExtractor]` | All living metal extractors (both teams) |
+| `get_own_metal_extractors()` | `list[MetalExtractor]` | Your team's living metal extractors |
 | `get_cc()` | `CommandCenter \| None` | Your team's Command Center (or `None` if destroyed) |
+| `move_unit(unit, x, y)` | `None` | Move a unit to `(x, y)` |
+| `attack_unit(unit, target)` | `None` | Assign a specific attack target to a unit |
 | `set_build(unit_type)` | `None` | Change your CC's spawn type. Raises `ValueError` for unknown types. |
 
 Valid `unit_type` strings for `set_build()`: `"soldier"`, `"medic"`, `"tank"`, `"sniper"`, `"machine_gunner"`.
 
 ## Unit Commands
 
-Commands are called directly on `Unit` objects returned by the query methods.
+Use the `BaseAI` helper methods to issue commands. These route through the serializable command system so they work correctly in multiplayer.
 
-### `unit.move(x, y, stop_dist=0.0)`
+### `self.move_unit(unit, x, y)`
 
-Move toward `(x, y)`. The unit stops when it gets within `stop_dist` pixels of the target. Clears any active `follow` command.
-
-```python
-unit.move(400, 300)           # Move to the center
-unit.move(400, 300, stop_dist=50)  # Stop 50 px away
-```
-
-### `unit.follow(target, distance)`
-
-Follow another entity, maintaining `distance` pixels of separation. The unit moves toward the target when it drifts further than `distance` and stops when close enough. Clears any active `move` command.
+Move a unit toward `(x, y)`. Clears any active `follow` command on that unit.
 
 ```python
-# Follow a tank, staying within 30 px
-unit.follow(tank_unit, distance=30)
+self.move_unit(unit, 400, 300)  # Move to the center
 ```
 
-### `unit.attack(target)`
+### `self.attack_unit(unit, target)`
 
 Assign a specific attack target. The unit will prefer this target when firing (behavior depends on fire mode). Does not cancel movement — the unit can move and attack simultaneously.
 
 ```python
-enemy = min(enemies, key=lambda e: distance(unit, e))
-unit.attack(enemy)
+enemy = min(enemies, key=lambda e: math.hypot(e.x - unit.x, e.y - unit.y))
+self.attack_unit(unit, enemy)
 ```
 
-### `unit.stop()`
+### `self.set_build(unit_type)`
 
-Clear both `move` and `follow` commands. The unit stays in place but continues to fire according to its fire mode.
+Change which unit type your CC will spawn next. Raises `ValueError` for unknown types.
+
+```python
+self.set_build("sniper")
+```
+
+### Direct Unit Methods (read the note below)
+
+Units also have direct methods you can call for operations not covered by the helpers above:
+
+| Method | Description |
+|---|---|
+| `unit.follow(target, distance)` | Follow an entity, maintaining `distance` px of separation |
+| `unit.stop()` | Clear move and follow commands |
+
+> **Note:** `unit.move()`, `unit.attack()`, and setting `cc.spawn_type` directly will still work, but bypass the command system. For multiplayer compatibility, prefer `self.move_unit()`, `self.attack_unit()`, and `self.set_build()`.
 
 ## Fire Modes
 
@@ -242,7 +251,7 @@ unit.fire_mode = HOLD_FIRE     # Never fire
 - **Economy matters.** Each metal extractor gives a 5% multiplicative spawn speed boost. Capturing 3 spots early gives you roughly 15% more units over time.
 - **Composition.** Pure soldiers are fine early, but mixing in medics for sustain, tanks for frontline, and snipers for damage can be decisive.
 - **Use terrain.** Obstacles block LOS. Position snipers behind cover so melee-range enemies can't shoot back.
-- **Focus fire.** Using `unit.attack(target)` to concentrate damage on a single enemy kills it faster than letting units shoot random targets.
+- **Focus fire.** Using `self.attack_unit(unit, target)` to concentrate damage on a single enemy kills it faster than letting units shoot random targets.
 - **Protect your CC.** If the enemy pushes into your base, your CC's healing aura and defensive laser help — but 1000 HP goes fast under sustained fire.
 - **Target fire for snipers.** Set snipers to `TARGET_FIRE` and manually assign high-value targets (enemy medics, damaged units) to maximize their impact.
 
@@ -253,10 +262,12 @@ This AI captures nearby metal spots, then rushes all units at the enemy CC:
 ```python
 import math
 from systems.ai.base import BaseAI
-from entities.unit import TARGET_FIRE
 
 
 class RushAI(BaseAI):
+    ai_id = "rush"
+    ai_name = "Rush AI"
+
     def on_start(self) -> None:
         self.set_build("machine_gunner")
         self._phase = "expand"
@@ -284,7 +295,7 @@ class RushAI(BaseAI):
                 if unclaimed:
                     nearest_spot = min(unclaimed,
                         key=lambda s: math.hypot(s.x - unit.x, s.y - unit.y))
-                    unit.move(nearest_spot.x, nearest_spot.y)
+                    self.move_unit(unit, nearest_spot.x, nearest_spot.y)
         else:
             # Rush the enemy CC area
             bw, bh = self.bounds
@@ -294,13 +305,13 @@ class RushAI(BaseAI):
             for unit in own_units:
                 # Move toward enemy CC
                 if unit.target is None:
-                    unit.move(enemy_cc_x, enemy_cc_y, stop_dist=30)
+                    self.move_unit(unit, enemy_cc_x, enemy_cc_y)
 
                 # Focus fire on the closest enemy
                 if enemies:
                     closest = min(enemies,
                         key=lambda e: math.hypot(e.x - unit.x, e.y - unit.y))
-                    unit.attack(closest)
+                    self.attack_unit(unit, closest)
 
         # Switch to soldiers once we have extractors
         if len(self.get_own_metal_extractors()) >= 2:

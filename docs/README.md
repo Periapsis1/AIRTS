@@ -2,6 +2,8 @@
 
 AIRTS is a real-time strategy game built with Pygame for the BlueOrange AI Jam. Two teams battle for control of the map — each with a Command Center that spawns units, metal spots to capture for economic advantage, and five distinct unit types. The game is designed as a platform for writing AI controllers that compete against humans or other AIs.
 
+All player actions (human and AI) flow through a serializable command system, making the game multiplayer-ready.
+
 ## Reading Guide
 
 | You want to…                        | Read                                      |

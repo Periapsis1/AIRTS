@@ -40,11 +40,15 @@ AIRTS/
     │   ├── base.py             BaseAI abstract class (ai_id, ai_name attributes)
     │   ├── wander.py           WanderAI built-in implementation
     │   └── registry.py         AIRegistry — auto-discovers AIs from ais/ and systems/ai/
+    ├── commands.py             GameCommand + CommandQueue (serializable command layer)
     ├── combat.py               Laser attacks, medic healing, CC aura healing
     ├── physics.py              Collision resolution and bounds clamping
     ├── spawning.py             Unit spawning from Command Centers
     ├── capturing.py            Metal spot capture logic
     ├── selection.py            Click and circle-drag selection
+    ├── replay.py               Replay recording (state snapshots)
+    ├── stats.py                Game statistics tracking
+    ├── crash_handler.py        Crash log handler
     └── map_generator.py        BaseMapGenerator + DefaultMapGenerator
 ```
 
@@ -93,10 +97,10 @@ run() -> {"winner": int, "human_teams": set}
 
 ### `handle_events()`
 
-Processes the Pygame event queue:
+Processes the Pygame event queue. All player actions are routed through the **command system** (`systems/commands.py`) rather than mutating state directly:
 - **Escape / window close** → stop the game.
-- **Left mouse** → selection (click or circle-drag). Shift adds to selection. GUI clicks for CC panel are intercepted first.
-- **Right mouse** → movement path drawing. On release, distributes selected units along the path and sets CC rally points.
+- **Left mouse** → selection (click or circle-drag). Shift adds to selection. GUI clicks for the CC panel enqueue a `set_spawn_type` command.
+- **Right mouse** → movement path drawing. On release, enqueues `move` commands for selected units and `set_rally` commands for selected CCs.
 
 In AI-only mode (no human teams), only quit/escape events are processed.
 
@@ -105,24 +109,42 @@ In AI-only mode (no human teams), only quit/escape events are processed.
 The simulation tick runs systems in this exact order:
 
 ```
-1.  Entity update        for entity in entities: entity.update(dt)
-2.  AI step              for ai in team_ai.values(): ai.on_step(iteration)
-3.  Capture step         capture_step(...)
-4.  Combat step          combat_step(...)
-5.  Medic heal step      medic_heal_step(...)
-6.  CC heal step         cc_heal_step(...)
-7.  Spawn step           spawn_step(...)
-8.  Prune dead           entities = [e for e in entities if e.alive]
-9.  Physics              resolve_unit_collisions, resolve_obstacle_collisions,
+1.  Drain commands       command_queue.drain(iteration) → _apply_command() for each
+2.  Entity update        for entity in entities: entity.update(dt)
+3.  AI step              for ai in team_ai.values(): ai.on_step(iteration)
+4.  Capture step         capture_step(...)
+5.  Combat step          combat_step(...)
+6.  Medic heal step      medic_heal_step(...)
+7.  CC heal step         cc_heal_step(...)
+8.  Spawn step           spawn_step(...)
+9.  Prune dead           entities = [e for e in entities if e.alive]
+10. Physics              resolve_unit_collisions, resolve_obstacle_collisions,
                          resolve_structure_collisions, clamp_units_to_bounds
-10. Laser flash update   laser_flashes = [lf for lf if lf.update(dt)]
-11. Increment iteration
+11. Laser flash update   laser_flashes = [lf for lf if lf.update(dt)]
+12. Increment iteration
 ```
 
 Key implications:
-- AI commands issued in step 2 take effect in the same frame's combat/physics (steps 4–9).
+- Human commands (enqueued between frames during `handle_events`) are applied in step 1, before entity update, so they take effect immediately.
+- AI commands (enqueued during step 3) are applied at step 1 of the *next* tick. This one-tick delay matches the original behavior since `entity.update()` already ran before the AI step.
 - Dead entities are pruned after combat and spawning but before physics. Newly spawned units participate in physics immediately.
 - Physics runs after combat, so units pushed by collisions won't affect the current frame's attack range calculations.
+
+### Command System
+
+All player actions — human and AI — flow through a serializable command layer (`systems/commands.py`). This makes the game multiplayer-ready: commands can be sent over a network and applied identically on both clients.
+
+There are five command types:
+
+| Command | Source | Effect |
+|---|---|---|
+| `move` | Human right-click, `BaseAI.move_unit()` | Sets unit move targets |
+| `attack` | `BaseAI.attack_unit()` | Assigns an attack target |
+| `stop` | Future use | Clears unit movement |
+| `set_rally` | Human right-click on CC | Sets CC rally point |
+| `set_spawn_type` | GUI click, `BaseAI.set_build()` | Changes CC spawn type |
+
+Selection (click, circle-drag, double-click) is local/visual only and does not go through the command system.
 
 ### `render()`
 
@@ -206,10 +228,10 @@ When a `Game` is constructed:
 
 1. `_apply_selectability()` — Marks entities belonging to human teams as selectable.
 2. `_bind_and_start_ais()` — For each entry in `team_ai`:
-   - Calls `ai._bind(team_id, game)` which stores the team number and a reference to the Game instance.
+   - Calls `ai._bind(team_id, game, stats, command_queue)` which stores the team number, a reference to the Game instance, the stats tracker, and the shared `CommandQueue`.
    - Calls `ai.on_start()` for initial setup.
 
-After this, `ai.on_step(iteration)` is called every frame during `step()`.
+After this, `ai.on_step(iteration)` is called every frame during `step()`. All AI actions (`move_unit`, `attack_unit`, `set_build`) enqueue commands to the shared `CommandQueue` rather than mutating state directly.
 
 ## Configuration
 

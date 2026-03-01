@@ -12,6 +12,7 @@ from entities.command_center import CommandCenter
 from entities.metal_spot import MetalSpot
 from entities.metal_extractor import MetalExtractor
 from config.unit_types import UNIT_TYPES
+from systems.commands import GameCommand
 
 
 class BaseAI(ABC):
@@ -33,13 +34,15 @@ class BaseAI(ABC):
         self._team: int = 0
         self._game = None  # set by Game._bind_ai — avoids circular import
         self._stats = None  # set by Game via _bind()
+        self._command_queue = None  # set by Game via _bind()
 
     # -- lifecycle (called by Game) -----------------------------------------
 
-    def _bind(self, team: int, game, stats=None):
+    def _bind(self, team: int, game, stats=None, command_queue=None):
         self._team = team
         self._game = game
         self._stats = stats
+        self._command_queue = command_queue
 
     @abstractmethod
     def on_start(self) -> None:
@@ -122,11 +125,23 @@ class BaseAI(ABC):
             self._stats.record_action(self._team)
 
     def move_unit(self, unit, x: float, y: float):
-        unit.move(x, y)
+        tick = self._game._iteration if self._game else 0
+        self._command_queue.enqueue(GameCommand(
+            type="move",
+            team=self._team,
+            tick=tick,
+            data={"unit_ids": [unit.entity_id], "targets": [(x, y)]},
+        ))
         self._record_action()
 
     def attack_unit(self, unit, target):
-        unit.attack_target = target
+        tick = self._game._iteration if self._game else 0
+        self._command_queue.enqueue(GameCommand(
+            type="attack",
+            team=self._team,
+            tick=tick,
+            data={"unit_id": unit.entity_id, "target_id": target.entity_id},
+        ))
         self._record_action()
 
     # -- build control ------------------------------------------------------
@@ -136,5 +151,11 @@ class BaseAI(ABC):
             raise ValueError(f"Unknown unit type: {unit_type!r}")
         cc = self.get_cc()
         if cc is not None:
-            cc.spawn_type = unit_type
+            tick = self._game._iteration if self._game else 0
+            self._command_queue.enqueue(GameCommand(
+                type="set_spawn_type",
+                team=self._team,
+                tick=tick,
+                data={"team": self._team, "unit_type": unit_type},
+            ))
             self._record_action()

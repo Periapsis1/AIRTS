@@ -27,6 +27,7 @@ from config.settings import (
     FIXED_DT, MAX_FRAME_DT, CC_RADIUS,
 )
 from entities.shapes import RectEntity, CircleEntity, PolygonEntity
+from systems.commands import GameCommand, CommandQueue
 from systems.replay import ReplayRecorder
 from systems.stats import GameStats
 from ui.widgets import Slider
@@ -115,6 +116,8 @@ class Game:
         self._winner = 0  # 0 = undecided, 1 or 2 = that team won
         self._stats = GameStats()
 
+        self._command_queue = CommandQueue()
+
         self._apply_selectability()
         self._bind_and_start_ais()
 
@@ -166,7 +169,8 @@ class Game:
 
     def _bind_and_start_ais(self):
         for team_id, ai in self.team_ai.items():
-            ai._bind(team_id, self, stats=self._stats)
+            ai._bind(team_id, self, stats=self._stats,
+                     command_queue=self._command_queue)
             ai.on_start()
 
     # -- queries ------------------------------------------------------------
@@ -257,23 +261,42 @@ class Game:
         rally = self._rpath[-1]
         for entity in self.entities:
             if isinstance(entity, CommandCenter) and entity.selected:
-                entity.rally_point = rally
-                if entity.team in self.human_teams:
-                    self._stats.record_action(entity.team)
+                team = entity.team
+                if team in self.human_teams:
+                    self._command_queue.enqueue(GameCommand(
+                        type="set_rally",
+                        team=team,
+                        tick=self._iteration,
+                        data={"team": team, "position": list(rally)},
+                    ))
+                    self._stats.record_action(team)
 
     def _assign_path_goals(self):
         selected = [e for e in self.entities if isinstance(e, Unit) and e.selected]
         if not selected or len(self._rpath) < 2:
             if selected and len(self._rpath) == 1:
                 px, py = self._rpath[0]
+                unit_ids = []
+                targets = []
                 for u in selected:
-                    u.move(px, py)
+                    unit_ids.append(u.entity_id)
+                    targets.append((px, py))
                     if u.team in self.human_teams:
                         self._stats.record_action(u.team)
+                if unit_ids:
+                    team = selected[0].team
+                    self._command_queue.enqueue(GameCommand(
+                        type="move",
+                        team=team,
+                        tick=self._iteration,
+                        data={"unit_ids": unit_ids, "targets": targets},
+                    ))
             return
 
         goals = self._resample_path(len(selected))
         assigned: set[int] = set()
+        unit_ids: list[int] = []
+        targets: list[tuple[float, float]] = []
 
         for gx, gy in goals:
             best_idx = -1
@@ -286,10 +309,20 @@ class Game:
                     best_dist = d
                     best_idx = i
             if best_idx >= 0:
-                selected[best_idx].move(gx, gy)
+                unit_ids.append(selected[best_idx].entity_id)
+                targets.append((gx, gy))
                 assigned.add(best_idx)
                 if selected[best_idx].team in self.human_teams:
                     self._stats.record_action(selected[best_idx].team)
+
+        if unit_ids:
+            team = selected[0].team
+            self._command_queue.enqueue(GameCommand(
+                type="move",
+                team=team,
+                tick=self._iteration,
+                data={"unit_ids": unit_ids, "targets": targets},
+            ))
 
     # -- events -------------------------------------------------------------
 
@@ -309,8 +342,19 @@ class Game:
                 continue
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                if gui.handle_gui_click(self.entities, event.pos[0], event.pos[1],
-                                        self.width, self.height):
+                gui_result = gui.handle_gui_click(
+                    self.entities, event.pos[0], event.pos[1],
+                    self.width, self.height,
+                )
+                if gui_result is not None:
+                    cc = gui.get_selected_cc(self.entities)
+                    if cc is not None:
+                        self._command_queue.enqueue(GameCommand(
+                            type="set_spawn_type",
+                            team=cc.team,
+                            tick=self._iteration,
+                            data={"team": cc.team, "unit_type": gui_result},
+                        ))
                     continue
                 self._dragging = True
                 self._drag_start = event.pos
@@ -368,9 +412,49 @@ class Game:
                 self._set_rally_points()
                 self._rpath = []
 
+    # -- command application ------------------------------------------------
+
+    def _apply_command(self, cmd: GameCommand) -> None:
+        """Resolve entity IDs in *cmd* and execute the mutation."""
+        id_map: dict[int, Entity] = {e.entity_id: e for e in self.entities}
+        data = cmd.data
+
+        if cmd.type == "move":
+            for uid, (tx, ty) in zip(data["unit_ids"], data["targets"]):
+                unit = id_map.get(uid)
+                if isinstance(unit, Unit) and unit.alive:
+                    unit.move(tx, ty)
+
+        elif cmd.type == "attack":
+            unit = id_map.get(data["unit_id"])
+            target = id_map.get(data["target_id"])
+            if isinstance(unit, Unit) and unit.alive and target is not None and target.alive:
+                unit.attack_target = target
+
+        elif cmd.type == "stop":
+            for uid in data["unit_ids"]:
+                unit = id_map.get(uid)
+                if isinstance(unit, Unit) and unit.alive:
+                    unit.stop()
+
+        elif cmd.type == "set_rally":
+            pos = tuple(data["position"])
+            for e in self.entities:
+                if isinstance(e, CommandCenter) and e.team == data["team"]:
+                    e.rally_point = pos
+
+        elif cmd.type == "set_spawn_type":
+            for e in self.entities:
+                if isinstance(e, CommandCenter) and e.team == data["team"]:
+                    e.spawn_type = data["unit_type"]
+
     # -- step ---------------------------------------------------------------
 
     def step(self, dt: float):
+        # Drain and apply all pending commands before simulation
+        for cmd in self._command_queue.drain(self._iteration):
+            self._apply_command(cmd)
+
         self._refresh_steer_obstacles()
 
         for entity in self.entities:

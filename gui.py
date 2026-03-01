@@ -182,12 +182,12 @@ def handle_gui_click(
     entities: list[Entity],
     mx: int, my: int,
     width: int, height: int,
-) -> bool:
+) -> str | None:
+    """Return the unit type string clicked, or None if click was outside GUI."""
     cc = get_selected_cc(entities)
     if cc is None:
-        return False
+        return None
     for btn_rect, utype in button_rects(width, height):
         if btn_rect.collidepoint(mx, my):
-            cc.spawn_type = utype
-            return True
-    return False
+            return utype
+    return None
