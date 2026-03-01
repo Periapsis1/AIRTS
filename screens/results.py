@@ -21,6 +21,7 @@ _TABS = [
     ("healing_done", "Healing"),
     ("metal_spots", "Metal"),
     ("apm", "APM"),
+    ("step_ms", "Step ms"),
     ("build_order", "Build"),
 ]
 
@@ -126,8 +127,12 @@ class ResultsScreen(BaseScreen):
         key = self._tabs.value
         if key == "build_order":
             return  # build order tab doesn't use graph
-        t1 = self._stats["teams"].get("1", {}).get(key, [])
-        t2 = self._stats["teams"].get("2", {}).get(key, [])
+        if key == "step_ms":
+            t1 = self._stats.get("step_ms", [])
+            t2 = []
+        else:
+            t1 = self._stats["teams"].get("1", {}).get(key, [])
+            t2 = self._stats["teams"].get("2", {}).get(key, [])
 
         # Build time labels from timestamps
         timestamps = self._stats.get("timestamps", [])

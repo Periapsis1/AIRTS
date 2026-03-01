@@ -8,7 +8,8 @@ from ui.theme import (
     DD_HEIGHT, DD_FONT_SIZE,
 )
 from ui.widgets import (
-    Button, BackButton, Dropdown, Slider, ToggleGroup, TextInput, _get_font,
+    Button, BackButton, Dropdown, Slider, ToggleGroup, TextInput, Checkbox,
+    _get_font,
 )
 
 # Team colour indicators (matching in-game palette)
@@ -68,6 +69,12 @@ class CreateLobbyScreen(BaseScreen):
         self._sl_obs_min = Slider(sl_x, 400, 220, "Obstacles Min", 0, 20, 4, 1)
         self._sl_obs_max = Slider(sl_x, 445, 220, "Obstacles Max", 0, 20, 8, 1)
 
+        # -- Headless checkbox ----------------------------------------------
+        self._headless_cb = Checkbox(
+            sl_x, 490, "Headless (no rendering, max speed)",
+            checked=False, enabled=False,
+        )
+
         # -- Start button ---------------------------------------------------
         self._start_btn = Button(
             cx - BTN_WIDTH // 2, self.height - 80,
@@ -95,11 +102,14 @@ class CreateLobbyScreen(BaseScreen):
                 self._dd_t2.visible = False
                 self._name_input.rect.x = dd_x2
             self._name_input.visible = True
+            self._headless_cb.enabled = False
+            self._headless_cb.checked = False
         else:
             # AI vs AI — both dropdowns, no name input
             self._dd_t1.visible = True
             self._dd_t2.visible = True
             self._name_input.visible = False
+            self._headless_cb.enabled = True
 
     def _swap_sides(self):
         """Exchange the two team configurations."""
@@ -145,6 +155,7 @@ class CreateLobbyScreen(BaseScreen):
                 self._sl_height.handle_event(event)
                 self._sl_obs_min.handle_event(event)
                 self._sl_obs_max.handle_event(event)
+                self._headless_cb.handle_event(event)
 
                 # Enforce obs_min <= obs_max
                 if self._sl_obs_min.value > self._sl_obs_max.value:
@@ -182,6 +193,7 @@ class CreateLobbyScreen(BaseScreen):
             "width": self._sl_width.value,
             "height": self._sl_height.value,
             "obstacle_count": (self._sl_obs_min.value, self._sl_obs_max.value),
+            "headless": self._headless_cb.checked,
         })
 
     # -- rendering ----------------------------------------------------------
@@ -245,6 +257,7 @@ class CreateLobbyScreen(BaseScreen):
         self._sl_height.draw(self.screen)
         self._sl_obs_min.draw(self.screen)
         self._sl_obs_max.draw(self.screen)
+        self._headless_cb.draw(self.screen)
 
         # -- Start button ---------------------------------------------------
         self._start_btn.draw(self.screen)

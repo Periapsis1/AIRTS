@@ -35,7 +35,8 @@ _STAT_TABS = [
     ("cc_health", "CC HP"), ("army_count", "Army"),
     ("units_killed", "Kills"), ("damage_dealt", "Damage"),
     ("healing_done", "Healing"), ("metal_spots", "Metal"),
-    ("apm", "APM"), ("build_order", "Build"),
+    ("apm", "APM"), ("step_ms", "Step ms"),
+    ("build_order", "Build"),
 ]
 
 # Stats shown in the inline comparison dropdown
@@ -154,8 +155,12 @@ class ReplayPlaybackScreen(BaseScreen):
         key = self._stat_tabs.value
         if key == "build_order":
             return  # build order tab doesn't use graph
-        t1 = self._stats_data.get("teams", {}).get("1", {}).get(key, [])
-        t2 = self._stats_data.get("teams", {}).get("2", {}).get(key, [])
+        if key == "step_ms":
+            t1 = self._stats_data.get("step_ms", [])
+            t2 = []
+        else:
+            t1 = self._stats_data.get("teams", {}).get("1", {}).get(key, [])
+            t2 = self._stats_data.get("teams", {}).get("2", {}).get(key, [])
         timestamps = self._stats_data.get("timestamps", [])
         x_labels = []
         for ts in timestamps:

@@ -39,6 +39,8 @@ class GameStats:
         self.teams: dict[int, TeamStats] = {1: TeamStats(), 2: TeamStats()}
         self.timestamps: list[int] = []
         self._finalized = False
+        self._step_times_buf: list[float] = []
+        self.ts_step_ms: list[float] = []
 
     # -- recording helpers (called by systems) --------------------------------
 
@@ -63,6 +65,9 @@ class GameStats:
     def record_action(self, team: int):
         self.teams[team].actions += 1
 
+    def record_step_time(self, ms: float):
+        self._step_times_buf.append(ms)
+
     # -- time-series sampling -------------------------------------------------
 
     def sample_tick(self, tick: int, entities: list):
@@ -75,6 +80,14 @@ class GameStats:
 
         self.timestamps.append(tick)
         elapsed_minutes = max(tick / 3600.0, 1 / 3600.0)  # 60 ticks/sec
+
+        # Average step time for this sample interval
+        if self._step_times_buf:
+            avg = sum(self._step_times_buf) / len(self._step_times_buf)
+            self.ts_step_ms.append(round(avg, 3))
+            self._step_times_buf.clear()
+        else:
+            self.ts_step_ms.append(0.0)
 
         for team_id, ts in self.teams.items():
             # CC health
@@ -181,4 +194,5 @@ class GameStats:
             "teams": teams_data,
             "final": final_data,
             "game_duration_seconds": duration_seconds,
+            "step_ms": self.ts_step_ms,
         }

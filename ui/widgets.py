@@ -11,6 +11,7 @@ from ui.theme import (
     SL_TRACK_COLOR, SL_FILL_COLOR, SL_HANDLE_COLOR, SL_TEXT_COLOR,
     SL_WIDTH, SL_HEIGHT, SL_HANDLE_RADIUS, SL_FONT_SIZE,
     TG_ACTIVE, TG_INACTIVE, TG_BORDER, TG_TEXT, TG_FONT_SIZE,
+    CB_BOX, CB_CHECK, CB_BORDER, CB_DISABLED,
     GRAPH_BG, GRAPH_GRID, GRAPH_AXIS_TEXT, GRAPH_LINE_T1, GRAPH_LINE_T2,
     GRAPH_TITLE_COLOR, GRAPH_FONT_SIZE,
 )
@@ -441,6 +442,57 @@ class ToggleGroup:
             t = font.render(label, True, color)
             surface.blit(t, (r.centerx - t.get_width() // 2,
                              r.centery - t.get_height() // 2))
+
+
+# ---------------------------------------------------------------------------
+# Checkbox
+# ---------------------------------------------------------------------------
+
+class Checkbox:
+    """Small checkbox (18x18) with a text label to the right."""
+
+    _SIZE = 18
+
+    def __init__(self, x: int, y: int, label: str,
+                 checked: bool = False, enabled: bool = True):
+        self.x = x
+        self.y = y
+        self.label = label
+        self.checked = checked
+        self.enabled = enabled
+        self._font = _get_font(SL_FONT_SIZE)
+        label_w = self._font.size(label)[0]
+        self._hit_rect = pygame.Rect(x, y, self._SIZE + 6 + label_w, self._SIZE)
+
+    def handle_event(self, event: pygame.event.Event) -> bool:
+        """Return True if checked state changed."""
+        if not self.enabled:
+            return False
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self._hit_rect.collidepoint(event.pos):
+                self.checked = not self.checked
+                return True
+        return False
+
+    def draw(self, surface: pygame.Surface):
+        box = pygame.Rect(self.x, self.y, self._SIZE, self._SIZE)
+        border = CB_DISABLED if not self.enabled else CB_BORDER
+        fill = CB_BOX if self.enabled else (25, 25, 35)
+        pygame.draw.rect(surface, fill, box, border_radius=3)
+        pygame.draw.rect(surface, border, box, 1, border_radius=3)
+
+        if self.checked:
+            color = CB_DISABLED if not self.enabled else CB_CHECK
+            # Draw a small checkmark
+            cx, cy = box.centerx, box.centery
+            pygame.draw.lines(surface, color, False, [
+                (cx - 4, cy), (cx - 1, cy + 4), (cx + 5, cy - 3),
+            ], 2)
+
+        text_color = (100, 100, 110) if not self.enabled else (200, 200, 220)
+        lbl = self._font.render(self.label, True, text_color)
+        surface.blit(lbl, (self.x + self._SIZE + 6,
+                           self.y + self._SIZE // 2 - lbl.get_height() // 2))
 
 
 # ---------------------------------------------------------------------------

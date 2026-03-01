@@ -2,6 +2,7 @@
 from __future__ import annotations
 import math
 import random
+import time
 from typing import Any
 import pygame
 
@@ -60,6 +61,7 @@ class Game:
         clock: pygame.time.Clock | None = None,
         replay_config: dict | None = None,
         player_name: str = "Human",
+        headless: bool = False,
     ):
         """
         *team_ai* maps team numbers to AI controllers.  Teams **not** present
@@ -89,6 +91,7 @@ class Game:
         self.clock = clock or pygame.time.Clock()
         self.running = False
         self.fps = 60
+        self._headless = headless
         self._player_name = player_name
         self._fps_font = pygame.font.SysFont(None, 22)
         self._label_font = pygame.font.SysFont(None, 20)
@@ -451,6 +454,8 @@ class Game:
     # -- step ---------------------------------------------------------------
 
     def step(self, dt: float):
+        _t0 = time.perf_counter()
+
         # Drain and apply all pending commands before simulation
         for cmd in self._command_queue.drain(self._iteration):
             self._apply_command(cmd)
@@ -511,6 +516,9 @@ class Game:
             losing_teams = {1, 2} - surviving_teams
             for t in losing_teams:
                 self._init_fragments(t)
+
+        _elapsed_ms = (time.perf_counter() - _t0) * 1000.0
+        self._stats.record_step_time(_elapsed_ms)
 
     # -- serialization --------------------------------------------------------
 
@@ -726,38 +734,62 @@ class Game:
     def run(self) -> dict[str, Any]:
         """Run the game loop. Returns a result dict with winner info."""
         self.running = True
-        while self.running:
-            raw_dt = self.clock.tick(self.fps) / 1000.0
-            real_dt = min(raw_dt, MAX_FRAME_DT)
 
-            self.handle_events()
-
-            if self._phase == "warp_in":
-                self._anim_timer += real_dt
-                if self._anim_timer >= 3.0:
-                    self._phase = "playing"
-                self.render()
-
-            elif self._phase == "playing":
-                if self._speed_multiplier <= 0:
-                    sim_dt = FIXED_DT * 100  # unlimited: up to 100 ticks/frame
-                else:
-                    sim_dt = real_dt * self._speed_multiplier
-
-                self._accumulator += sim_dt
-
-                while self._accumulator >= FIXED_DT and self.running:
+        if self._headless:
+            self._phase = "playing"  # skip warp_in
+            headless_font = pygame.font.SysFont(None, 28)
+            while self.running:
+                self.clock.tick(0)  # uncapped
+                self.handle_events()  # pump events for QUIT/ESCAPE
+                for _ in range(200):  # batch 200 ticks per frame
+                    if self._phase != "playing":
+                        break
                     self.step(FIXED_DT)
-                    self._accumulator -= FIXED_DT
+                if self._phase == "explode":
+                    self.running = False  # skip explosion anim
+                # Minimal display: black screen with in-game timer
+                self.screen.fill((0, 0, 0))
+                game_secs = self._iteration / 60.0
+                m, s = divmod(int(game_secs), 60)
+                timer_str = f"Headless  —  {m}:{s:02d}  (tick {self._iteration})"
+                timer_surf = headless_font.render(timer_str, True, (160, 160, 180))
+                tx = self.width // 2 - timer_surf.get_width() // 2
+                ty = self.height // 2 - timer_surf.get_height() // 2
+                self.screen.blit(timer_surf, (tx, ty))
+                pygame.display.flip()
+        else:
+            while self.running:
+                raw_dt = self.clock.tick(self.fps) / 1000.0
+                real_dt = min(raw_dt, MAX_FRAME_DT)
 
-                self.render()
+                self.handle_events()
 
-            elif self._phase == "explode":
-                self._anim_timer += real_dt
-                self._update_fragments(real_dt)
-                if self._anim_timer >= 3.0:
-                    self.running = False
-                self.render()
+                if self._phase == "warp_in":
+                    self._anim_timer += real_dt
+                    if self._anim_timer >= 3.0:
+                        self._phase = "playing"
+                    self.render()
+
+                elif self._phase == "playing":
+                    if self._speed_multiplier <= 0:
+                        sim_dt = FIXED_DT * 100  # unlimited: up to 100 ticks/frame
+                    else:
+                        sim_dt = real_dt * self._speed_multiplier
+
+                    self._accumulator += sim_dt
+
+                    while self._accumulator >= FIXED_DT and self.running:
+                        self.step(FIXED_DT)
+                        self._accumulator -= FIXED_DT
+
+                    self.render()
+
+                elif self._phase == "explode":
+                    self._anim_timer += real_dt
+                    self._update_fragments(real_dt)
+                    if self._anim_timer >= 3.0:
+                        self.running = False
+                    self.render()
 
         stats_data = self._stats.finalize(self._winner, self.entities)
         replay_path = self._replay_recorder.save(self._winner, self.human_teams, stats=stats_data)
