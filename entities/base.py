@@ -8,6 +8,7 @@ from config.settings import (
 
 class Entity:
     def __init__(self, x: float = 0, y: float = 0):
+        self.entity_id: int = 0  # assigned by Game after creation
         self.x = x
         self.y = y
         self.color = DEFAULT_COLOR
@@ -31,6 +32,28 @@ class Entity:
     def center(self) -> tuple[float, float]:
         r = self.get_rect()
         return (r.centerx, r.centery)
+
+    def to_dict(self) -> dict:
+        return {
+            "type": type(self).__name__,
+            "entity_id": self.entity_id,
+            "x": self.x,
+            "y": self.y,
+            "color": list(self.color),
+            "selected": self.selected,
+            "obstacle": self.obstacle,
+            "alive": self.alive,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Entity:
+        e = cls(data["x"], data["y"])
+        e.entity_id = data["entity_id"]
+        e.color = tuple(data["color"])
+        e.selected = data["selected"]
+        e.obstacle = data["obstacle"]
+        e.alive = data["alive"]
+        return e
 
     def set_selected(self, value: bool):
         self.selected = value

@@ -1,5 +1,10 @@
 """Central configuration for colors, physics, combat, and GUI tuning."""
 
+# -- timing / fixed timestep ------------------------------------------------
+TICK_RATE = 60
+FIXED_DT = 1.0 / TICK_RATE
+MAX_FRAME_DT = 0.25
+
 # -- teams / selection ------------------------------------------------------
 SELECTED_COLOR = (0, 255, 100)
 DEFAULT_COLOR = (255, 255, 255)
@@ -89,4 +94,4 @@ GUI_BTN_SELECTED = (60, 200, 120)
 GUI_BTN_HOVER = (60, 60, 80)
 GUI_BTN_NORMAL = (45, 45, 55)
 GUI_TEXT_COLOR = (200, 200, 200)
-GUI_PANEL_HEIGHT = 70
+GUI_PANEL_HEIGHT = 92

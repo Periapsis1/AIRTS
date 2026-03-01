@@ -1,3 +1,4 @@
+from __future__ import annotations
 from config.settings import (
     METAL_SPOT_COLOR, METAL_SPOT_RADIUS, METAL_SPOT_CAPTURE_RATE, METAL_SPOT_CAPTURE_RADIUS, METAL_SPOT_CAPTURE_ARC_WIDTH, METAL_SPOT_CAPTURE_ARC_COLOR_T1, METAL_SPOT_CAPTURE_ARC_COLOR_T2, METAL_SPOT_CAPTURE_RANGE_COLOR,
     TEAM1_COLOR, TEAM2_COLOR,
@@ -63,3 +64,25 @@ class MetalSpot(CircleEntity, Damageable):
             b = start_angle
         rect = pygame.Rect(int(self.x - arc_r), int(self.y - arc_r), int(arc_r * 2), int(arc_r * 2))
         pygame.draw.arc(surface, progress_color, rect, a, b, int(METAL_SPOT_CAPTURE_ARC_WIDTH))
+
+    # -- serialization --------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d.update({
+            "owner": self.owner,
+            "capture_progress": self.capture_progress,
+        })
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> MetalSpot:
+        ms = cls(data["x"], data["y"])
+        ms.entity_id = data["entity_id"]
+        ms.color = tuple(data["color"])
+        ms.selected = data["selected"]
+        ms.obstacle = data["obstacle"]
+        ms.alive = data["alive"]
+        ms.owner = data["owner"]
+        ms.capture_progress = data["capture_progress"]
+        return ms

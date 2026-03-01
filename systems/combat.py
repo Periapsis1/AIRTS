@@ -79,6 +79,7 @@ def combat_step(
     obstacles: list[Entity],
     laser_flashes: list[LaserFlash],
     dt: float,
+    stats=None,
 ):
     combatants: list = units + command_centers + metal_extractors  # type: ignore[operator]
 
@@ -114,7 +115,14 @@ def combat_step(
                         best_target = b
 
         if best_target is not None:
+            was_alive = best_target.alive
             best_target.take_damage(a_dmg)
+            if stats is not None:
+                target_team = best_target.team if hasattr(best_target, "team") else 0
+                if target_team:
+                    stats.record_damage(a_team, target_team, a_dmg)
+                    if was_alive and not best_target.alive:
+                        stats.record_kill(a_team, target_team)
             a.laser_cooldown = a_cd
             lc = (UNIT_LASER_COLOR_T1 if isinstance(a, Unit) and a_team == 1
                   else UNIT_LASER_COLOR_T2 if isinstance(a, Unit)
@@ -126,7 +134,7 @@ def combat_step(
             )
 
 
-def medic_heal_step(units: list[Unit], dt: float):
+def medic_heal_step(units: list[Unit], dt: float, stats=None):
     for medic in units:
         if medic.unit_type != "medic" or not medic.alive:
             continue
@@ -142,13 +150,17 @@ def medic_heal_step(units: list[Unit], dt: float):
                 candidates.append((d, u))
         candidates.sort(key=lambda t: t[0])
         for _, target in candidates[:medic.heal_targets]:
+            old_hp = target.hp
             target.hp = min(target.max_hp, target.hp + heal_amount)
+            if stats is not None:
+                stats.record_healing(medic.team, target.hp - old_hp)
 
 
 def cc_heal_step(
     command_centers: list[CommandCenter],
     units: list[Unit],
     dt: float,
+    stats=None,
 ):
     for cc in command_centers:
         if not cc.alive:
@@ -161,4 +173,7 @@ def cc_heal_step(
                 continue
             d = math.hypot(unit.x - cc.x, unit.y - cc.y)
             if d <= CC_HEAL_RADIUS:
+                old_hp = unit.hp
                 unit.hp = min(unit.max_hp, unit.hp + heal_amount)
+                if stats is not None:
+                    stats.record_healing(cc.team, unit.hp - old_hp)

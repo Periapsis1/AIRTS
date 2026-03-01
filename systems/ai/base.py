@@ -20,17 +20,26 @@ class BaseAI(ABC):
 
     The Game calls ``_bind()`` once, then ``on_start()`` once, then
     ``on_step(iteration)`` every frame.
+
+    Subclasses should set ``ai_id`` (unique slug) and ``ai_name``
+    (human-readable) as class attributes so the AI registry can
+    discover and display them.
     """
+
+    ai_id: str = ""
+    ai_name: str = ""
 
     def __init__(self):
         self._team: int = 0
         self._game = None  # set by Game._bind_ai — avoids circular import
+        self._stats = None  # set by Game via _bind()
 
     # -- lifecycle (called by Game) -----------------------------------------
 
-    def _bind(self, team: int, game):
+    def _bind(self, team: int, game, stats=None):
         self._team = team
         self._game = game
+        self._stats = stats
 
     @abstractmethod
     def on_start(self) -> None:
@@ -52,39 +61,73 @@ class BaseAI(ABC):
     def bounds(self) -> tuple[int, int]:
         return (self._game.width, self._game.height)
 
-    def get_entities(self) -> set[Entity]:
-        return set(self._entities)
+    def get_entities(self) -> list[Entity]:
+        return sorted(
+            [e for e in self._entities],
+            key=lambda e: e.entity_id,
+        )
 
-    def get_units(self) -> set[Unit]:
-        return {e for e in self._entities if isinstance(e, Unit) and e.alive}
+    def get_units(self) -> list[Unit]:
+        return sorted(
+            [e for e in self._entities if isinstance(e, Unit) and e.alive],
+            key=lambda e: e.entity_id,
+        )
 
-    def get_own_units(self) -> set[Unit]:
-        return {e for e in self._entities
-                if isinstance(e, Unit) and e.alive and e.team == self._team}
+    def get_own_units(self) -> list[Unit]:
+        return sorted(
+            [e for e in self._entities if isinstance(e, Unit) and e.alive and e.team == self._team],
+            key=lambda e: e.entity_id,
+        )
 
-    def get_enemy_units(self) -> set[Unit]:
-        return {e for e in self._entities
-                if isinstance(e, Unit) and e.alive and e.team != self._team}
+    def get_enemy_units(self) -> list[Unit]:
+        return sorted(
+            [e for e in self._entities if isinstance(e, Unit) and e.alive and e.team != self._team],
+            key=lambda e: e.entity_id,
+        )
 
-    def get_obstacles(self) -> set[Entity]:
-        return {e for e in self._entities if e.obstacle}
+    def get_obstacles(self) -> list[Entity]:
+        return sorted(
+            [e for e in self._entities if e.obstacle],
+            key=lambda e: e.entity_id,
+        )
 
-    def get_metal_spots(self) -> set[MetalSpot]:
-        return {e for e in self._entities if isinstance(e, MetalSpot)}
+    def get_metal_spots(self) -> list[MetalSpot]:
+        return sorted(
+            [e for e in self._entities if isinstance(e, MetalSpot)],
+            key=lambda e: e.entity_id,
+        )
 
-    def get_metal_extractors(self) -> set[MetalExtractor]:
-        return {e for e in self._entities
-                if isinstance(e, MetalExtractor) and e.alive}
+    def get_metal_extractors(self) -> list[MetalExtractor]:
+        return sorted(
+            [e for e in self._entities if isinstance(e, MetalExtractor) and e.alive],
+            key=lambda e: e.entity_id,
+        )
 
-    def get_own_metal_extractors(self) -> set[MetalExtractor]:
-        return {e for e in self._entities
-                if isinstance(e, MetalExtractor) and e.alive and e.team == self._team}
+    def get_own_metal_extractors(self) -> list[MetalExtractor]:
+        return sorted(
+            [e for e in self._entities if isinstance(e, MetalExtractor) and e.alive and e.team == self._team],
+            key=lambda e: e.entity_id,
+        )
 
     def get_cc(self) -> CommandCenter | None:
         for e in self._entities:
             if isinstance(e, CommandCenter) and e.alive and e.team == self._team:
                 return e
         return None
+
+    # -- action tracking ----------------------------------------------------
+
+    def _record_action(self):
+        if self._stats is not None:
+            self._stats.record_action(self._team)
+
+    def move_unit(self, unit, x: float, y: float):
+        unit.move(x, y)
+        self._record_action()
+
+    def attack_unit(self, unit, target):
+        unit.attack_target = target
+        self._record_action()
 
     # -- build control ------------------------------------------------------
 
@@ -94,3 +137,4 @@ class BaseAI(ABC):
         cc = self.get_cc()
         if cc is not None:
             cc.spawn_type = unit_type
+            self._record_action()

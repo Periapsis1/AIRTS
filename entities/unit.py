@@ -158,3 +158,44 @@ class Unit(CircleEntity, Damageable):
         pygame.draw.circle(surface, RANGE_COLOR, (self.x, self.y), self.attack_range, 1)
 
         self.draw_health_bar(surface, self.x, self.y, self.radius + HEALTH_BAR_OFFSET)
+
+    # -- serialization --------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d.update({
+            "team": self.team,
+            "unit_type": self.unit_type,
+            "hp": self.hp,
+            "laser_cooldown": self.laser_cooldown,
+            "target": list(self.target) if self.target else None,
+            "_stop_dist": self._stop_dist,
+            "fire_mode": self.fire_mode,
+            "selectable": self.selectable,
+            "_bounds": list(self._bounds),
+            "_follow_entity_id": self._follow_entity.entity_id if self._follow_entity else None,
+            "_follow_dist": self._follow_dist,
+            "attack_target_id": self.attack_target.entity_id if self.attack_target else None,
+        })
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Unit:
+        u = cls(data["x"], data["y"], data["team"], data["unit_type"])
+        u.entity_id = data["entity_id"]
+        u.color = tuple(data["color"])
+        u.selected = data["selected"]
+        u.obstacle = data["obstacle"]
+        u.alive = data["alive"]
+        u.hp = data["hp"]
+        u.laser_cooldown = data["laser_cooldown"]
+        u.target = tuple(data["target"]) if data["target"] else None
+        u._stop_dist = data["_stop_dist"]
+        u.fire_mode = data["fire_mode"]
+        u.selectable = data["selectable"]
+        u._bounds = tuple(data["_bounds"])
+        u._follow_dist = data["_follow_dist"]
+        # cross-references resolved later by Game.load_state()
+        u._follow_entity = None
+        u.attack_target = None
+        return u

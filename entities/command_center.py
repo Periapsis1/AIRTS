@@ -109,3 +109,39 @@ class CommandCenter(PolygonEntity, Damageable):
             flag_pts = [(rx, ry - 14), (rx + 8, ry - 10), (rx, ry - 6)]
             pygame.draw.polygon(surface, self._base_color, flag_pts)
             pygame.draw.circle(surface, self._base_color, (int(rx), int(ry)), 3, 1)
+
+    # -- serialization --------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d.update({
+            "team": self.team,
+            "hp": self.hp,
+            "laser_cooldown": self.laser_cooldown,
+            "_spawn_timer": self._spawn_timer,
+            "spawn_type": self.spawn_type,
+            "rally_point": list(self.rally_point) if self.rally_point else None,
+            "selectable": self.selectable,
+            "_bounds": list(self._bounds),
+            "metal_extractor_ids": [me.entity_id for me in self.metal_extractors if me.alive],
+        })
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> CommandCenter:
+        cc = cls(data["x"], data["y"], data["team"])
+        cc.entity_id = data["entity_id"]
+        cc.color = tuple(data["color"])
+        cc.selected = data["selected"]
+        cc.obstacle = data["obstacle"]
+        cc.alive = data["alive"]
+        cc.hp = data["hp"]
+        cc.laser_cooldown = data["laser_cooldown"]
+        cc._spawn_timer = data["_spawn_timer"]
+        cc.spawn_type = data["spawn_type"]
+        cc.rally_point = tuple(data["rally_point"]) if data["rally_point"] else None
+        cc.selectable = data["selectable"]
+        cc._bounds = tuple(data["_bounds"])
+        # cross-references resolved later by Game.load_state()
+        cc.metal_extractors = []
+        return cc

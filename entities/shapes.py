@@ -25,6 +25,22 @@ class RectEntity(Entity):
         if self.obstacle:
             pygame.draw.rect(surface, OBSTACLE_OUTLINE, (self.x, self.y, self.width, self.height), 1)
 
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["width"] = self.width
+        d["height"] = self.height
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> RectEntity:
+        e = cls(data["x"], data["y"], data["width"], data["height"])
+        e.entity_id = data["entity_id"]
+        e.color = tuple(data["color"])
+        e.selected = data["selected"]
+        e.obstacle = data["obstacle"]
+        e.alive = data["alive"]
+        return e
+
 
 class CircleEntity(Entity):
     def __init__(self, x: float = 0, y: float = 0, radius: float = 16):
@@ -46,6 +62,21 @@ class CircleEntity(Entity):
         if self.obstacle:
             pygame.draw.circle(surface, OBSTACLE_OUTLINE, (self.x, self.y), self.radius, 1)
 
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["radius"] = self.radius
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> CircleEntity:
+        e = cls(data["x"], data["y"], data["radius"])
+        e.entity_id = data["entity_id"]
+        e.color = tuple(data["color"])
+        e.selected = data["selected"]
+        e.obstacle = data["obstacle"]
+        e.alive = data["alive"]
+        return e
+
 
 class PolygonEntity(Entity):
     """Entity drawn as an arbitrary closed polygon. Points are relative to (x, y)."""
@@ -64,6 +95,22 @@ class PolygonEntity(Entity):
     def draw(self, surface: pygame.Surface):
         translated = [(self.x + px, self.y + py) for px, py in self.points]
         pygame.draw.polygon(surface, self.color, translated)
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["points"] = [list(p) for p in self.points]
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PolygonEntity:
+        points = [tuple(p) for p in data["points"]]
+        e = cls(data["x"], data["y"], points)
+        e.entity_id = data["entity_id"]
+        e.color = tuple(data["color"])
+        e.selected = data["selected"]
+        e.obstacle = data["obstacle"]
+        e.alive = data["alive"]
+        return e
 
 
 class SpriteEntity(Entity):

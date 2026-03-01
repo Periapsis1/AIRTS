@@ -26,3 +26,21 @@ class LaserFlash:
         temp = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
         pygame.draw.line(temp, c, (self.x1, self.y1), (self.x2, self.y2), self.width)
         surface.blit(temp, (0, 0))
+
+    def to_dict(self) -> dict:
+        return {
+            "x1": self.x1,
+            "y1": self.y1,
+            "x2": self.x2,
+            "y2": self.y2,
+            "color": list(self.color),
+            "ttl": self.ttl,
+            "width": self.width,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> LaserFlash:
+        lf = cls(data["x1"], data["y1"], data["x2"], data["y2"],
+                 tuple(data["color"]), data["width"])
+        lf.ttl = data["ttl"]
+        return lf

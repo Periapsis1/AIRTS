@@ -9,7 +9,7 @@ from config.settings import METAL_SPOT_CAPTURE_RADIUS
 
 import math
 
-def capture_step(entities: list[Entity], command_centers: list[CommandCenter], units: list[Unit], metal_spots: list[MetalSpot], metal_extractors: list[MetalExtractor], dt: float):
+def capture_step(entities: list[Entity], command_centers: list[CommandCenter], units: list[Unit], metal_spots: list[MetalSpot], metal_extractors: list[MetalExtractor], dt: float, stats=None):
     # for each unclaimed metal spot, check the radius, then compute team 1 units - team 2 units in the radius
     for metal_spot in metal_spots:
         if metal_spot.owner is not None:
@@ -30,6 +30,8 @@ def capture_step(entities: list[Entity], command_centers: list[CommandCenter], u
             cc = next((c for c in command_centers if c.team == 1), None)
             if cc is not None:
                 cc.metal_extractors.append(metal_extractor)
+            if stats is not None:
+                stats.record_capture(1)
         elif metal_spot.capture_progress <= -1.0:
             metal_spot.claim(2)
             metal_extractor = MetalExtractor(metal_spot=metal_spot, team=2)
@@ -37,3 +39,5 @@ def capture_step(entities: list[Entity], command_centers: list[CommandCenter], u
             cc = next((c for c in command_centers if c.team == 2), None)
             if cc is not None:
                 cc.metal_extractors.append(metal_extractor)
+            if stats is not None:
+                stats.record_capture(2)
