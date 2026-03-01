@@ -68,8 +68,10 @@ class Damageable:
 
     def take_damage(self, amount: float):
         self.hp = max(0.0, self.hp - amount)
-        if self.hp <= 0:
+        if self.hp <= 0 and self.alive:
             self.alive = False
+            if hasattr(self, "on_destroy"):
+                self.on_destroy()
 
     def draw_health_bar(
         self, surface: pygame.Surface,
