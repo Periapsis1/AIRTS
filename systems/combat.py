@@ -6,7 +6,7 @@ from entities.shapes import CircleEntity, RectEntity
 from entities.unit import Unit, HOLD_FIRE, TARGET_FIRE, FREE_FIRE
 from entities.command_center import CommandCenter
 from entities.laser import LaserFlash
-from core.helpers import line_intersects_circle, line_intersects_rect, angle_diff
+from core.helpers import line_intersects_circle, line_intersects_rect, angle_diff, circle_overlaps_aabb
 from config.settings import (
     CC_HEAL_RADIUS, CC_HEAL_RATE,
 )
@@ -38,6 +38,7 @@ def _pick_unit_target(
     own_idx: int,
     circle_obs, rect_obs,
     grid=None,
+    team_aabb=None,
 ) -> Entity | None:
     """Select a target respecting the unit's fire_mode and attack_target."""
     if a.fire_mode == HOLD_FIRE:
@@ -61,6 +62,13 @@ def _pick_unit_target(
         d = math.hypot(preferred.x - ax, preferred.y - ay)
         if d <= a_range and _in_fov(a, preferred.x, preferred.y) and _has_los(ax, ay, preferred.x, preferred.y, circle_obs, rect_obs):
             return preferred
+
+    # Early-exit: no enemy team units could be within range
+    if team_aabb is not None:
+        enemy_team = 2 if a.team == 1 else 1
+        enemy_bb = team_aabb.get(enemy_team)
+        if enemy_bb is None or not circle_overlaps_aabb(ax, ay, a_range, enemy_bb):
+            return None
 
     best: Entity | None = None
     best_dist_sq = float("inf")
@@ -115,16 +123,21 @@ def combat_step(
     dt: float,
     stats=None,
     grid=None,
+    circle_obs=None,
+    rect_obs=None,
+    team_aabb=None,
 ):
-    # Pre-extract obstacle geometry once — avoids isinstance in inner loops
-    circle_obs = tuple(
-        (obs.x, obs.y, obs.radius)
-        for obs in obstacles if isinstance(obs, CircleEntity)
-    )
-    rect_obs = tuple(
-        (obs.x, obs.y, obs.width, obs.height)
-        for obs in obstacles if isinstance(obs, RectEntity)
-    )
+    # Use pre-extracted obstacle geometry if provided, else extract here
+    if circle_obs is None:
+        circle_obs = tuple(
+            (obs.x, obs.y, obs.radius)
+            for obs in obstacles if isinstance(obs, CircleEntity)
+        )
+    if rect_obs is None:
+        rect_obs = tuple(
+            (obs.x, obs.y, obs.width, obs.height)
+            for obs in obstacles if isinstance(obs, RectEntity)
+        )
 
     combatants = [u for u in units if u.alive]
 
@@ -146,7 +159,7 @@ def combat_step(
         if wpn.hits_only_friendly:
             best_target = _pick_friendly_target(a, ax, ay, a_range, combatants, circle_obs, rect_obs, grid)
         else:
-            best_target = _pick_unit_target(a, ax, ay, a_range, combatants, i, circle_obs, rect_obs, grid)
+            best_target = _pick_unit_target(a, ax, ay, a_range, combatants, i, circle_obs, rect_obs, grid, team_aabb)
 
         if best_target is not None:
             if a_dmg < 0:

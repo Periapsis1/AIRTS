@@ -18,6 +18,20 @@ def hexagon_points(radius: float) -> list[tuple[float, float]]:
     ]
 
 
+def circle_overlaps_aabb(cx: float, cy: float, r: float,
+                         aabb: tuple[float, float, float, float]) -> bool:
+    """Return True if circle (cx, cy, r) overlaps axis-aligned bounding box.
+
+    *aabb* is (min_x, min_y, max_x, max_y).
+    """
+    min_x, min_y, max_x, max_y = aabb
+    nearest_x = max(min_x, min(cx, max_x))
+    nearest_y = max(min_y, min(cy, max_y))
+    dx = cx - nearest_x
+    dy = cy - nearest_y
+    return dx * dx + dy * dy <= r * r
+
+
 def line_intersects_circle(
     x1: float, y1: float, x2: float, y2: float,
     cx: float, cy: float, r: float,

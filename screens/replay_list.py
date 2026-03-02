@@ -4,6 +4,7 @@ from datetime import datetime
 import os
 import subprocess
 import sys
+import threading
 import pygame
 from screens.base import BaseScreen, ScreenResult
 from systems.replay import ReplayReader
@@ -72,6 +73,25 @@ def _format_datetime(iso_ts: str) -> str:
         return dt.strftime("%-m/%d/%Y %-I:%M %p")  # Unix
 
 
+def _team_name(team: int, config: dict, human_teams: list) -> str:
+    """Resolve a team number to a display name."""
+    ai_names = config.get("team_ai_names", {})
+    ai_ids = config.get("team_ai_ids", {})
+    player_name = config.get("player_name", "Player")
+    t_str = str(team)
+    t_int = team
+    if t_int in human_teams:
+        return player_name
+    # Prefer ai_name, fall back to ai_id, then "Team N"
+    name = ai_names.get(t_int) or ai_names.get(t_str)
+    if name:
+        return name
+    name = ai_ids.get(t_int) or ai_ids.get(t_str)
+    if name:
+        return name.replace("_", " ").title()
+    return f"Team {team}"
+
+
 class ReplayListScreen(BaseScreen):
     """Scrollable list of saved replays with Watch and Delete buttons."""
 
@@ -81,6 +101,7 @@ class ReplayListScreen(BaseScreen):
         self._replays: list[dict] = []
         self._selected: int = -1
         self._scroll: int = 0
+        self._loading = True
 
         # Per-card buttons (created dynamically during draw)
         self._card_buttons: list[tuple[Button, Button]] = []
@@ -96,12 +117,24 @@ class ReplayListScreen(BaseScreen):
         # Open Folder button (positioned in _draw)
         self._open_folder_btn = Button(0, 0, 110, 30, "Open Folder", font_size=18)
 
-        self._refresh()
+        self._start_loading()
 
-    def _refresh(self):
-        self._replays = ReplayReader.list_replays()
+    def _start_loading(self):
+        self._replays = []
+        self._loading = True
         self._selected = -1
         self._card_buttons = []
+        self._scroll = 0
+        t = threading.Thread(target=self._load_worker, daemon=True)
+        t.start()
+
+    def _load_worker(self):
+        for meta in ReplayReader.list_replays_iter():
+            self._replays.append(meta)  # GIL makes list.append atomic
+        self._loading = False
+
+    def _refresh(self):
+        self._start_loading()
 
     def _visible_rows(self) -> int:
         return (self.height - _LIST_TOP - 20) // (_CARD_HEIGHT + _CARD_PAD)
@@ -260,8 +293,14 @@ class ReplayListScreen(BaseScreen):
         font = _get_font(CONTENT_FONT_SIZE)
         small_font = _get_font(CONTENT_FONT_SIZE - 4)
 
-        if not self._replays:
-            msg = font.render("No replays found.", True, (140, 140, 160))
+        # Snapshot current count (thread may be appending)
+        replay_count = len(self._replays)
+
+        if replay_count == 0:
+            if self._loading:
+                msg = font.render("Loading replays...", True, (140, 140, 160))
+            else:
+                msg = font.render("No replays found.", True, (140, 140, 160))
             self.screen.blit(msg, (self.width // 2 - msg.get_width() // 2,
                                    self.height // 2))
             self._card_buttons = []
@@ -276,7 +315,7 @@ class ReplayListScreen(BaseScreen):
 
             for vi in range(visible):
                 idx = vi + self._scroll
-                if idx >= len(self._replays):
+                if idx >= replay_count:
                     break
                 r = self._replays[idx]
                 cy = self._card_y(vi)
@@ -303,19 +342,36 @@ class ReplayListScreen(BaseScreen):
                 self.screen.blit(fmt_surf, (text_x + rel_surf.get_width() + 10,
                                             text_y + 2))
 
-                # Second row: duration, winner, map, size
+                # Second row: matchup, duration, winner
                 row2_y = cy + 36
+                config = r.get("config", {})
+                human_teams = r.get("human_teams", [])
+
+                t1_name = _team_name(1, config, human_teams)
+                t2_name = _team_name(2, config, human_teams)
+                matchup = f"{t1_name} vs {t2_name}"
+
                 dur_s = r.get("duration_seconds", 0)
                 dm, ds = divmod(int(dur_s), 60)
-                dur = f"{dm}:{ds:02d}"
+
                 w = r.get("winner", 0)
-                winner = "Draw" if w == -1 else f"Team {w}"
+                if w == -1:
+                    outcome = "Draw"
+                elif w in (1, 2):
+                    outcome = f"{_team_name(w, config, human_teams)} won"
+                else:
+                    outcome = ""
+
                 map_s = f"{r.get('map_width', 0)}x{r.get('map_height', 0)}"
                 size_kb = f"{r.get('file_size', 0) / 1024:.0f} KB"
 
-                detail_parts = [dur, winner, map_s, size_kb]
-                detail_str = "  |  ".join(detail_parts)
-                detail_surf = small_font.render(detail_str, True, (140, 140, 165))
+                parts = [matchup, f"{dm}:{ds:02d}"]
+                if outcome:
+                    parts.append(outcome)
+                parts.extend([map_s, size_kb])
+                detail = "  |  ".join(parts)
+
+                detail_surf = small_font.render(detail, True, (140, 140, 165))
                 self.screen.blit(detail_surf, (text_x, row2_y))
 
                 # Right side: Watch and Delete buttons
@@ -339,6 +395,17 @@ class ReplayListScreen(BaseScreen):
                 new_buttons.append((wb, db))
 
             self._card_buttons = new_buttons
+
+            # Loading indicator below last visible card
+            if self._loading:
+                last_vi = min(visible, replay_count - self._scroll)
+                if last_vi > 0:
+                    loading_y = self._card_y(last_vi) + 4
+                    loading_surf = small_font.render(
+                        "Loading...", True, (100, 100, 130))
+                    self.screen.blit(loading_surf, (
+                        self.width // 2 - loading_surf.get_width() // 2,
+                        loading_y))
 
             # Scrollbar
             geom = self._scrollbar_geometry()

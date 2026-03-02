@@ -81,6 +81,7 @@ class Unit(CircleEntity, Damageable):
         self.fire_mode: str = FREE_FIRE
 
         self.selectable: bool = False
+        self._facing_target: tuple[float, float] | None = None  # set by batch_facing_targets
 
     # -- commands -----------------------------------------------------------
 
@@ -123,32 +124,13 @@ class Unit(CircleEntity, Damageable):
             self._update_movement(dt)
 
     def _update_facing(self, dt: float):
-        # Priority: attack_target > closest enemy in LOS > movement target > hold
+        # Priority: attack_target > batch-computed nearest > movement target > hold
         target_pos = None
         if self.attack_target is not None and self.attack_target.alive:
             target_pos = (self.attack_target.x, self.attack_target.y)
         else:
-            # Medics: look toward nearest hurt ally; others: nearest enemy
-            healer = self.weapon is not None and self.weapon.hits_only_friendly
-            best_dist_sq = float("inf")
-            los_sq = self.line_of_sight * self.line_of_sight
-            grid = self._spatial_grid
-            candidates = grid.query_radius(self.x, self.y, self.line_of_sight) if grid is not None else ()
-            for u in candidates:
-                if u is self or not u.alive:
-                    continue
-                if healer:
-                    if u.team != self.team or u.hp >= u.max_hp:
-                        continue
-                else:
-                    if u.team == self.team:
-                        continue
-                dx = u.x - self.x
-                dy = u.y - self.y
-                d_sq = dx * dx + dy * dy
-                if d_sq <= los_sq and d_sq < best_dist_sq:
-                    best_dist_sq = d_sq
-                    target_pos = (u.x, u.y)
+            # Use pre-computed batch result (set by game.py via batch_facing_targets)
+            target_pos = self._facing_target
             # Fall back to movement target
             if target_pos is None and self.target is not None:
                 target_pos = self.target

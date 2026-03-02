@@ -32,6 +32,9 @@ from systems.commands import GameCommand, CommandQueue
 from systems.replay import ReplayRecorder
 from systems.stats import GameStats
 from core.spatial_grid import SpatialGrid
+from core.helpers import circle_overlaps_aabb
+from core.vectorized import build_obstacle_arrays, batch_obstacle_push
+import numpy as np
 from ui.widgets import Slider
 import gui
 
@@ -151,6 +154,8 @@ class Game:
         self._fog_surface = pygame.Surface((width, height), pygame.SRCALPHA)
         self._fog_border = pygame.Surface((width, height))
         self._fog_border.set_colorkey((0, 0, 0))
+
+        self._physics_cooldown: int = 60  # ticks remaining; handles initial spawn settling
 
         # Cache CC visual data at init (CCs don't move)
         self._cc_data: dict[int, dict] = {}
@@ -468,15 +473,80 @@ class Game:
 
         self._refresh_steer_obstacles()
 
-        # Build spatial grid once per step — shared by all systems
+        # Build spatial grid once per step — shared by all systems.
+        # Single-pass: also build alive_mobile_units, team AABBs, and
+        # team_any_hurt (for healer early-exit).
         _t = _perf()
         grid = self._grid
         grid.clear()
+        alive_mobile_units: list[Unit] = []
+        team_aabb: dict[int, tuple[float, float, float, float]] = {}
+        team_any_hurt: dict[int, bool] = {}
         for e in self.entities:
             if isinstance(e, Unit) and e.alive:
                 grid.insert(e)
+                if not e.is_building:
+                    alive_mobile_units.append(e)
+                    bb = team_aabb.get(e.team)
+                    if bb is None:
+                        team_aabb[e.team] = (e.x, e.y, e.x, e.y)
+                    else:
+                        team_aabb[e.team] = (
+                            min(bb[0], e.x), min(bb[1], e.y),
+                            max(bb[2], e.x), max(bb[3], e.y),
+                        )
+                    if e.hp < e.max_hp:
+                        team_any_hurt[e.team] = True
         Unit._spatial_grid = grid
         self._stats.record_subsystem("grid_build", (_perf() - _t) * 1000)
+
+        # Precompute facing targets using grid (O(N*k), not O(N²))
+        # With team AABB early-exits to skip cross-team queries when far apart
+        _t = _perf()
+        _query = grid.query_radius
+        for e in alive_mobile_units:
+            # Skip units whose facing is determined by their attack_target
+            if e.attack_target is not None and e.attack_target.alive:
+                e._facing_target = None
+                continue
+
+            healer = e.weapon is not None and e.weapon.hits_only_friendly
+            if healer:
+                # Skip if no allies are hurt
+                if not team_any_hurt.get(e.team, False):
+                    e._facing_target = None
+                    continue
+                # Healer targets are same-team — always nearby, run grid query
+            else:
+                # Attacker: check if ANY enemy could be within LOS
+                enemy_team = 2 if e.team == 1 else 1
+                enemy_bb = team_aabb.get(enemy_team)
+                if enemy_bb is None or not circle_overlaps_aabb(e.x, e.y, e.line_of_sight, enemy_bb):
+                    e._facing_target = None
+                    continue
+
+            ux, uy, uteam = e.x, e.y, e.team
+            los = e.line_of_sight
+            los_sq = los * los
+            best_dsq = 1e30
+            target_pos = None
+            for c in _query(ux, uy, los):
+                if c is e or not c.alive:
+                    continue
+                if healer:
+                    if c.team != uteam or c.hp >= c.max_hp:
+                        continue
+                else:
+                    if c.team == uteam:
+                        continue
+                dx = c.x - ux
+                dy = c.y - uy
+                d_sq = dx * dx + dy * dy
+                if d_sq <= los_sq and d_sq < best_dsq:
+                    best_dsq = d_sq
+                    target_pos = (c.x, c.y)
+            e._facing_target = target_pos
+        self._stats.record_subsystem("facing_precompute", (_perf() - _t) * 1000)
 
         _t = _perf()
         for entity in self.entities:
@@ -499,40 +569,73 @@ class Game:
         capture_step(self.entities, ccs, units, self.metal_spots, metal_extractors, dt, stats=self._stats, grid=grid)
         self._stats.record_subsystem("capture", (_perf() - _t) * 1000)
 
+        # Pre-extract obstacle geometry (shared by combat + physics)
+        _obs_circle = tuple(
+            (obs.x, obs.y, obs.radius)
+            for obs in obstacles if isinstance(obs, CircleEntity)
+        )
+        _obs_rect = tuple(
+            (obs.x, obs.y, obs.width, obs.height)
+            for obs in obstacles if isinstance(obs, RectEntity)
+        )
+        circle_obs_np, rect_obs_np = build_obstacle_arrays(_obs_circle, _obs_rect)
+
         _t = _perf()
-        combat_step(units, obstacles, self.laser_flashes, dt, stats=self._stats, grid=grid)
+        combat_step(units, obstacles, self.laser_flashes, dt, stats=self._stats, grid=grid,
+                    circle_obs=_obs_circle, rect_obs=_obs_rect, team_aabb=team_aabb)
         cc_heal_step(ccs, units, dt, stats=self._stats, grid=grid)
         self._stats.record_subsystem("combat", (_perf() - _t) * 1000)
 
+        # Spawn — track entity count to detect new spawns for physics cooldown
+        entity_count_before_spawn = len(self.entities)
         _t = _perf()
         spawn_step(self.entities, ccs, self.human_teams, stats=self._stats, tick=self._iteration)
         self._stats.record_subsystem("spawn", (_perf() - _t) * 1000)
 
+        if len(self.entities) > entity_count_before_spawn:
+            self._physics_cooldown = 60  # 1 second to settle after spawn
+
         self.entities = [e for e in self.entities if e.alive]
         self._assign_entity_ids()
 
+        # Physics cooldown: detect movement to keep physics running
         _t = _perf()
         units = self._get_units()
         mobile_units = [u for u in units if not u.is_building]
-        obstacles = self._get_obstacles()
 
-        # Pre-extract obstacle geometry for physics (no isinstance in inner loop)
-        circle_obs = tuple(
-            (obs.x, obs.y, obs.radius)
-            for obs in obstacles if isinstance(obs, CircleEntity)
-        )
-        rect_obs = tuple(
-            (obs.x, obs.y, obs.width, obs.height)
-            for obs in obstacles if isinstance(obs, RectEntity)
-        )
+        any_moving = False
+        for u in mobile_units:
+            if u.target is not None:
+                any_moving = True
+                break
+        if any_moving:
+            self._physics_cooldown = 10  # keep running 10 ticks after movement stops
 
-        # Rebuild grid after culling dead units for physics
-        grid.clear()
-        for u in units:
-            grid.insert(u)
-        resolve_unit_collisions(units, dt, grid=grid)
-        resolve_obstacle_collisions(mobile_units, circle_obs, rect_obs, dt)
-        clamp_units_to_bounds(units, self.width, self.height)
+        if self._physics_cooldown > 0:
+            self._physics_cooldown -= 1
+
+            # Rebuild grid after culling dead units for physics
+            grid.clear()
+            for u in units:
+                grid.insert(u)
+            resolve_unit_collisions(units, dt, grid=grid)
+
+            # Batch obstacle push
+            if mobile_units:
+                mob_positions = np.column_stack([
+                    np.array([u.x for u in mobile_units], dtype=np.float64),
+                    np.array([u.y for u in mobile_units], dtype=np.float64),
+                ])
+                mob_radii = np.array([u.radius for u in mobile_units], dtype=np.float64)
+                new_pos = batch_obstacle_push(mob_positions, mob_radii, circle_obs_np, rect_obs_np)
+                for i, u in enumerate(mobile_units):
+                    u.x = float(new_pos[i, 0])
+                    u.y = float(new_pos[i, 1])
+
+            clamp_units_to_bounds(units, self.width, self.height)
+        else:
+            # Skip physics — just clamp bounds
+            clamp_units_to_bounds(units, self.width, self.height)
         self._stats.record_subsystem("physics", (_perf() - _t) * 1000)
 
         self.laser_flashes = [lf for lf in self.laser_flashes if lf.update(dt)]

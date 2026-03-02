@@ -16,7 +16,8 @@ AIRTS/
 │   ├── settings.py             All tuning constants (HP, damage, colors, physics)
 │   └── unit_types.py           Data-driven unit type registry
 ├── core/
-│   └── helpers.py              Geometry helpers (hexagon, line-circle/rect intersection)
+│   ├── helpers.py              Geometry helpers (hexagon, line-circle/rect, circle-AABB)
+│   └── vectorized.py           NumPy-accelerated obstacle push
 ├── entities/
 │   ├── base.py                 Entity base class + Damageable mixin
 │   ├── shapes.py               RectEntity, CircleEntity, PolygonEntity, SpriteEntity
@@ -110,25 +111,30 @@ The simulation tick runs systems in this exact order:
 
 ```
 1.  Drain commands       command_queue.drain(iteration) → _apply_command() for each
-2.  Entity update        for entity in entities: entity.update(dt)
-3.  AI step              for ai in team_ai.values(): ai.on_step(iteration)
-4.  Capture step         capture_step(...)
-5.  Combat step          combat_step(...)
-6.  Medic heal step      medic_heal_step(...)
-7.  CC heal step         cc_heal_step(...)
-8.  Spawn step           spawn_step(...)
-9.  Prune dead           entities = [e for e in entities if e.alive]
-10. Physics              resolve_unit_collisions, resolve_obstacle_collisions,
-                         resolve_structure_collisions, clamp_units_to_bounds
-11. Laser flash update   laser_flashes = [lf for lf if lf.update(dt)]
-12. Increment iteration
+2.  Grid build           Insert alive units into spatial grid; also computes
+                         team AABBs, alive_mobile_units list, team_any_hurt flags
+3.  Facing precompute    Pre-compute nearest enemy/heal target per unit (grid queries)
+                         with AABB early-exits to skip cross-team scans
+4.  Entity update        for entity in entities: entity.update(dt)
+5.  Filtering            Build units, ccs, obstacles, metal_extractors lists
+6.  AI step              for ai in team_ai.values(): ai.on_step(iteration)
+7.  Capture step         capture_step(...)
+8.  Combat step          combat_step(...) + cc_heal_step(...)
+                         (uses pre-extracted obstacle tuples + team AABBs)
+9.  Spawn step           spawn_step(...)
+10. Prune dead           entities = [e for e in entities if e.alive]
+11. Physics              resolve_unit_collisions, batch_obstacle_push,
+                         clamp_units_to_bounds (skipped via cooldown when idle)
+12. Laser flash update   laser_flashes = [lf for lf if lf.update(dt)]
+13. Increment iteration
 ```
 
 Key implications:
 - Human commands (enqueued between frames during `handle_events`) are applied in step 1, before entity update, so they take effect immediately.
-- AI commands (enqueued during step 3) are applied at step 1 of the *next* tick. This one-tick delay matches the original behavior since `entity.update()` already ran before the AI step.
+- AI commands (enqueued during step 6) are applied at step 1 of the *next* tick. This one-tick delay matches the original behavior since `entity.update()` already ran before the AI step.
 - Dead entities are pruned after combat and spawning but before physics. Newly spawned units participate in physics immediately.
 - Physics runs after combat, so units pushed by collisions won't affect the current frame's attack range calculations.
+- **Physics cooldown:** Physics is skipped entirely when no units are moving and no recent spawns occurred, reducing idle-tick cost to near zero. A cooldown timer (60 ticks after spawn, 10 ticks after movement stops) ensures settling completes before skipping.
 
 ### Command System
 
@@ -179,18 +185,17 @@ Damageable                      (base.py — mixin: hp, max_hp, take_damage(), d
 
 ### Combat (`systems/combat.py`)
 
-Three functions:
-- **`combat_step()`** — Iterates all units and CCs. Each checks for enemies in range, performs LOS checks against obstacles, and fires if able. Creates `LaserFlash` visuals for each shot. Units respect their `fire_mode`; CCs always target the closest enemy.
-- **`medic_heal_step()`** — Each living medic heals up to `heal_targets` (2) closest wounded allies within `heal_range` (40 px) at `heal_rate * dt` HP per frame.
+Two functions:
+- **`combat_step()`** — Iterates all alive units. Each checks for enemies in range (with team AABB early-exit to skip grid queries when teams are far apart), performs LOS checks against pre-extracted obstacle tuples, and fires if able. Creates `LaserFlash` visuals for each shot. Units respect their `fire_mode`. Medic units use `hits_only_friendly` weapons to heal the closest wounded ally.
 - **`cc_heal_step()`** — Each living CC heals all friendly units within `CC_HEAL_RADIUS` (40 px) at `CC_HEAL_RATE * dt` (5 HP/s).
 
-### Physics (`systems/physics.py`)
+### Physics (`systems/physics.py` + `core/vectorized.py`)
 
-Four functions:
-- **`resolve_unit_collisions()`** — Pushes overlapping units apart.
-- **`resolve_obstacle_collisions()`** — Pushes units out of circle and rect obstacles.
-- **`resolve_structure_collisions()`** — Pushes units out of Command Centers.
+- **`resolve_unit_collisions()`** — Pushes overlapping units apart (uses spatial grid for O(N) pair finding).
+- **`batch_obstacle_push()`** — NumPy-vectorized push of all mobile units out of circle and rect obstacles in a single batch.
 - **`clamp_units_to_bounds()`** — Keeps units within the map boundaries.
+
+Physics runs under a **cooldown system**: it activates for 60 ticks after new units spawn and 10 ticks after any unit movement, then skips entirely (just clamping bounds) when the world is idle.
 
 ### Spawning (`systems/spawning.py`)
 

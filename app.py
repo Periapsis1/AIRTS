@@ -118,6 +118,7 @@ class App:
 
         replay_config = {
             "team_ai_ids": team_ai_ids,
+            "team_ai_names": {t: ai.ai_name for t, ai in team_ai.items()},
             "obstacle_count": list(obs),
             "player_name": player_name,
         }

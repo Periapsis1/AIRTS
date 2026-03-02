@@ -425,11 +425,10 @@ class ReplayReader:
     # -- static helpers -----------------------------------------------------
 
     @staticmethod
-    def list_replays(directory: str = "replays") -> list[dict]:
-        """Scan the replays directory and return metadata for each file."""
-        results: list[dict] = []
+    def list_replays_iter(directory: str = "replays"):
+        """Yield replay metadata dicts one at a time (newest first)."""
         if not os.path.isdir(directory):
-            return results
+            return
 
         for fname in sorted(os.listdir(directory), reverse=True):
             if not fname.endswith(".rtsreplay"):
@@ -438,9 +437,7 @@ class ReplayReader:
             try:
                 with gzip.open(fpath, "rt", encoding="utf-8") as f:
                     raw = f.read(4096)  # read just enough for metadata
-                # Parse enough to get header fields
                 data = json.loads(raw if raw.endswith("}") else raw + "}")
-                # If that fails to parse cleanly, do a full load
             except (json.JSONDecodeError, Exception):
                 try:
                     with gzip.open(fpath, "rt", encoding="utf-8") as f:
@@ -448,7 +445,7 @@ class ReplayReader:
                 except Exception:
                     continue
 
-            results.append({
+            yield {
                 "filepath": fpath,
                 "filename": fname,
                 "timestamp": data.get("timestamp", ""),
@@ -457,8 +454,14 @@ class ReplayReader:
                 "map_width": data.get("map", {}).get("width", 0),
                 "map_height": data.get("map", {}).get("height", 0),
                 "file_size": os.path.getsize(fpath),
-            })
-        return results
+                "config": data.get("config", {}),
+                "human_teams": data.get("human_teams", []),
+            }
+
+    @staticmethod
+    def list_replays(directory: str = "replays") -> list[dict]:
+        """Scan the replays directory and return metadata for each file."""
+        return list(ReplayReader.list_replays_iter(directory))
 
     @staticmethod
     def delete_replay(filepath: str):
