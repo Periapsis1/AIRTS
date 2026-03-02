@@ -14,6 +14,7 @@ from config.settings import (
     METAL_SPOT_CAPTURE_ARC_WIDTH,
     METAL_SPOT_CAPTURE_ARC_COLOR_T1,
     METAL_SPOT_CAPTURE_ARC_COLOR_T2,
+    METAL_EXTRACTOR_SPAWN_BONUS,
 )
 from config.unit_types import UNIT_TYPES
 from ui.widgets import Slider, Button, ToggleGroup, LineGraph, _get_font
@@ -32,9 +33,9 @@ _SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0]
 _LERP_FIELDS = {"x", "y", "rot", "cp", "tx", "ty"}
 
 _STAT_TABS = [
-    ("cc_health", "CC HP"), ("army_count", "Army"),
+    ("cc_health", "CC HP"), ("army_count", "Army Size"),
     ("units_killed", "Kills"), ("damage_dealt", "Damage"),
-    ("healing_done", "Healing"), ("metal_spots", "Metal"),
+    ("healing_done", "Healing"), ("metal_spots", "Build %"),
     ("apm", "APM"), ("step_ms", "Step ms"),
     ("build_order", "Build"),
 ]
@@ -42,11 +43,11 @@ _STAT_TABS = [
 # Stats shown in the inline comparison dropdown
 _DROPDOWN_STATS = [
     ("cc_health", "CC Health"),
-    ("army_count", "Army"),
+    ("army_count", "Army Size"),
     ("units_killed", "Kills"),
     ("damage_dealt", "Damage"),
     ("healing_done", "Healing"),
-    ("metal_spots", "Metal"),
+    ("metal_spots", "Build %"),
     ("apm", "APM"),
 ]
 
@@ -74,6 +75,27 @@ class ReplayPlaybackScreen(BaseScreen):
                  filepath: str):
         super().__init__(screen, clock)
         self._reader = ReplayReader(filepath)
+
+        # Resolve team names from replay config
+        config = self._reader.config
+        human_teams = self._reader.human_teams
+        ai_names = config.get("team_ai_names", {})
+        ai_ids = config.get("team_ai_ids", {})
+        player_name = config.get("player_name", "Player")
+        self._team_names: dict[int, str] = {}
+        for team in [1, 2]:
+            if team in human_teams:
+                self._team_names[team] = player_name
+            else:
+                name = ai_names.get(team) or ai_names.get(str(team))
+                if not name:
+                    name = ai_ids.get(team) or ai_ids.get(str(team))
+                    if name:
+                        name = name.replace("_", " ").title()
+                self._team_names[team] = name or f"Team {team}"
+        self._name1 = self._team_names.get(1, "Team 1")
+        self._name2 = self._team_names.get(2, "Team 2")
+
         self._playing = True
         self._ended = False
         self._speed_idx = 2  # 1.0x
@@ -137,10 +159,10 @@ class ReplayPlaybackScreen(BaseScreen):
         if has_stats:
             tab_w = min(90, (mw - 40) // len(_STAT_TABS) - 2)
             tab_x = (mw - len(_STAT_TABS) * (tab_w + 2)) // 2
-            self._stat_tabs = ToggleGroup(tab_x, 60, _STAT_TABS,
+            self._stat_tabs = ToggleGroup(tab_x, 80, _STAT_TABS,
                                           selected_index=0, btn_w=tab_w, btn_h=28)
             overlay_h = TOP_BAR_HEIGHT + mh + BOTTOM_BAR_HEIGHT
-            self._stat_graph = LineGraph(30, 95, mw - 60, overlay_h - 180,
+            self._stat_graph = LineGraph(30, 115, mw - 60, overlay_h - 200,
                                          color1=GRAPH_LINE_T1, color2=GRAPH_LINE_T2)
             self._stat_close_btn = Button(mw // 2 - 60, overlay_h - 45, 120, 30, "Close")
             self._update_stat_graph()
@@ -161,6 +183,13 @@ class ReplayPlaybackScreen(BaseScreen):
         else:
             t1 = self._stats_data.get("teams", {}).get("1", {}).get(key, [])
             t2 = self._stats_data.get("teams", {}).get("2", {}).get(key, [])
+
+        # Convert metal spots to build % bonus
+        if key == "metal_spots":
+            bonus_pct = METAL_EXTRACTOR_SPAWN_BONUS * 100  # 8
+            t1 = [v * bonus_pct for v in t1]
+            t2 = [v * bonus_pct for v in t2]
+
         timestamps = self._stats_data.get("timestamps", [])
         x_labels = []
         for ts in timestamps:
@@ -169,7 +198,14 @@ class ReplayPlaybackScreen(BaseScreen):
             x_labels.append(f"{m}:{s:02d}")
         tab_dict = dict(self._stat_tabs.options)
         self._stat_graph.title = tab_dict.get(key, key)
-        self._stat_graph.set_data(t1, t2, x_labels)
+
+        # Per-tab formatting
+        self._stat_graph.y_suffix = "%" if key == "metal_spots" else ""
+        self._stat_graph.value_format = "{:.2f}" if key == "step_ms" else None
+        self._stat_graph.y_tick_step = 8.0 if key == "metal_spots" else None
+        self._stat_graph.y_integer_ticks = key in ("army_count", "units_killed")
+
+        self._stat_graph.set_data(t1, t2, x_labels, timestamps=timestamps)
 
     def _is_build_tab(self) -> bool:
         return self._stats_data is not None and self._stat_tabs.value == "build_order"
@@ -488,6 +524,11 @@ class ReplayPlaybackScreen(BaseScreen):
         font = _get_font(14)
         val_font = _get_font(13)
 
+        def _fmt_stat(key, v):
+            if key == "metal_spots":
+                return f"{int(v * METAL_EXTRACTOR_SPAWN_BONUS * 100)}%"
+            return str(int(v))
+
         if self._stat_mode == 1:
             # Show all stats stacked (no background)
             row_h = 22
@@ -501,10 +542,12 @@ class ReplayPlaybackScreen(BaseScreen):
                 bar_w = pw - 76
                 self._draw_comparison_bar(bar_x, ry + 3, bar_w, 8, v1, v2)
 
-                self._draw_stat_text(str(int(v1)), val_font, GRAPH_LINE_T1,
+                v1_str = _fmt_stat(key, v1)
+                v2_str = _fmt_stat(key, v2)
+                self._draw_stat_text(v1_str, val_font, GRAPH_LINE_T1,
                                      bar_x, ry + 12)
-                v2s = val_font.render(str(int(v2)), True, GRAPH_LINE_T2)
-                self._draw_stat_text(str(int(v2)), val_font, GRAPH_LINE_T2,
+                v2s = val_font.render(v2_str, True, GRAPH_LINE_T2)
+                self._draw_stat_text(v2_str, val_font, GRAPH_LINE_T2,
                                      bar_x + bar_w - v2s.get_width(), ry + 12)
 
         elif self._stat_mode == 2:
@@ -521,11 +564,13 @@ class ReplayPlaybackScreen(BaseScreen):
             bar_y = py + 24
             self._draw_comparison_bar(bar_x, bar_y, bar_w, 10, v1, v2)
 
-            v1s = val_font.render(str(int(v1)), True, GRAPH_LINE_T1)
-            v2s = val_font.render(str(int(v2)), True, GRAPH_LINE_T2)
-            self._draw_stat_text(str(int(v1)), val_font, GRAPH_LINE_T1,
+            v1_str = _fmt_stat(key, v1)
+            v2_str = _fmt_stat(key, v2)
+            v1s = val_font.render(v1_str, True, GRAPH_LINE_T1)
+            v2s = val_font.render(v2_str, True, GRAPH_LINE_T2)
+            self._draw_stat_text(v1_str, val_font, GRAPH_LINE_T1,
                                  bar_x, bar_y + 14)
-            self._draw_stat_text(str(int(v2)), val_font, GRAPH_LINE_T2,
+            self._draw_stat_text(v2_str, val_font, GRAPH_LINE_T2,
                                  bar_x + bar_w - v2s.get_width(), bar_y + 14)
 
             # Arrow buttons on sides
@@ -543,7 +588,11 @@ class ReplayPlaybackScreen(BaseScreen):
         # Header
         font = _get_font(STATS_HEADER_FONT_SIZE)
         winner = self._reader.winner
-        title = f"Team {winner} Victory" if winner > 0 else "Draw"
+        if winner > 0:
+            winner_name = self._team_names.get(winner, f"Team {winner}")
+            title = f"{winner_name} Victory"
+        else:
+            title = "Draw"
         title_surf = font.render(title, True, (220, 220, 240))
         self.screen.blit(title_surf, (mw // 2 - title_surf.get_width() // 2, 8))
 
@@ -579,21 +628,17 @@ class ReplayPlaybackScreen(BaseScreen):
             _draw_3d_bar(self.screen, r2, _BAR_T2_COLOR, _BAR_BORDER_T2)
 
             score_font = _get_font(SCORE_FONT_SIZE)
-            s1_surf = score_font.render(f"Team 1: {s1:,}", True, (255, 255, 255))
-            s2_surf = score_font.render(f"Team 2: {s2:,}", True, (255, 255, 255))
+            s1_surf = score_font.render(f"{self._name1}: {s1:,}", True, (255, 255, 255))
+            s2_surf = score_font.render(f"{self._name2}: {s2:,}", True, (255, 255, 255))
 
             s1_y = bar_y + (_BAR_HEIGHT - s1_surf.get_height()) // 2
-            if w1 > s1_surf.get_width() + 16:
+            if progress > 0.05:
                 self.screen.blit(s1_surf, (_BAR_PAD_X + 10, s1_y))
-            elif progress > 0.05:
-                self.screen.blit(s1_surf, (_BAR_PAD_X + w1 + 8, s1_y))
 
             s2_y = bar_y + (_BAR_HEIGHT - s2_surf.get_height()) // 2
-            if w2 > s2_surf.get_width() + 16:
+            if progress > 0.05:
                 self.screen.blit(s2_surf,
-                                 (r2_x + w2 - s2_surf.get_width() - 10, s2_y))
-            elif progress > 0.05:
-                self.screen.blit(s2_surf, (r2_x - s2_surf.get_width() - 8, s2_y))
+                                 (mw - _BAR_PAD_X - s2_surf.get_width() - 10, s2_y))
 
         self._stat_tabs.draw(self.screen)
 
@@ -636,8 +681,8 @@ class ReplayPlaybackScreen(BaseScreen):
         # Column headers
         hdr_y = ay + pad_y - self._build_scroll
         hdr_font = _get_font(16)
-        h1 = hdr_font.render("Team 1", True, GRAPH_LINE_T1)
-        h2 = hdr_font.render("Team 2", True, GRAPH_LINE_T2)
+        h1 = hdr_font.render(self._name1, True, GRAPH_LINE_T1)
+        h2 = hdr_font.render(self._name2, True, GRAPH_LINE_T2)
         self.screen.blit(h1, (ax + pad_x, hdr_y))
         self.screen.blit(h2, (ax + col_w + pad_x, hdr_y))
 

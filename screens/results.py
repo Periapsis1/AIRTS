@@ -11,15 +11,16 @@ from ui.theme import (
 )
 from ui.widgets import Button, ToggleGroup, LineGraph, _get_font
 from config.unit_types import UNIT_TYPES
+from config.settings import METAL_EXTRACTOR_SPAWN_BONUS
 
 # Tab definitions: (value, label)
 _TABS = [
     ("cc_health", "CC HP"),
-    ("army_count", "Army"),
+    ("army_count", "Army Size"),
     ("units_killed", "Kills"),
     ("damage_dealt", "Damage"),
     ("healing_done", "Healing"),
-    ("metal_spots", "Metal"),
+    ("metal_spots", "Build %"),
     ("apm", "APM"),
     ("step_ms", "Step ms"),
     ("build_order", "Build"),
@@ -83,12 +84,16 @@ class ResultsScreen(BaseScreen):
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock,
                  winner: int = 0, human_teams: set[int] | None = None,
                  stats: dict | None = None,
-                 replay_filepath: str | None = None):
+                 replay_filepath: str | None = None,
+                 team_names: dict[int, str] | None = None):
         super().__init__(screen, clock)
         self._winner = winner
         self._human_teams = human_teams or set()
         self._stats = stats  # the full stats dict from GameStats.finalize()
         self._replay_filepath = replay_filepath
+        self._team_names = team_names or {}
+        self._name1 = self._team_names.get(1, "Team 1")
+        self._name2 = self._team_names.get(2, "Team 2")
 
         # Buttons — centered side by side at bottom
         gap = 20
@@ -134,6 +139,12 @@ class ResultsScreen(BaseScreen):
             t1 = self._stats["teams"].get("1", {}).get(key, [])
             t2 = self._stats["teams"].get("2", {}).get(key, [])
 
+        # Convert metal spots to build % bonus
+        if key == "metal_spots":
+            bonus_pct = METAL_EXTRACTOR_SPAWN_BONUS * 100  # 8
+            t1 = [v * bonus_pct for v in t1]
+            t2 = [v * bonus_pct for v in t2]
+
         # Build time labels from timestamps
         timestamps = self._stats.get("timestamps", [])
         x_labels = []
@@ -144,7 +155,14 @@ class ResultsScreen(BaseScreen):
 
         title = dict(_TABS).get(key, key)
         self._graph.title = title
-        self._graph.set_data(t1, t2, x_labels)
+
+        # Per-tab formatting
+        self._graph.y_suffix = "%" if key == "metal_spots" else ""
+        self._graph.value_format = "{:.2f}" if key == "step_ms" else None
+        self._graph.y_tick_step = 8.0 if key == "metal_spots" else None
+        self._graph.y_integer_ticks = key in ("army_count", "units_killed")
+
+        self._graph.set_data(t1, t2, x_labels, timestamps=timestamps)
 
     def _is_build_tab(self) -> bool:
         return self._has_stats and self._tabs.value == "build_order"
@@ -186,16 +204,18 @@ class ResultsScreen(BaseScreen):
         pygame.display.flip()
 
     def _header_text(self) -> str:
-        """Return header string: 'Draw', 'Team X Victory', or 'Team X Defeat'."""
+        """Return header string: 'Draw', '<Name> Victory', or '<Name> Defeat'."""
         if self._winner == -1:
             return "Draw"
+        winner_name = self._team_names.get(self._winner, f"Team {self._winner}")
         if self._winner in self._human_teams:
-            return f"Team {self._winner} Victory"
+            return f"{winner_name} Victory"
         if self._human_teams:
             human_team = next(iter(self._human_teams))
-            return f"Team {human_team} Defeat"
+            human_name = self._team_names.get(human_team, f"Team {human_team}")
+            return f"{human_name} Defeat"
         # AI vs AI
-        return f"Team {self._winner} Victory"
+        return f"{winner_name} Victory"
 
     def _draw_simple_view(self):
         """Fallback when no stats available."""
@@ -209,7 +229,8 @@ class ResultsScreen(BaseScreen):
 
         font_sub = _get_font(24)
         if self._winner > 0:
-            sub = f"Team {self._winner} destroyed the enemy Command Center."
+            winner_name = self._team_names.get(self._winner, f"Team {self._winner}")
+            sub = f"{winner_name} destroyed the enemy Command Center."
         else:
             sub = "Both Command Centers were destroyed."
         sub_surf = font_sub.render(sub, True, (160, 160, 180))
@@ -265,23 +286,19 @@ class ResultsScreen(BaseScreen):
 
         # Score text on bars (white)
         score_font = _get_font(SCORE_FONT_SIZE)
-        s1_surf = score_font.render(f"Team 1: {score1:,}", True, (255, 255, 255))
-        s2_surf = score_font.render(f"Team 2: {score2:,}", True, (255, 255, 255))
+        s1_surf = score_font.render(f"{self._name1}: {score1:,}", True, (255, 255, 255))
+        s2_surf = score_font.render(f"{self._name2}: {score2:,}", True, (255, 255, 255))
 
-        # Team 1 text left-aligned inside bar (or just right of bar if too narrow)
+        # Team 1 text — always left-aligned
         s1_y = _BAR_Y + (_BAR_HEIGHT - s1_surf.get_height()) // 2
-        if w1 > s1_surf.get_width() + 16:
+        if progress > 0.05:
             self.screen.blit(s1_surf, (_BAR_PAD_X + 10, s1_y))
-        elif progress > 0.05:
-            self.screen.blit(s1_surf, (_BAR_PAD_X + w1 + 8, s1_y))
 
-        # Team 2 text right-aligned inside bar (or just left of bar if too narrow)
+        # Team 2 text — always right-aligned
         s2_y = _BAR_Y + (_BAR_HEIGHT - s2_surf.get_height()) // 2
-        if w2 > s2_surf.get_width() + 16:
+        if progress > 0.05:
             self.screen.blit(s2_surf,
-                             (r2_x + w2 - s2_surf.get_width() - 10, s2_y))
-        elif progress > 0.05:
-            self.screen.blit(s2_surf, (r2_x - s2_surf.get_width() - 8, s2_y))
+                             (self.width - _BAR_PAD_X - s2_surf.get_width() - 10, s2_y))
 
         # -- Tab bar --
         self._tabs.draw(self.screen)
@@ -321,8 +338,8 @@ class ResultsScreen(BaseScreen):
         # Column headers
         hdr_y = ay + pad_y - self._build_scroll
         hdr_font = _get_font(16)
-        h1 = hdr_font.render("Team 1", True, GRAPH_LINE_T1)
-        h2 = hdr_font.render("Team 2", True, GRAPH_LINE_T2)
+        h1 = hdr_font.render(self._name1, True, GRAPH_LINE_T1)
+        h2 = hdr_font.render(self._name2, True, GRAPH_LINE_T2)
         self.screen.blit(h1, (ax + pad_x, hdr_y))
         self.screen.blit(h2, (ax + col_w + pad_x, hdr_y))
 

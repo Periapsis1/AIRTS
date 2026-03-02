@@ -516,24 +516,32 @@ class LineGraph:
         self.data1: list[float] = []
         self.data2: list[float] = []
         self.x_labels: list[str] | None = None  # optional time labels
+        self.timestamps: list[int] | None = None  # raw tick values for x-axis
+        self.y_suffix: str = ""  # appended to y-axis labels (e.g. "%")
+        self.y_tick_step: float | None = None  # explicit y-axis step (e.g. 8 for Build %)
+        self.y_integer_ticks: bool = False  # snap y ticks to nice whole numbers
+        self.value_format: str | None = None  # tooltip format (e.g. "{:.2f}")
         self._hover_index: int | None = None
         self._hover_mouse_y: int = 0
 
     def set_data(self, data1: list[float], data2: list[float],
-                 x_labels: list[str] | None = None):
+                 x_labels: list[str] | None = None,
+                 timestamps: list[int] | None = None):
         self.data1 = data1
         self.data2 = data2
         self.x_labels = x_labels
+        self.timestamps = timestamps
 
     def handle_event(self, event: pygame.event.Event) -> bool:
         """Track mouse hover for tooltip. Returns True if hover state changed."""
         if event.type == pygame.MOUSEMOTION:
             mx, my = event.pos
-            # Compute plot area
+            # Compute plot area (must match draw())
+            font = _get_font(GRAPH_FONT_SIZE)
             margin_l = 50
             margin_r = 15
             margin_t = 28 if self.title else 12
-            margin_b = 8
+            margin_b = font.get_height() + 8
             gx = self.rect.x + margin_l
             gy = self.rect.y + margin_t
             gw = self.rect.w - margin_l - margin_r
@@ -554,6 +562,80 @@ class LineGraph:
                 return old is not None
         return False
 
+    def _compute_y_ticks(self, data_max: float) -> list[float]:
+        """Compute y-axis tick values based on configuration."""
+        if self.y_tick_step is not None:
+            # Explicit step (e.g. 8 for Build %)
+            step = self.y_tick_step
+            ticks = []
+            v = 0.0
+            top = data_max + step  # include one step above data max
+            while v <= top:
+                ticks.append(v)
+                v += step
+            return ticks
+
+        if self.y_integer_ticks:
+            # Nice whole-number steps
+            nice_steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+            step = nice_steps[-1]
+            for s in nice_steps:
+                if data_max / s <= 6:
+                    step = s
+                    break
+            ticks = []
+            v = 0
+            top = data_max + step  # include one step above data max
+            while v <= top:
+                ticks.append(float(v))
+                v += step
+            return ticks
+
+        # Default: 5 evenly-spaced ticks with 10% headroom
+        y_max = data_max * 1.1
+        return [y_max * i / 4.0 for i in range(5)]
+
+    def _compute_x_ticks(self, n: int, gw: int, font) -> list[int]:
+        """Return data indices for x-axis tick marks at 30-second intervals."""
+        if not self.timestamps or len(self.timestamps) < 2:
+            # Fallback: evenly spaced
+            count = min(6, n)
+            return [int(i * (n - 1) / max(count - 1, 1)) for i in range(count)]
+
+        max_tick = self.timestamps[-1]
+        game_seconds = max_tick / 60.0
+
+        # Choose interval: smallest multiple of 30s giving <= 10 labels
+        interval_s = 30
+        while game_seconds / interval_s > 10:
+            interval_s *= 2
+
+        interval_ticks = interval_s * 60  # convert to game ticks
+
+        # Minimum pixel gap between labels to avoid overlap
+        min_px_gap = font.size("0:00")[0] + 12
+
+        indices: list[int] = []
+        prev_px = -min_px_gap * 2  # allow first label always
+        t = 0
+        while t <= max_tick:
+            # Find closest index (timestamps are sorted, ~evenly spaced)
+            best_idx = 0
+            best_dist = abs(self.timestamps[0] - t)
+            for i, ts_val in enumerate(self.timestamps):
+                d = abs(ts_val - t)
+                if d < best_dist:
+                    best_dist = d
+                    best_idx = i
+            if best_idx < n:
+                px = int(best_idx * gw / (n - 1))
+                if px - prev_px >= min_px_gap or not indices:
+                    indices.append(best_idx)
+                    prev_px = px
+            t += interval_ticks
+
+        return indices
+
     def draw(self, surface: pygame.Surface):
         x, y, w, h = self.rect.x, self.rect.y, self.rect.w, self.rect.h
         font = _get_font(GRAPH_FONT_SIZE)
@@ -572,7 +654,7 @@ class LineGraph:
         margin_l = 50
         margin_r = 15
         margin_t = 28 if self.title else 12
-        margin_b = 8
+        margin_b = font.get_height() + 8  # room for x-axis labels
 
         gx = x + margin_l
         gy = y + margin_t
@@ -594,39 +676,42 @@ class LineGraph:
         # Compute Y range
         all_vals = self.data1 + self.data2
         y_min = 0.0
-        y_max = max(all_vals) if all_vals else 1.0
-        if y_max <= y_min:
-            y_max = y_min + 1.0
+        data_max = max(all_vals) if all_vals else 1.0
+        if data_max <= y_min:
+            data_max = y_min + 1.0
 
-        # Add 10% headroom
-        y_max *= 1.1
+        # Compute y-axis tick values
+        y_ticks = self._compute_y_ticks(data_max)
+        y_max = y_ticks[-1] if y_ticks else data_max * 1.1
 
-        # Grid lines (4 horizontal)
-        for i in range(5):
-            frac = i / 4.0
+        # Grid lines at computed tick positions
+        for val in y_ticks:
+            frac = (val - y_min) / (y_max - y_min) if y_max > y_min else 0
             ly = gy + gh - int(frac * gh)
             pygame.draw.line(surface, GRAPH_GRID, (gx, ly), (gx + gw, ly), 1)
-            val = y_min + frac * (y_max - y_min)
-            if y_max >= 1000:
-                lbl = f"{val:.0f}"
+            if val == int(val):
+                lbl = f"{int(val)}"
             elif y_max >= 10:
                 lbl = f"{val:.0f}"
             else:
                 lbl = f"{val:.1f}"
+            lbl += self.y_suffix
             ls = font.render(lbl, True, GRAPH_AXIS_TEXT)
             surface.blit(ls, (gx - ls.get_width() - 4, ly - ls.get_height() // 2))
 
-        # X-axis labels (time)
-        num_x_labels = min(6, n)
-        for i in range(num_x_labels):
-            idx = int(i * (n - 1) / max(num_x_labels - 1, 1))
+        # X-axis labels (time) — fixed interval ticks
+        x_tick_indices = self._compute_x_ticks(n, gw, font)
+        for idx in x_tick_indices:
             lx = gx + int(idx * gw / (n - 1))
             if self.x_labels and idx < len(self.x_labels):
                 lbl = self.x_labels[idx]
             else:
                 lbl = str(idx)
             ls = font.render(lbl, True, GRAPH_AXIS_TEXT)
-            surface.blit(ls, (lx - ls.get_width() // 2, gy + gh + 4))
+            text_x = lx - ls.get_width() // 2
+            # Clamp so label stays within graph bounds
+            text_x = max(gx, min(text_x, gx + gw - ls.get_width()))
+            surface.blit(ls, (text_x, gy + gh + 4))
 
         def _data_to_points(data: list[float]) -> list[tuple[int, int]]:
             pts = []
@@ -671,8 +756,16 @@ class LineGraph:
             # Tooltip box
             tip_font = _get_font(GRAPH_FONT_SIZE)
             time_str = self.x_labels[hi] if self.x_labels and hi < len(self.x_labels) else str(hi)
-            t1_str = f"T1: {int(v1)}" if v1 is not None else "T1: -"
-            t2_str = f"T2: {int(v2)}" if v2 is not None else "T2: -"
+
+            def _fmt_val(v):
+                if v is None:
+                    return "-"
+                if self.value_format:
+                    return self.value_format.format(v) + self.y_suffix
+                return f"{int(v)}{self.y_suffix}"
+
+            t1_str = f"T1: {_fmt_val(v1)}"
+            t2_str = f"T2: {_fmt_val(v2)}"
 
             time_s = tip_font.render(time_str, True, (220, 220, 240))
             t1_s = tip_font.render(t1_str, True, self.color1)

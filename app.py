@@ -76,9 +76,11 @@ class App:
             human_teams = data.get("human_teams", set())
             stats = data.get("stats")
             replay_filepath = data.get("replay_filepath")
+            team_names = data.get("team_names", {})
             return ResultsScreen(self._screen, self._clock,
                                  winner, human_teams, stats=stats,
-                                 replay_filepath=replay_filepath).run()
+                                 replay_filepath=replay_filepath,
+                                 team_names=team_names).run()
 
         elif name == "crash_notice":
             return CrashNoticeScreen(self._screen, self._clock,
@@ -152,6 +154,7 @@ class App:
             "human_teams": result.get("human_teams", set()),
             "stats": result.get("stats"),
             "replay_filepath": result.get("replay_filepath"),
+            "team_names": result.get("team_names", {}),
         })
 
     def _run_replay_playback(self, data: dict) -> ScreenResult:

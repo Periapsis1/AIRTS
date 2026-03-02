@@ -1028,11 +1028,17 @@ class Game:
         stats_data = self._stats.finalize(self._winner, self.entities)
         replay_path = self._replay_recorder.save(self._winner, self.human_teams, stats=stats_data)
 
+        team_names = {}
+        for team in [1, 2]:
+            ai = self.team_ai.get(team)
+            team_names[team] = ai.ai_name if ai else self._player_name
+
         result = {
             "winner": self._winner,
             "human_teams": self.human_teams,
             "stats": stats_data,
             "replay_filepath": replay_path,
+            "team_names": team_names,
         }
 
         if self._owns_pygame:
