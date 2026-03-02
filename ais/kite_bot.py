@@ -13,7 +13,8 @@ class KiteBot(BaseAI):
         self._build_idx = 0
         self._last_unit_count = 0
         self._state = "RALLY"
-        self.set_build(BUILD_ORDER[self._build_idx])
+        self._current_build = BUILD_ORDER[0]
+        self.set_build(self._current_build)
 
     def on_step(self, iteration: int) -> None:
         cc = self.get_cc()
@@ -27,7 +28,10 @@ class KiteBot(BaseAI):
         unit_count = len(own)
         if unit_count > self._last_unit_count:
             self._build_idx = (self._build_idx + 1) % len(BUILD_ORDER)
-            self.set_build(BUILD_ORDER[self._build_idx])
+            next_build = BUILD_ORDER[self._build_idx]
+            if next_build != self._current_build:
+                self.set_build(next_build)
+                self._current_build = next_build
         self._last_unit_count = unit_count
 
         snipers = own  # all units are snipers
@@ -48,15 +52,15 @@ class KiteBot(BaseAI):
             if sniper_count < 2 or enemy_near_cc:
                 self._state = "RALLY"
                 for u in own:
-                    u.move(rally[0], rally[1])
+                    self.move_unit(u, rally[0], rally[1])
 
         # --- Execute current state ---
         if self._state == "RALLY":
             for u in own:
-                u.move(rally[0], rally[1])
+                self.move_unit(u, rally[0], rally[1])
             if enemies:
                 for u in snipers:
-                    u.attack_target = self._closest(u, enemies)
+                    self.attack_unit(u, self._closest(u, enemies))
 
         elif self._state == "PUSH":
             for sniper in snipers:
@@ -65,7 +69,7 @@ class KiteBot(BaseAI):
                 self._sniper_kite(sniper, enemies)
 
     def _sniper_kite(self, sniper, enemies):
-        """Snipers independently kite: engage enemies they outrange, stay outside enemy range."""
+        """Cooldown-driven kiting: close in to fire, back off while reloading."""
         sniper_range = sniper.attack_range  # 150
 
         # Prefer enemies we outrange
@@ -76,27 +80,29 @@ class KiteBot(BaseAI):
         dist = hypot(nearest.x - sniper.x, nearest.y - sniper.y)
         enemy_range = nearest.attack_range
 
-        if dist < enemy_range + 10:
-            # Too close — back away from enemy
-            if dist > 0:
-                away_x = sniper.x - (nearest.x - sniper.x) / dist * 30
-                away_y = sniper.y - (nearest.y - sniper.y) / dist * 30
-                sniper.move(away_x, away_y)
-        elif dist > sniper_range:
-            # Too far — move into our attack range
-            sniper.move(nearest.x, nearest.y)
-        else:
-            # In our range but outside theirs — hold and fire
-            if sniper.laser_cooldown > 0:
-                # Kite backward while on cooldown to maintain safe distance
-                if dist > 0:
-                    away_x = sniper.x - (nearest.x - sniper.x) / dist * 15
-                    away_y = sniper.y - (nearest.y - sniper.y) / dist * 15
-                    sniper.move(away_x, away_y)
-            else:
-                sniper.stop()
+        # Desired firing distance: just inside our own range
+        fire_dist = sniper_range - 10  # 140
 
-        sniper.attack_target = nearest
+        self.attack_unit(sniper, nearest)
+
+        if sniper.laser_cooldown <= 0:
+            # Ready to fire — close to firing distance, then hold
+            if dist > sniper_range:
+                # Out of range — approach
+                self.move_unit(sniper, nearest.x, nearest.y)
+            # else: in range — don't move, let combat system fire
+        else:
+            # On cooldown — kite away to stay safe
+            if dist < enemy_range + 15 and dist > 0:
+                # Within enemy threat range — back off aggressively
+                away_x = sniper.x - (nearest.x - sniper.x) / dist * 40
+                away_y = sniper.y - (nearest.y - sniper.y) / dist * 40
+                self.move_unit(sniper, away_x, away_y)
+            elif dist < fire_dist and dist > 0:
+                # Closer than we need to be — drift back
+                away_x = sniper.x - (nearest.x - sniper.x) / dist * 20
+                away_y = sniper.y - (nearest.y - sniper.y) / dist * 20
+                self.move_unit(sniper, away_x, away_y)
 
     def _rally_point(self, cc):
         """60px from CC toward own side (team 1 left, team 2 right)."""
