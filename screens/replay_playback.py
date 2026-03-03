@@ -17,10 +17,10 @@ from config.settings import (
     METAL_EXTRACTOR_SPAWN_BONUS,
     SELECTED_COLOR, SELECTION_FILL_COLOR, SELECTION_RECT_COLOR,
     TEAM1_COLOR, TEAM2_COLOR, RANGE_COLOR, MEDIC_HEAL_COLOR,
-    CC_LASER_RANGE, CC_HEAL_RADIUS,
-    CC_HEAL_COLOR_T1, CC_HEAL_COLOR_T2,
-    CC_HEAL_RING_T1, CC_HEAL_RING_T2,
+    CC_LASER_RANGE,
+    CAMERA_ZOOM_STEP, CAMERA_MAX_ZOOM,
 )
+from core.camera import Camera
 from config.unit_types import UNIT_TYPES
 from ui.widgets import Slider, Button, ToggleGroup, LineGraph, _get_font
 from ui.theme import (
@@ -169,6 +169,12 @@ class ReplayPlaybackScreen(BaseScreen):
         self._fog_border = pygame.Surface((mw, mh))
         self._fog_border.set_colorkey((0, 0, 0))
 
+        # Camera & world surface for zoom/pan
+        self._world_surface = pygame.Surface((mw, mh))
+        self._camera = Camera(mw, mh, mw, mh, max_zoom=CAMERA_MAX_ZOOM)
+        self._mid_dragging = False
+        self._mid_last: tuple[int, int] = (0, 0)
+
         # ── Bottom bar: Play/Pause (left), Scrubber (middle), Speed (right) ──
         self._play_btn = Button(8, bot_y + 12, 45, btn_h, "||",
                                 icon="pause")
@@ -205,6 +211,11 @@ class ReplayPlaybackScreen(BaseScreen):
         # Arrow buttons for single-stat mode
         self._dd_left_btn = Button(0, 0, 22, 22, "<")
         self._dd_right_btn = Button(0, 0, 22, 22, ">")
+
+    def _screen_to_world(self, pos: tuple[int, int]) -> tuple[float, float]:
+        """Convert screen pos to world coords (accounting for top bar offset)."""
+        return self._camera.screen_to_world(
+            float(pos[0]), float(pos[1] - self._gy))
 
     def _update_stat_graph(self):
         if self._stats_data is None:
@@ -375,15 +386,37 @@ class ReplayPlaybackScreen(BaseScreen):
                         self._play_btn.label = ">"
                         self._play_btn.icon = "play"
 
-                # Selection input handling (only in game area)
+                # Zoom/pan in game area
                 mw = self._reader.map_width
                 mh = self._reader.map_height
                 game_rect = pygame.Rect(0, self._gy, mw, mh)
 
+                if event.type == pygame.MOUSEWHEEL:
+                    mx, my = pygame.mouse.get_pos()
+                    if game_rect.collidepoint(mx, my):
+                        vy = my - self._gy  # viewport-relative y
+                        if event.y > 0:
+                            self._camera.zoom_at(mx, vy, CAMERA_ZOOM_STEP)
+                        elif event.y < 0:
+                            self._camera.zoom_at(mx, vy, 1.0 / CAMERA_ZOOM_STEP)
+
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
+                    if game_rect.collidepoint(event.pos):
+                        self._mid_dragging = True
+                        self._mid_last = event.pos
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 2:
+                    self._mid_dragging = False
+                elif event.type == pygame.MOUSEMOTION and self._mid_dragging:
+                    dx = event.pos[0] - self._mid_last[0]
+                    dy = event.pos[1] - self._mid_last[1]
+                    self._camera.pan(dx, dy)
+                    self._mid_last = event.pos
+
+                # Selection input handling (only in game area)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if game_rect.collidepoint(event.pos):
                         self._dragging = True
-                        self._drag_start = event.pos
+                        self._drag_start = event.pos  # screen space for threshold
                         self._drag_end = event.pos
 
                 elif event.type == pygame.MOUSEMOTION and self._dragging:
@@ -398,21 +431,24 @@ class ReplayPlaybackScreen(BaseScreen):
                     entities = self._get_interpolated_entities()
 
                     if drag_r < 5:
-                        # Click or double-click
+                        # Click or double-click — world coords
+                        wx, wy = self._screen_to_world(event.pos)
                         now = pygame.time.get_ticks()
                         lx, ly = self._last_click_pos
                         if (now - self._last_click_time < 400
                                 and math.hypot(mx - lx, my - ly) < 10):
-                            self._select_all_of_type(entities, mx, my - self._gy)
+                            self._select_all_of_type(entities, wx, wy)
                         else:
-                            self._click_select(entities, mx, my - self._gy, additive)
+                            self._click_select(entities, wx, wy, additive)
                         self._last_click_time = now
-                        self._last_click_pos = (mx, my)
+                        self._last_click_pos = (mx, my)  # screen space for distance
                     else:
-                        # Circle select using center and radius of drag
-                        cx = (sx + mx) / 2.0
-                        cy = (sy + my) / 2.0 - self._gy
-                        sr = drag_r / 2.0
+                        # Circle select — convert both endpoints to world
+                        w_sx, w_sy = self._screen_to_world(self._drag_start)
+                        w_ex, w_ey = self._screen_to_world(event.pos)
+                        cx = (w_sx + w_ex) / 2.0
+                        cy = (w_sy + w_ey) / 2.0
+                        sr = math.hypot(w_ex - w_sx, w_ey - w_sy) / 2.0
                         self._circle_select(entities, cx, cy, sr, additive)
 
             if self._show_score_screen:
@@ -440,25 +476,22 @@ class ReplayPlaybackScreen(BaseScreen):
     def _draw(self):
         mw = self._reader.map_width
         mh = self._reader.map_height
-        gy = self._gy  # game area y offset
+        ws = self._world_surface
 
-        # Black game area
-        self.screen.fill((0, 0, 0), (0, gy, mw, mh))
+        # Black game area on world surface
+        ws.fill((0, 0, 0))
 
-        # Clip to game area so entities/health bars don't bleed over bars
-        self.screen.set_clip(pygame.Rect(0, gy, mw, mh))
-
-        # Draw obstacles (static) — offset by top bar
+        # Draw obstacles (static) — no gy offset on world surface
         for obs in self._reader.obstacles:
             c = tuple(obs.get("c", [120, 120, 120]))
             if obs["shape"] == "rect":
-                x, y, w, h = obs["x"], obs["y"] + gy, obs["w"], obs["h"]
-                pygame.draw.rect(self.screen, c, (x, y, w, h))
-                pygame.draw.rect(self.screen, OBSTACLE_OUTLINE, (x, y, w, h), 1)
+                x, y, w, h = obs["x"], obs["y"], obs["w"], obs["h"]
+                pygame.draw.rect(ws, c, (x, y, w, h))
+                pygame.draw.rect(ws, OBSTACLE_OUTLINE, (x, y, w, h), 1)
             elif obs["shape"] == "circle":
-                cx, cy, r = int(obs["x"]), int(obs["y"]) + gy, int(obs["r"])
-                pygame.draw.circle(self.screen, c, (cx, cy), r)
-                pygame.draw.circle(self.screen, OBSTACLE_OUTLINE, (cx, cy), r, 1)
+                cx, cy, r = int(obs["x"]), int(obs["y"]), int(obs["r"])
+                pygame.draw.circle(ws, c, (cx, cy), r)
+                pygame.draw.circle(ws, OBSTACLE_OUTLINE, (cx, cy), r, 1)
 
         entities = self._get_interpolated_entities()
 
@@ -485,9 +518,9 @@ class ReplayPlaybackScreen(BaseScreen):
                 eid = ent.get("id")
                 if eid in self._selected_ids:
                     ex = ent.get("x", 0)
-                    ey = ent.get("y", 0) + gy
+                    ey = ent.get("y", 0)
                     r = CC_RADIUS + 2 if t == "CC" else ent.get("r", 5) + 2
-                    pygame.draw.circle(self.screen, SELECTED_COLOR,
+                    pygame.draw.circle(ws, SELECTED_COLOR,
                                        (int(ex), int(ey)), int(r), 1)
 
         # Draw laser flashes
@@ -497,28 +530,34 @@ class ReplayPlaybackScreen(BaseScreen):
         # Team name labels above command centers
         self._draw_team_labels(entities)
 
-        # Drag selection circle
+        # Drag selection circle (in world space)
         if self._dragging:
             sx, sy = self._drag_start
             ex, ey = self._drag_end
-            cx = (sx + ex) / 2.0
-            cy = (sy + ey) / 2.0
-            r = math.hypot(ex - sx, ey - sy) / 2.0
-            if r >= 5:
+            # Convert screen drag points to world
+            w_sx, w_sy = self._screen_to_world(self._drag_start)
+            w_ex, w_ey = self._screen_to_world(self._drag_end)
+            screen_r = math.hypot(ex - sx, ey - sy) / 2.0
+            if screen_r >= 5:
+                wcx = (w_sx + w_ex) / 2.0
+                wcy = (w_sy + w_ey) / 2.0
+                wr = math.hypot(w_ex - w_sx, w_ey - w_sy) / 2.0
                 self._selection_surface.fill((0, 0, 0, 0))
                 pygame.draw.circle(self._selection_surface, SELECTION_FILL_COLOR,
-                                   (int(cx), int(cy - gy)), int(r))
+                                   (int(wcx), int(wcy)), int(wr))
                 pygame.draw.circle(self._selection_surface, SELECTION_RECT_COLOR,
-                                   (int(cx), int(cy - gy)), int(r), 1)
-                self.screen.blit(self._selection_surface, (0, gy))
+                                   (int(wcx), int(wcy)), int(wr), 1)
+                ws.blit(self._selection_surface, (0, 0))
 
         # Fog of war
         self._draw_fog(entities)
 
-        # Remove clip
-        self.screen.set_clip(None)
+        # Project world surface to screen via camera
+        gy = self._gy
+        self.screen.fill((0, 0, 0), (0, gy, mw, mh))
+        self._camera.apply(ws, self.screen, dest=(0, gy))
 
-        # Re-fill top bar and bottom bar backgrounds (covers any bleed)
+        # Top bar and bottom bar backgrounds
         self.screen.fill((20, 20, 30), (0, 0, mw, TOP_BAR_HEIGHT))
         pygame.draw.line(self.screen, (40, 40, 55), (0, TOP_BAR_HEIGHT - 1),
                          (mw, TOP_BAR_HEIGHT - 1))
@@ -917,29 +956,19 @@ class ReplayPlaybackScreen(BaseScreen):
         is_selected = eid in self._selected_ids
         is_selectable = self._is_selectable(ent)
         if not is_selected and is_selectable:
-            # CC heal ring: also show when selected
             return
 
+        ws = self._world_surface
         ex = ent.get("x", 0)
-        ey = ent.get("y", 0) + self._gy
+        ey = ent.get("y", 0)
         tm = ent.get("tm", 1)
 
-        # CC: show heal radius circle + attack range
+        # CC: show attack range
         if t == "CC":
-            # Heal radius circle
-            heal_r = int(CC_HEAL_RADIUS)
-            heal_color = CC_HEAL_COLOR_T1 if tm == 1 else CC_HEAL_COLOR_T2
-            heal_ring = CC_HEAL_RING_T1 if tm == 1 else CC_HEAL_RING_T2
-            temp = pygame.Surface((heal_r * 2, heal_r * 2), pygame.SRCALPHA)
-            pygame.draw.circle(temp, heal_color, (heal_r, heal_r), heal_r)
-            pygame.draw.circle(temp, heal_ring, (heal_r, heal_r), heal_r, 1)
-            self.screen.blit(temp, (int(ex) - heal_r, int(ey) - heal_r))
-
-            # Attack range circle
             atk_r = int(CC_LASER_RANGE)
             temp2 = pygame.Surface((atk_r * 2, atk_r * 2), pygame.SRCALPHA)
             pygame.draw.circle(temp2, RANGE_COLOR, (atk_r, atk_r), atk_r, 1)
-            self.screen.blit(temp2, (int(ex) - atk_r, int(ey) - atk_r))
+            ws.blit(temp2, (int(ex) - atk_r, int(ey) - atk_r))
             return
 
         # ME: no weapon, skip
@@ -961,7 +990,7 @@ class ReplayPlaybackScreen(BaseScreen):
         if fov >= math.tau - 0.01:
             temp = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
             pygame.draw.circle(temp, color, (r, r), r, 1)
-            self.screen.blit(temp, (int(ex) - r, int(ey) - r))
+            ws.blit(temp, (int(ex) - r, int(ey) - r))
             return
 
         # Polygon arc: center -> arc points -> center
@@ -979,7 +1008,7 @@ class ReplayPlaybackScreen(BaseScreen):
         oy = temp_size // 2 - ey
         shifted = [(px + ox, py + oy) for px, py in points]
         pygame.draw.lines(temp, color, False, shifted, 1)
-        self.screen.blit(temp, (ex - temp_size // 2, ey - temp_size // 2))
+        ws.blit(temp, (ex - temp_size // 2, ey - temp_size // 2))
 
     # -- fog of war ---------------------------------------------------------
 
@@ -989,8 +1018,6 @@ class ReplayPlaybackScreen(BaseScreen):
             return
 
         FOG_ALPHA = 200
-        mw = self._reader.map_width
-        mh = self._reader.map_height
         self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
 
         # Collect LOS circles from the viewed team's entities
@@ -1016,7 +1043,8 @@ class ReplayPlaybackScreen(BaseScreen):
             self._fog_surface.blit(cutout, (ex - r, ey - r),
                                    special_flags=pygame.BLEND_RGBA_SUB)
 
-        self.screen.blit(self._fog_surface, (0, self._gy))
+        ws = self._world_surface
+        ws.blit(self._fog_surface, (0, 0))
 
         # Border at the fog edge
         self._fog_border.fill((0, 0, 0))
@@ -1024,13 +1052,14 @@ class ReplayPlaybackScreen(BaseScreen):
             pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)
         for ex, ey, r in los_circles:
             pygame.draw.circle(self._fog_border, (0, 0, 0), (ex, ey), max(r - 1, 0))
-        self.screen.blit(self._fog_border, (0, self._gy))
+        ws.blit(self._fog_border, (0, 0))
 
     # -- team name labels ---------------------------------------------------
 
     def _draw_team_labels(self, entities: list[dict]):
         """Draw player/AI name labels above command centers."""
         font = _get_font(20)
+        ws = self._world_surface
         for ent in entities:
             if ent.get("t") != "CC":
                 continue
@@ -1039,15 +1068,16 @@ class ReplayPlaybackScreen(BaseScreen):
             team_color = TEAM1_COLOR if tm == 1 else TEAM2_COLOR
             name_surf = font.render(name, True, team_color)
             nx = int(ent.get("x", 0)) - name_surf.get_width() // 2
-            ny = int(ent.get("y", 0)) + self._gy - 40
-            self.screen.blit(name_surf, (nx, ny))
+            ny = int(ent.get("y", 0)) - 40
+            ws.blit(name_surf, (nx, ny))
 
     # -- command line helper ------------------------------------------------
 
     def _draw_command_line(self, x1: float, y1: float, x2: float, y2: float,
                            color: tuple):
         """Draw a command line from (x1,y1) to (x2,y2) with an arrowhead at the end."""
-        pygame.draw.line(self.screen, color, (x1, y1), (x2, y2), 1)
+        ws = self._world_surface
+        pygame.draw.line(ws, color, (x1, y1), (x2, y2), 1)
         # Arrowhead
         dx = x2 - x1
         dy = y2 - y1
@@ -1062,13 +1092,14 @@ class ReplayPlaybackScreen(BaseScreen):
         # Arrow tip is at (x2, y2), two wings behind it
         wing1 = (x2 - ux * s + px * s * 0.5, y2 - uy * s + py * s * 0.5)
         wing2 = (x2 - ux * s - px * s * 0.5, y2 - uy * s - py * s * 0.5)
-        pygame.draw.polygon(self.screen, color, [(x2, y2), wing1, wing2])
+        pygame.draw.polygon(ws, color, [(x2, y2), wing1, wing2])
 
     # -- entity renderers ---------------------------------------------------
     # All entity positions are offset by self._gy (top bar height)
 
     def _draw_unit(self, ent: dict):
-        x, y = ent.get("x", 0), ent.get("y", 0) + self._gy
+        ws = self._world_surface
+        x, y = ent.get("x", 0), ent.get("y", 0)
         c = tuple(ent.get("c", [255, 255, 255]))
         r = ent.get("r", 5)
         hp = ent.get("hp", 100)
@@ -1078,17 +1109,15 @@ class ReplayPlaybackScreen(BaseScreen):
         eid = ent.get("id")
         if eid in self._selected_ids:
             if "atx" in ent and "aty" in ent:
-                # Attack command: dark red line + arrow
                 atx = ent["atx"]
-                aty = ent["aty"] + self._gy
+                aty = ent["aty"]
                 self._draw_command_line(x, y, atx, aty, _ATTACK_CMD_COLOR)
             elif "tx" in ent and "ty" in ent:
-                # Move command: dark green line + arrow
                 tx = ent["tx"]
-                ty = ent["ty"] + self._gy
+                ty = ent["ty"]
                 self._draw_command_line(x, y, tx, ty, _MOVE_CMD_COLOR)
 
-        pygame.draw.circle(self.screen, c, (x, y), r)
+        pygame.draw.circle(ws, c, (x, y), r)
 
         # Symbol
         stats = UNIT_TYPES.get(ut, {})
@@ -1096,8 +1125,8 @@ class ReplayPlaybackScreen(BaseScreen):
         if symbol:
             scale = r / 16.0
             translated = [(x + px * scale, y + py * scale) for px, py in symbol]
-            pygame.draw.polygon(self.screen, (0, 0, 0), translated)
-            pygame.draw.polygon(self.screen, c, translated, 1)
+            pygame.draw.polygon(ws, (0, 0, 0), translated)
+            pygame.draw.polygon(ws, c, translated, 1)
 
         # Health bar
         max_hp = stats.get("hp", 100)
@@ -1105,7 +1134,8 @@ class ReplayPlaybackScreen(BaseScreen):
             self._draw_health_bar(x, y, r + HEALTH_BAR_OFFSET, hp, max_hp)
 
     def _draw_command_center(self, ent: dict):
-        x, y = ent.get("x", 0), ent.get("y", 0) + self._gy
+        ws = self._world_surface
+        x, y = ent.get("x", 0), ent.get("y", 0)
         c = tuple(ent.get("c", [255, 255, 255]))
         pts = ent.get("pts", [])
         tm = ent.get("tm", 1)
@@ -1113,16 +1143,17 @@ class ReplayPlaybackScreen(BaseScreen):
 
         if pts:
             translated = [(x + px, y + py) for px, py in pts]
-            pygame.draw.polygon(self.screen, c, translated)
+            pygame.draw.polygon(ws, c, translated)
             outline = (150, 220, 255) if tm == 1 else (255, 140, 140)
-            pygame.draw.polygon(self.screen, outline, translated, 2)
+            pygame.draw.polygon(ws, outline, translated, 2)
 
         if hp < CC_HP:
             self._draw_health_bar(x, y, CC_RADIUS + HEALTH_BAR_OFFSET,
                                   hp, CC_HP, bar_w=40)
 
     def _draw_metal_spot(self, ent: dict):
-        x, y = ent.get("x", 0), ent.get("y", 0) + self._gy
+        ws = self._world_surface
+        x, y = ent.get("x", 0), ent.get("y", 0)
         r = ent.get("r", 5)
         ow = ent.get("ow")
         cp = ent.get("cp", 0.0)
@@ -1132,7 +1163,7 @@ class ReplayPlaybackScreen(BaseScreen):
         size = cr * 2
         temp = pygame.Surface((size, size), pygame.SRCALPHA)
         pygame.draw.circle(temp, METAL_SPOT_CAPTURE_RANGE_COLOR, (cr, cr), cr)
-        self.screen.blit(temp, (int(x) - cr, int(y) - cr))
+        ws.blit(temp, (int(x) - cr, int(y) - cr))
 
         # Base dot
         if ow is None:
@@ -1141,7 +1172,7 @@ class ReplayPlaybackScreen(BaseScreen):
             color = (80, 140, 255)
         else:
             color = (255, 80, 80)
-        pygame.draw.circle(self.screen, color, (int(x), int(y)), int(r))
+        pygame.draw.circle(ws, color, (int(x), int(y)), int(r))
 
         # Capture progress arc
         if ow is None and abs(cp) > 0.01:
@@ -1155,11 +1186,12 @@ class ReplayPlaybackScreen(BaseScreen):
                 a, b = end_angle, start_angle
             rect = pygame.Rect(int(x - arc_r), int(y - arc_r),
                                int(arc_r * 2), int(arc_r * 2))
-            pygame.draw.arc(self.screen, progress_color, rect, a, b,
+            pygame.draw.arc(ws, progress_color, rect, a, b,
                             int(METAL_SPOT_CAPTURE_ARC_WIDTH))
 
     def _draw_metal_extractor(self, ent: dict):
-        x, y = ent.get("x", 0), ent.get("y", 0) + self._gy
+        ws = self._world_surface
+        x, y = ent.get("x", 0), ent.get("y", 0)
         r = ent.get("r", METAL_EXTRACTOR_RADIUS)
         rot = ent.get("rot", 0.0)
         hp = ent.get("hp", 200)
@@ -1173,7 +1205,7 @@ class ReplayPlaybackScreen(BaseScreen):
         ]
         rotated = [p * complex(math.cos(rot), math.sin(rot)) for p in static_points]
         points = [(p.real + x, p.imag + y) for p in rotated]
-        pygame.draw.polygon(self.screen, (0, 0, 0), points, 1)
+        pygame.draw.polygon(ws, (0, 0, 0), points, 1)
 
         if hp < METAL_EXTRACTOR_HP:
             self._draw_health_bar(x, y, r + HEALTH_BAR_OFFSET,
@@ -1182,22 +1214,24 @@ class ReplayPlaybackScreen(BaseScreen):
     def _draw_laser(self, lf: list):
         if len(lf) < 6:
             return
-        x1, y1, x2, y2 = lf[0], lf[1] + self._gy, lf[2], lf[3] + self._gy
+        ws = self._world_surface
+        x1, y1, x2, y2 = lf[0], lf[1], lf[2], lf[3]
         color = tuple(lf[4])
         width = lf[5]
-        temp = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        temp = pygame.Surface(ws.get_size(), pygame.SRCALPHA)
         c = (*color[:3], 200)
         pygame.draw.line(temp, c, (x1, y1), (x2, y2), width)
-        self.screen.blit(temp, (0, 0))
+        ws.blit(temp, (0, 0))
 
     def _draw_health_bar(self, cx: float, cy: float, offset_y: float,
                          hp: float, max_hp: float,
                          bar_w: float = HEALTH_BAR_WIDTH):
+        ws = self._world_surface
         ratio = hp / max_hp if max_hp > 0 else 0
         bx = cx - bar_w / 2
         by = cy - offset_y
-        pygame.draw.rect(self.screen, HEALTH_BAR_BG,
+        pygame.draw.rect(ws, HEALTH_BAR_BG,
                          (bx, by, bar_w, HEALTH_BAR_HEIGHT))
         fg = HEALTH_BAR_FG if ratio > 0.35 else HEALTH_BAR_LOW
-        pygame.draw.rect(self.screen, fg,
+        pygame.draw.rect(ws, fg,
                          (bx, by, bar_w * ratio, HEALTH_BAR_HEIGHT))

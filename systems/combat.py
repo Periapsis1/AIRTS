@@ -1,4 +1,4 @@
-"""Combat system: laser attacks, heal-laser healing, command-center aura healing."""
+"""Combat system: laser attacks, heal-laser healing."""
 from __future__ import annotations
 import math
 from entities.base import Entity
@@ -7,9 +7,6 @@ from entities.unit import Unit, HOLD_FIRE, TARGET_FIRE, FREE_FIRE
 from entities.command_center import CommandCenter
 from entities.laser import LaserFlash
 from core.helpers import line_intersects_circle, line_intersects_rect, angle_diff, circle_overlaps_aabb
-from config.settings import (
-    CC_HEAL_RADIUS, CC_HEAL_RATE,
-)
 
 
 def _has_los(x1: float, y1: float, x2: float, y2: float,
@@ -102,6 +99,8 @@ def _pick_friendly_target(
     for u in candidates:
         if u is a or not u.alive or u.team != a.team:
             continue
+        if isinstance(u, CommandCenter):
+            continue
         if u.hp >= u.max_hp:
             continue
         dx = u.x - ax
@@ -188,32 +187,3 @@ def combat_step(
                 LaserFlash(ax, ay, best_target.x, best_target.y, lc, w,
                            source=a, target=best_target)
             )
-
-
-def cc_heal_step(
-    command_centers: list[CommandCenter],
-    units: list[Unit],
-    dt: float,
-    stats=None,
-    grid=None,
-):
-    heal_radius_sq = CC_HEAL_RADIUS * CC_HEAL_RADIUS
-    for cc in command_centers:
-        if not cc.alive:
-            continue
-        heal_amount = CC_HEAL_RATE * dt
-        nearby = grid.query_radius(cc.x, cc.y, CC_HEAL_RADIUS) if grid is not None else units
-        for unit in nearby:
-            if unit is cc:
-                continue
-            if unit.team != cc.team or not unit.alive:
-                continue
-            if unit.hp >= unit.max_hp:
-                continue
-            dx = unit.x - cc.x
-            dy = unit.y - cc.y
-            if dx * dx + dy * dy <= heal_radius_sq:
-                old_hp = unit.hp
-                unit.hp = min(unit.max_hp, unit.hp + heal_amount)
-                if stats is not None:
-                    stats.record_healing(cc.team, unit.hp - old_hp)

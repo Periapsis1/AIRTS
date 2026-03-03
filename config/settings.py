@@ -50,12 +50,6 @@ CC_LASER_RANGE = 75.0
 CC_LASER_DAMAGE = 20
 CC_LASER_COOLDOWN = 1.0
 
-CC_HEAL_RADIUS = 40.0
-CC_HEAL_RATE = 5
-CC_HEAL_COLOR_T1 = (60, 180, 100, 30)
-CC_HEAL_COLOR_T2 = (180, 60, 60, 30)
-CC_HEAL_RING_T1 = (60, 180, 100, 80)
-CC_HEAL_RING_T2 = (180, 60, 60, 80)
 
 # -- metal spot -------------------------------------------------------------
 METAL_SPOT_COLOR = (255, 200, 60)
@@ -101,3 +95,9 @@ GUI_BTN_HOVER = (60, 60, 80)
 GUI_BTN_NORMAL = (45, 45, 55)
 GUI_TEXT_COLOR = (200, 200, 200)
 GUI_PANEL_HEIGHT = 92
+
+# -- camera ----------------------------------------------------------------
+CAMERA_ZOOM_STEP = 1.1
+CAMERA_MAX_ZOOM = 3.0
+EDGE_PAN_MARGIN = 10       # pixels from screen edge to trigger pan
+EDGE_PAN_SPEED = 500.0     # screen-space pixels per second

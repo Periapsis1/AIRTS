@@ -8,8 +8,6 @@ from core.helpers import hexagon_points
 from config.settings import (
     TEAM1_COLOR, TEAM2_COLOR, TEAM1_SELECTED_COLOR, SELECTED_COLOR, DEFAULT_COLOR,
     CC_HP, CC_SPAWN_INTERVAL, CC_RADIUS, HEALTH_BAR_OFFSET,
-    CC_HEAL_RADIUS, CC_HEAL_COLOR_T1, CC_HEAL_COLOR_T2,
-    CC_HEAL_RING_T1, CC_HEAL_RING_T2,
     CC_LASER_DAMAGE, CC_LASER_RANGE, CC_LASER_COOLDOWN,
     CC_LASER_COLOR_T1, CC_LASER_COLOR_T2,
     RANGE_COLOR,
@@ -90,15 +88,6 @@ class CommandCenter(Unit):
 
         if self.selected:
             pygame.draw.polygon(surface, SELECTED_COLOR, translated, 2)
-
-        # Allied CC: only show heal radius and FOV when selected; enemies: always
-        if not self.selectable or self.selected:
-            heal_surf = pygame.Surface((int(CC_HEAL_RADIUS * 2), int(CC_HEAL_RADIUS * 2)), pygame.SRCALPHA)
-            fill_c = CC_HEAL_COLOR_T1 if self.team == 1 else CC_HEAL_COLOR_T2
-            ring_c = CC_HEAL_RING_T1 if self.team == 1 else CC_HEAL_RING_T2
-            pygame.draw.circle(heal_surf, fill_c, (int(CC_HEAL_RADIUS), int(CC_HEAL_RADIUS)), int(CC_HEAL_RADIUS))
-            pygame.draw.circle(heal_surf, ring_c, (int(CC_HEAL_RADIUS), int(CC_HEAL_RADIUS)), int(CC_HEAL_RADIUS), 1)
-            surface.blit(heal_surf, (self.x - CC_HEAL_RADIUS, self.y - CC_HEAL_RADIUS))
 
         progress = min(self._spawn_timer / CC_SPAWN_INTERVAL, 1.0)
         if progress < 1.0:

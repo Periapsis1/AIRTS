@@ -45,7 +45,7 @@ class GameStats:
         # Per-subsystem timing breakdown (ms)
         self._subsystem_names = [
             "grid_build", "facing_precompute", "entity_update", "ai_step",
-            "capture", "combat", "cc_heal", "spawn",
+            "capture", "combat", "spawn",
             "physics", "filtering",
         ]
         self._subsystem_bufs: dict[str, list[float]] = {n: [] for n in self._subsystem_names}

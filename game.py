@@ -10,7 +10,7 @@ from entities.base import Entity
 from entities.unit import Unit
 from entities.command_center import CommandCenter
 from entities.laser import LaserFlash
-from systems.combat import combat_step, cc_heal_step
+from systems.combat import combat_step
 from systems.physics import (
     resolve_unit_collisions, resolve_obstacle_collisions,
     clamp_units_to_bounds,
@@ -27,6 +27,8 @@ from config.settings import (
     COMMAND_PATH_COLOR, COMMAND_DOT_COLOR, PATH_SAMPLE_MIN_DIST,
     FIXED_DT, MAX_FRAME_DT, CC_RADIUS,
     TEAM1_COLOR, TEAM2_COLOR, HEALTH_BAR_OFFSET,
+    CAMERA_ZOOM_STEP, CAMERA_MAX_ZOOM,
+    EDGE_PAN_MARGIN, EDGE_PAN_SPEED,
 )
 from entities.shapes import RectEntity, CircleEntity, PolygonEntity
 from systems.commands import GameCommand, CommandQueue
@@ -35,8 +37,9 @@ from systems.stats import GameStats
 from core.spatial_grid import SpatialGrid
 from core.helpers import circle_overlaps_aabb
 from core.vectorized import build_obstacle_arrays, batch_obstacle_push
+from core.camera import Camera
 import numpy as np
-from ui.widgets import Slider
+from ui.widgets import Slider, Button
 import gui
 
 _DBLCLICK_MS = 400
@@ -144,6 +147,17 @@ class Game:
         self._last_click_pos: tuple[int, int] = (0, 0)
 
         self._speed_slider = Slider(width - 170, 10, 150, "Speed %", 25, 800, 100, 25)
+        self._pause_btn = Button(width - 210, 12, 32, 24, "||", icon="pause")
+        self._paused = False
+        self._pause_font = pygame.font.SysFont(None, 48)
+        self._mouse_grabbed = False
+
+        # -- camera & world surface -------------------------------------------
+        self._world_surface = pygame.Surface((width, height))
+        self._camera = Camera(width, height, width, height,
+                              max_zoom=CAMERA_MAX_ZOOM)
+        self._mid_dragging = False
+        self._mid_last: tuple[int, int] = (0, 0)
 
         self._replay_recorder = ReplayRecorder(width, height, replay_config)
 
@@ -338,24 +352,103 @@ class Game:
                 data={"unit_ids": unit_ids, "targets": targets},
             ))
 
+    # -- pause / mouse grab ------------------------------------------------
+
+    def _toggle_pause(self):
+        self._paused = not self._paused
+        if self._paused:
+            self._pause_btn.label = ">"
+            self._pause_btn.icon = "play"
+            self._set_mouse_grab(False)
+        else:
+            self._pause_btn.label = "||"
+            self._pause_btn.icon = "pause"
+            self._set_mouse_grab(True)
+
+    def _set_mouse_grab(self, grab: bool):
+        self._mouse_grabbed = grab
+        pygame.event.set_grab(grab)
+
+    def _update_edge_pan(self, dt: float):
+        """Pan camera when mouse is at the screen edge (only while grabbed)."""
+        if not self._mouse_grabbed:
+            return
+        mx, my = pygame.mouse.get_pos()
+        dx = 0.0
+        dy = 0.0
+        if mx <= EDGE_PAN_MARGIN:
+            dx = EDGE_PAN_SPEED * dt
+        elif mx >= self.width - EDGE_PAN_MARGIN - 1:
+            dx = -EDGE_PAN_SPEED * dt
+        if my <= EDGE_PAN_MARGIN:
+            dy = EDGE_PAN_SPEED * dt
+        elif my >= self.height - EDGE_PAN_MARGIN - 1:
+            dy = -EDGE_PAN_SPEED * dt
+        if dx or dy:
+            self._camera.pan(dx, dy)
+
+    # -- coordinate helpers ------------------------------------------------
+
+    def _screen_to_world(self, pos: tuple[int, int]) -> tuple[float, float]:
+        """Convert a screen position to world coordinates via the camera."""
+        return self._camera.screen_to_world(float(pos[0]), float(pos[1]))
+
     # -- events -------------------------------------------------------------
 
     def handle_events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                self._set_mouse_grab(False)
                 self.running = False
+
+            if self._pause_btn.handle_event(event):
+                self._toggle_pause()
+                continue
+
+            # Click anywhere while paused → unpause
+            if (self._paused
+                    and event.type == pygame.MOUSEBUTTONDOWN
+                    and event.button == 1):
+                self._toggle_pause()
+                continue
 
             if self._speed_slider.handle_event(event):
                 self._speed_multiplier = self._speed_slider.value / 100.0
 
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    self.running = False
+                    if self._paused:
+                        # Already paused — quit the game
+                        self._set_mouse_grab(False)
+                        self.running = False
+                    else:
+                        self._toggle_pause()
+
+            # Scroll wheel zoom (available always, not just for human)
+            if event.type == pygame.MOUSEWHEEL:
+                mx, my = pygame.mouse.get_pos()
+                if event.y > 0:
+                    self._camera.zoom_at(mx, my, CAMERA_ZOOM_STEP)
+                elif event.y < 0:
+                    self._camera.zoom_at(mx, my, 1.0 / CAMERA_ZOOM_STEP)
+
+            # Middle mouse pan
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
+                self._mid_dragging = True
+                self._mid_last = event.pos
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 2:
+                self._mid_dragging = False
+            elif event.type == pygame.MOUSEMOTION and self._mid_dragging:
+                dx = event.pos[0] - self._mid_last[0]
+                dy = event.pos[1] - self._mid_last[1]
+                self._camera.pan(dx, dy)
+                self._mid_last = event.pos
 
             if not self._has_human:
                 continue
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                # GUI click stays in screen space
                 gui_result = gui.handle_gui_click(
                     self.entities, event.pos[0], event.pos[1],
                     self.width, self.height,
@@ -370,44 +463,47 @@ class Game:
                             data={"team": cc.team, "unit_type": gui_result},
                         ))
                     continue
+                # Drag start: store in world coords
+                wx, wy = self._screen_to_world(event.pos)
                 self._dragging = True
-                self._drag_start = event.pos
-                self._drag_end = event.pos
+                self._drag_start = (int(wx), int(wy))
+                self._drag_end = (int(wx), int(wy))
 
             elif event.type == pygame.MOUSEMOTION:
                 if self._dragging:
-                    self._drag_end = event.pos
+                    wx, wy = self._screen_to_world(event.pos)
+                    self._drag_end = (int(wx), int(wy))
                 if self._rdragging:
-                    pos = (float(event.pos[0]), float(event.pos[1]))
+                    wx, wy = self._screen_to_world(event.pos)
+                    pos_w = (wx, wy)
                     if self._rpath:
                         last = self._rpath[-1]
-                        if math.hypot(pos[0] - last[0], pos[1] - last[1]) >= PATH_SAMPLE_MIN_DIST:
-                            self._rpath.append(pos)
+                        if math.hypot(pos_w[0] - last[0], pos_w[1] - last[1]) >= PATH_SAMPLE_MIN_DIST:
+                            self._rpath.append(pos_w)
                     else:
-                        self._rpath.append(pos)
+                        self._rpath.append(pos_w)
 
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self._dragging:
-                self._drag_end = event.pos
+                wx, wy = self._screen_to_world(event.pos)
+                self._drag_end = (int(wx), int(wy))
                 shift = pygame.key.get_mods() & pygame.KMOD_SHIFT
                 sr = self._selection_radius()
                 now = pygame.time.get_ticks()
                 if sr < 5:
-                    # Double-click: select all units of the same type
+                    # Double-click detection uses screen-space distance
                     if (now - self._last_click_time < _DBLCLICK_MS
                             and math.hypot(event.pos[0] - self._last_click_pos[0],
                                            event.pos[1] - self._last_click_pos[1]) < 10):
                         select_all_of_type(
-                            self.entities,
-                            float(event.pos[0]), float(event.pos[1]),
+                            self.entities, wx, wy,
                         )
                     else:
                         click_select(
-                            self.entities,
-                            float(event.pos[0]), float(event.pos[1]),
+                            self.entities, wx, wy,
                             additive=bool(shift),
                         )
                     self._last_click_time = now
-                    self._last_click_pos = event.pos
+                    self._last_click_pos = event.pos  # screen space for distance check
                 else:
                     cx, cy = self._selection_center()
                     apply_circle_selection(
@@ -417,8 +513,9 @@ class Game:
                 self._dragging = False
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                wx, wy = self._screen_to_world(event.pos)
                 self._rdragging = True
-                self._rpath = [(float(event.pos[0]), float(event.pos[1]))]
+                self._rpath = [(wx, wy)]
 
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 3 and self._rdragging:
                 self._rdragging = False
@@ -586,7 +683,6 @@ class Game:
         _t = _perf()
         combat_step(units, obstacles, self.laser_flashes, dt, stats=self._stats, grid=grid,
                     circle_obs=_obs_circle, rect_obs=_obs_rect, team_aabb=team_aabb)
-        cc_heal_step(ccs, units, dt, stats=self._stats, grid=grid)
         self._stats.record_subsystem("combat", (_perf() - _t) * 1000)
 
         # Spawn — track entity count to detect new spawns for physics cooldown
@@ -747,7 +843,8 @@ class Game:
     # -- render -------------------------------------------------------------
 
     def render(self):
-        self.screen.fill((0, 0, 0))
+        ws = self._world_surface
+        ws.fill((0, 0, 0))
 
         if self._phase == "warp_in":
             self._render_warp_in()
@@ -756,12 +853,12 @@ class Game:
         else:
             # Normal playing render
             for entity in self.entities:
-                entity.draw(self.screen)
+                entity.draw(ws)
             self._draw_fog()
 
         if self._phase != "warp_in":
             for lf in self.laser_flashes:
-                lf.draw(self.screen)
+                lf.draw(ws)
 
         # AI / Human name labels above command centers (with bonus %)
         for entity in self.entities:
@@ -775,7 +872,7 @@ class Game:
                 name_surf = self._label_font.render(name, True, team_color)
                 nx = int(entity.x) - name_surf.get_width() // 2
                 ny = int(entity.y) - 40
-                self.screen.blit(name_surf, (nx, ny))
+                ws.blit(name_surf, (nx, ny))
 
         # Extractor bonus labels
         for entity in self.entities:
@@ -787,7 +884,7 @@ class Game:
                 label_surf = self._label_font.render(label, True, team_color)
                 lx = int(entity.x) - label_surf.get_width() // 2
                 ly = int(entity.y) - int(entity.radius + HEALTH_BAR_OFFSET + 12)
-                self.screen.blit(label_surf, (lx, ly))
+                ws.blit(label_surf, (lx, ly))
 
         if self._dragging:
             sr = self._selection_radius()
@@ -798,27 +895,44 @@ class Game:
                                    (int(cx), int(cy)), int(sr))
                 pygame.draw.circle(self._selection_surface, SELECTION_RECT_COLOR,
                                    (int(cx), int(cy)), int(sr), 1)
-                self.screen.blit(self._selection_surface, (0, 0))
+                ws.blit(self._selection_surface, (0, 0))
 
         if self._rdragging and len(self._rpath) >= 2:
-            pygame.draw.lines(self.screen, COMMAND_PATH_COLOR, False, self._rpath, 2)
+            pygame.draw.lines(ws, COMMAND_PATH_COLOR, False,
+                              [(int(px), int(py)) for px, py in self._rpath], 2)
             selected_count = sum(
                 1 for e in self.entities if isinstance(e, Unit) and e.selected
             )
             if selected_count > 0:
                 preview = self._resample_path(selected_count)
                 for px, py in preview:
-                    pygame.draw.circle(self.screen, COMMAND_DOT_COLOR, (int(px), int(py)), 4, 1)
+                    pygame.draw.circle(ws, COMMAND_DOT_COLOR, (int(px), int(py)), 4, 1)
 
+        # Project world surface to screen via camera
+        self.screen.fill((0, 0, 0))
+        self._camera.apply(ws, self.screen)
+
+        # GUI stays in screen space
         if self._has_human:
             gui.draw_cc_gui(self.screen, self.entities, self.width, self.height)
 
+        self._pause_btn.draw(self.screen)
         self._speed_slider.draw(self.screen)
 
         # FPS counter
         fps_val = self.clock.get_fps()
         fps_surf = self._fps_font.render(f"FPS: {fps_val:.0f}", True, (200, 200, 200))
         self.screen.blit(fps_surf, (4, 4))
+
+        # Paused overlay
+        if self._paused:
+            pause_surf = self._pause_font.render("PAUSED", True, (220, 220, 240))
+            hint_surf = self._fps_font.render("ESC again to quit", True, (140, 140, 160))
+            px = self.width // 2 - pause_surf.get_width() // 2
+            py = self.height // 2 - pause_surf.get_height() // 2 - 10
+            self.screen.blit(pause_surf, (px, py))
+            hx = self.width // 2 - hint_surf.get_width() // 2
+            self.screen.blit(hint_surf, (hx, py + pause_surf.get_height() + 4))
 
         pygame.display.flip()
 
@@ -855,7 +969,7 @@ class Game:
             self._fog_surface.blit(cutout, (ex - r, ey - r),
                                    special_flags=pygame.BLEND_RGBA_SUB)
 
-        self.screen.blit(self._fog_surface, (0, 0))
+        self._world_surface.blit(self._fog_surface, (0, 0))
 
         # Border at the fog edge — outline of the union (no venn diagram)
         self._fog_border.fill((0, 0, 0))
@@ -863,24 +977,25 @@ class Game:
             pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)
         for ex, ey, r in los_circles:
             pygame.draw.circle(self._fog_border, (0, 0, 0), (ex, ey), max(r - 1, 0))
-        self.screen.blit(self._fog_border, (0, 0))
+        self._world_surface.blit(self._fog_border, (0, 0))
 
     # -- animation helpers --------------------------------------------------
 
     def _render_warp_in(self):
         """Render warp-in phase: non-CC entities normal, CCs scale in with glow."""
+        ws = self._world_surface
         t = min(self._anim_timer / 3.0, 1.0)
         scale = t * (2.0 - t)  # ease-out curve
 
         # Draw all non-CC entities normally
         for entity in self.entities:
             if not isinstance(entity, CommandCenter):
-                entity.draw(self.screen)
+                entity.draw(ws)
 
         # Draw CCs at scaled size
         for entity in self.entities:
             if isinstance(entity, CommandCenter) and entity.alive:
-                entity.draw_scaled(self.screen, scale)
+                entity.draw_scaled(ws, scale)
 
                 # Glow ring: expands outward, fading
                 glow_radius = int(CC_RADIUS * 3 * t)
@@ -892,7 +1007,7 @@ class Game:
                         self._anim_surface, glow_color,
                         (int(entity.x), int(entity.y)), glow_radius, 3,
                     )
-                    self.screen.blit(self._anim_surface, (0, 0))
+                    ws.blit(self._anim_surface, (0, 0))
 
         self._draw_fog()
 
@@ -939,9 +1054,10 @@ class Game:
 
     def _render_explode(self):
         """Render explode phase: surviving entities normal, fragments fly out."""
+        ws = self._world_surface
         # Draw all surviving entities normally
         for entity in self.entities:
-            entity.draw(self.screen)
+            entity.draw(ws)
         self._draw_fog()
 
         # Draw explosion fragments
@@ -963,7 +1079,7 @@ class Game:
             frag_color = (*frag["color"][:3], alpha)
             pygame.draw.polygon(self._anim_surface, frag_color, rotated)
 
-        self.screen.blit(self._anim_surface, (0, 0))
+        ws.blit(self._anim_surface, (0, 0))
 
     # -- run ----------------------------------------------------------------
 
@@ -977,10 +1093,11 @@ class Game:
             while self.running:
                 self.clock.tick(0)  # uncapped
                 self.handle_events()  # pump events for QUIT/ESCAPE
-                for _ in range(200):  # batch 200 ticks per frame
-                    if self._phase != "playing":
-                        break
-                    self.step(FIXED_DT)
+                if not self._paused:
+                    for _ in range(200):  # batch 200 ticks per frame
+                        if self._phase != "playing":
+                            break
+                        self.step(FIXED_DT)
                 if self._phase == "explode":
                     self.running = False  # skip explosion anim
                 # Minimal display: black screen with in-game timer
@@ -994,13 +1111,20 @@ class Game:
                 self.screen.blit(timer_surf, (tx, ty))
                 pygame.display.flip()
         else:
+            # Grab the mouse at game start
+            self._set_mouse_grab(True)
+
             while self.running:
                 raw_dt = self.clock.tick(self.fps) / 1000.0
                 real_dt = min(raw_dt, MAX_FRAME_DT)
 
                 self.handle_events()
+                self._update_edge_pan(real_dt)
 
-                if self._phase == "warp_in":
+                if self._paused:
+                    self.render()
+
+                elif self._phase == "warp_in":
                     self._anim_timer += real_dt
                     if self._anim_timer >= 3.0:
                         self._phase = "playing"
@@ -1026,6 +1150,9 @@ class Game:
                     if self._anim_timer >= 3.0:
                         self.running = False
                     self.render()
+
+            # Release mouse on game exit
+            self._set_mouse_grab(False)
 
         stats_data = self._stats.finalize(self._winner, self.entities)
         replay_path = self._replay_recorder.save(self._winner, self.human_teams, stats=stats_data)
