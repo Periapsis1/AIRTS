@@ -32,7 +32,7 @@ from ui.theme import (
 
 TOP_BAR_HEIGHT = 40
 BOTTOM_BAR_HEIGHT = 50
-_SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0]
+_SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
 
 # Command line colors for selected unit action indicators
 _MOVE_CMD_COLOR = (0, 140, 40)     # dark green for move commands
@@ -373,6 +373,11 @@ class ReplayPlaybackScreen(BaseScreen):
 
                 if self._speed_btn.handle_event(event):
                     self._speed_idx = (self._speed_idx + 1) % len(_SPEEDS)
+                    self._speed_btn.label = f"{_SPEEDS[self._speed_idx]}x"
+
+                if (event.type == pygame.MOUSEBUTTONUP and event.button == 3
+                        and self._speed_btn.rect.collidepoint(event.pos)):
+                    self._speed_idx = (self._speed_idx - 1) % len(_SPEEDS)
                     self._speed_btn.label = f"{_SPEEDS[self._speed_idx]}x"
 
                 if self._scrubber.handle_event(event):

@@ -49,6 +49,13 @@ CC_RADIUS = 10.0
 CC_LASER_RANGE = 75.0
 CC_LASER_DAMAGE = 20
 CC_LASER_COOLDOWN = 1.0
+CC_OBSTACLE_EXCLUSION = 120.0  # min distance from CC center to obstacle center
+
+# -- reactive armor (tank passive) ------------------------------------------
+REACTIVE_ARMOR_INTERVAL = 5.0       # seconds per stack
+REACTIVE_ARMOR_MAX_STACKS = 2
+REACTIVE_ARMOR_REDUCTION = 0.5      # damage reduction per stack (50%)
+REACTIVE_ARMOR_COLOR = (200, 180, 60)
 
 
 # -- metal spot -------------------------------------------------------------

@@ -12,6 +12,7 @@ from config.settings import (
 )
 from config.unit_types import UNIT_TYPES
 from core.helpers import angle_diff
+from systems.abilities import ReactiveArmor, Focus, ability_from_dict
 
 # fire-mode constants
 HOLD_FIRE = "hold_fire"
@@ -73,6 +74,9 @@ class Unit(CircleEntity, Damageable):
                 laser_color=laser_color,
                 laser_width=wdata.get("laser_width", 1),
                 hits_only_friendly=wdata.get("hits_only_friendly", False),
+                sound=wdata.get("sound", "fast_laser"),
+                chain_range=wdata.get("chain_range", 0.0),
+                chain_delay=wdata.get("chain_delay", 0.0),
             )
         else:
             self.weapon = None
@@ -105,6 +109,20 @@ class Unit(CircleEntity, Damageable):
         self.selectable: bool = False
         self._facing_target: tuple[float, float] | None = None  # set by batch_facing_targets
 
+        # -- abilities ----------------------------------------------------------
+        self.abilities: list = []
+        if unit_type == "tank":
+            self.abilities = [ReactiveArmor()]
+        elif unit_type == "sniper":
+            self.abilities = [Focus()]
+
+    # -- damage -------------------------------------------------------------
+
+    def take_damage(self, amount: float):
+        for ability in self.abilities:
+            amount = ability.modify_damage(amount, self)
+        super().take_damage(amount)
+
     # -- commands -----------------------------------------------------------
 
     def move(self, x: float, y: float, stop_dist: float = 0.0):
@@ -136,6 +154,9 @@ class Unit(CircleEntity, Damageable):
 
     def update(self, dt: float):
         self.laser_cooldown = max(0.0, self.laser_cooldown - dt)
+
+        for ability in self.abilities:
+            ability.update(self, dt)
 
         if self.attack_target is not None and not self.attack_target.alive:
             self.attack_target = None
@@ -323,6 +344,9 @@ class Unit(CircleEntity, Damageable):
             else:
                 self._draw_fov_arc(surface, RANGE_COLOR)
 
+        for ability in self.abilities:
+            ability.draw(self, surface)
+
         self.draw_health_bar(surface, self.x, self.y, self.radius + HEALTH_BAR_OFFSET)
 
     # -- serialization --------------------------------------------------------
@@ -345,6 +369,7 @@ class Unit(CircleEntity, Damageable):
             "_follow_entity_id": self._follow_entity.entity_id if self._follow_entity else None,
             "_follow_dist": self._follow_dist,
             "attack_target_id": self.attack_target.entity_id if self.attack_target else None,
+            "abilities": [a.to_dict() for a in self.abilities],
         })
         return d
 
@@ -366,6 +391,12 @@ class Unit(CircleEntity, Damageable):
         u.selectable = data["selectable"]
         u._bounds = tuple(data["_bounds"])
         u._follow_dist = data["_follow_dist"]
+        if "abilities" in data:
+            u.abilities = [ability_from_dict(a) for a in data["abilities"]]
+            for ab in u.abilities:
+                if isinstance(ab, Focus) and ab.timer > 0 and ab._base_speed > 0:
+                    t = ab.timer / Focus.DURATION
+                    u.speed = ab._base_speed * (Focus.MIN_MULT + (1.0 - Focus.MIN_MULT) * (1.0 - t))
         # cross-references resolved later by Game.load_state()
         u._follow_entity = None
         u.attack_target = None

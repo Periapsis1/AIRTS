@@ -16,12 +16,20 @@ class MetalSpot(CircleEntity, Damageable):
         self.owner: int | None = None
         self.capture_progress: float = 0.0  # -1.0 to 1.0 representing the capture progress for each team
 
-    def update_progress(self, unit_difference: int, dt: float):
-        # unit_difference is team 1 units - team 2 units
+    def update_progress(self, unit_difference: float, dt: float):
+        # unit_difference is team 1 units - team 2 units (scouts count as 0.3)
         if self.owner is not None:
             return
-        
-        self.capture_progress += unit_difference * METAL_SPOT_CAPTURE_RATE * dt
+
+        if unit_difference != 0:
+            self.capture_progress += unit_difference * METAL_SPOT_CAPTURE_RATE * dt
+        elif self.capture_progress != 0:
+            # Decay at 1% per second when no one is capturing
+            decay = 0.01 * dt
+            if self.capture_progress > 0:
+                self.capture_progress = max(0.0, self.capture_progress - decay)
+            else:
+                self.capture_progress = min(0.0, self.capture_progress + decay)
         self.capture_progress = min(1.0, max(-1.0, self.capture_progress))
 
     def claim(self, team: int):

@@ -13,6 +13,7 @@ from screens.results import ResultsScreen
 from screens.replay_list import ReplayListScreen
 from screens.replay_playback import ReplayPlaybackScreen
 from screens.crash_notice import CrashNoticeScreen
+from screens.options import OptionsScreen
 
 
 class App:
@@ -20,6 +21,7 @@ class App:
 
     def __init__(self):
         pygame.init()
+        pygame.mixer.init()
         self._screen = pygame.display.set_mode((MENU_WIDTH, MENU_HEIGHT))
         pygame.display.set_caption("AIRTS")
         self._clock = pygame.time.Clock()
@@ -64,6 +66,9 @@ class App:
 
         elif name == "unit_overview":
             return UnitOverviewScreen(self._screen, self._clock).run()
+
+        elif name == "options":
+            return OptionsScreen(self._screen, self._clock).run()
 
         elif name == "replays":
             return ReplayListScreen(self._screen, self._clock).run()

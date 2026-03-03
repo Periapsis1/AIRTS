@@ -10,7 +10,7 @@ from entities.base import Entity
 from entities.unit import Unit
 from entities.command_center import CommandCenter
 from entities.laser import LaserFlash
-from systems.combat import combat_step
+from systems.combat import combat_step, PendingChain
 from systems.physics import (
     resolve_unit_collisions, resolve_obstacle_collisions,
     clamp_units_to_bounds,
@@ -39,6 +39,7 @@ from core.helpers import circle_overlaps_aabb
 from core.vectorized import build_obstacle_arrays, batch_obstacle_push
 from core.camera import Camera
 import numpy as np
+import os
 from ui.widgets import Slider, Button
 import gui
 
@@ -106,6 +107,14 @@ class Game:
 
         self.entities: list[Entity] = []
         self.laser_flashes: list[LaserFlash] = []
+        self._pending_chains: list[PendingChain] = []
+
+        # -- sounds -----------------------------------------------------------
+        _sounds_dir = os.path.join(os.path.dirname(__file__), "sounds")
+        self._sounds: dict[str, pygame.mixer.Sound] = {
+            "fast_laser": pygame.mixer.Sound(os.path.join(_sounds_dir, "fast_laser.mp3")),
+            "laser": pygame.mixer.Sound(os.path.join(_sounds_dir, "laser.mp3")),
+        }
 
         gen = map_generator or DefaultMapGenerator()
         self.entities = gen.generate(width, height)
@@ -682,7 +691,9 @@ class Game:
 
         _t = _perf()
         combat_step(units, obstacles, self.laser_flashes, dt, stats=self._stats, grid=grid,
-                    circle_obs=_obs_circle, rect_obs=_obs_rect, team_aabb=team_aabb)
+                    circle_obs=_obs_circle, rect_obs=_obs_rect, team_aabb=team_aabb,
+                    sounds=None if self._headless else self._sounds,
+                    pending_chains=self._pending_chains)
         self._stats.record_subsystem("combat", (_perf() - _t) * 1000)
 
         # Spawn — track entity count to detect new spawns for physics cooldown
@@ -756,6 +767,9 @@ class Game:
                 step_ms = self._stats.ts_step_ms[-1] if self._stats.ts_step_ms else 0
                 print(f"[tick {self._iteration:>6}] units={n_units:>3}  step={step_ms:.3f}ms  {' | '.join(parts)}")
 
+        if self._headless and (self._iteration == 1 or self._iteration % 5000 == 0):
+            self._take_headless_snapshot()
+
         self._replay_recorder.capture_tick(
             self._iteration, self.entities, self.laser_flashes,
         )
@@ -782,9 +796,19 @@ class Game:
     # -- serialization --------------------------------------------------------
 
     def save_state(self) -> dict[str, Any]:
+        pending = []
+        for ch in self._pending_chains:
+            pending.append({
+                "source_id": ch.source.entity_id,
+                "last_target_id": ch.last_target.entity_id,
+                "hit_set": list(ch.hit_set),
+                "delay": ch.delay,
+                "team": ch.team,
+            })
         return {
             "entities": [e.to_dict() for e in self.entities],
             "laser_flashes": [lf.to_dict() for lf in self.laser_flashes],
+            "pending_chains": pending,
             "iteration": self._iteration,
             "winner": self._winner,
             "next_entity_id": self._next_entity_id,
@@ -835,6 +859,23 @@ class Game:
             tid = lfd.get("target_id")
             if tid is not None and tid in id_map:
                 lf.target = id_map[tid]
+        self._pending_chains = []
+        for chd in data.get("pending_chains", []):
+            src_id = chd["source_id"]
+            lt_id = chd["last_target_id"]
+            if src_id not in id_map or lt_id not in id_map:
+                continue
+            src = id_map[src_id]
+            if not hasattr(src, "weapon") or src.weapon is None:
+                continue
+            self._pending_chains.append(PendingChain(
+                source=src,
+                weapon=src.weapon,
+                last_target=id_map[lt_id],
+                hit_set=set(chd["hit_set"]),
+                delay=chd["delay"],
+                team=chd["team"],
+            ))
         self._iteration = data["iteration"]
         self._winner = data["winner"]
         self._next_entity_id = data["next_entity_id"]
@@ -1081,6 +1122,80 @@ class Game:
 
         ws.blit(self._anim_surface, (0, 0))
 
+    # -- headless snapshot ----------------------------------------------------
+
+    _SNAP_W = 240
+    _SNAP_H = 180
+    _SNAP_PAD = 10
+
+    def _take_headless_snapshot(self) -> None:
+        """Render a small top-down minimap of the current game state."""
+        sw, sh = self._SNAP_W, self._SNAP_H
+        surf = pygame.Surface((sw, sh))
+        surf.fill((20, 20, 30))
+
+        sx = sw / self.width
+        sy = sh / self.height
+
+        t1 = TEAM1_COLOR
+        t2 = TEAM2_COLOR
+        gold = (255, 200, 60)
+        obstacle_col = (80, 80, 80)
+
+        # Obstacles
+        for e in self.entities:
+            if isinstance(e, (RectEntity, CircleEntity, PolygonEntity)):
+                r = max(int(getattr(e, "radius", 4) * sx), 2)
+                pygame.draw.circle(surf, obstacle_col,
+                                   (int(e.x * sx), int(e.y * sy)), r)
+
+        # Metal spots
+        for ms in self.metal_spots:
+            col = gold
+            if getattr(ms, "owner", None) == 1:
+                col = t1
+            elif getattr(ms, "owner", None) == 2:
+                col = t2
+            pygame.draw.circle(surf, col,
+                               (int(ms.x * sx), int(ms.y * sy)), 3)
+
+        # Metal extractors
+        for e in self.entities:
+            if isinstance(e, MetalExtractor) and e.alive:
+                col = t1 if e.team == 1 else t2
+                px, py = int(e.x * sx), int(e.y * sy)
+                pygame.draw.polygon(surf, col,
+                                    [(px, py - 3), (px + 3, py + 2), (px - 3, py + 2)])
+
+        # Command centers
+        for cc in self._get_command_centers():
+            col = t1 if cc.team == 1 else t2
+            pygame.draw.circle(surf, col,
+                               (int(cc.x * sx), int(cc.y * sy)), 5)
+            pygame.draw.circle(surf, (255, 255, 255),
+                               (int(cc.x * sx), int(cc.y * sy)), 5, 1)
+
+        # Mobile units
+        for u in self._get_units():
+            if u.is_building or not u.alive:
+                continue
+            col = t1 if u.team == 1 else t2
+            r = 2 if u.unit_type != "tank" else 3
+            pygame.draw.circle(surf, col,
+                               (int(u.x * sx), int(u.y * sy)), r)
+
+        # Border
+        pygame.draw.rect(surf, (100, 100, 120), (0, 0, sw, sh), 1)
+
+        # Tick label
+        game_secs = self._iteration / 60.0
+        m, s = divmod(int(game_secs), 60)
+        label = self._headless_snap_font.render(
+            f"tick {self._iteration}  ({m}:{s:02d})", True, (180, 180, 200))
+        surf.blit(label, (4, sh - label.get_height() - 2))
+
+        self._headless_snap_surf = surf
+
     # -- run ----------------------------------------------------------------
 
     def run(self) -> dict[str, Any]:
@@ -1090,6 +1205,8 @@ class Game:
         if self._headless:
             self._phase = "playing"  # skip warp_in
             headless_font = pygame.font.SysFont(None, 28)
+            self._headless_snap_font = pygame.font.SysFont(None, 18)
+            self._headless_snap_surf: pygame.Surface | None = None
             while self.running:
                 self.clock.tick(0)  # uncapped
                 self.handle_events()  # pump events for QUIT/ESCAPE
@@ -1100,15 +1217,19 @@ class Game:
                         self.step(FIXED_DT)
                 if self._phase == "explode":
                     self.running = False  # skip explosion anim
-                # Minimal display: black screen with in-game timer
+                # Minimal display: black screen with in-game timer + snapshot
                 self.screen.fill((0, 0, 0))
                 game_secs = self._iteration / 60.0
                 m, s = divmod(int(game_secs), 60)
                 timer_str = f"Headless  —  {m}:{s:02d}  (tick {self._iteration})"
                 timer_surf = headless_font.render(timer_str, True, (160, 160, 180))
                 tx = self.width // 2 - timer_surf.get_width() // 2
-                ty = self.height // 2 - timer_surf.get_height() // 2
+                ty = self.height // 2 - timer_surf.get_height() // 2 - self._SNAP_H // 2 - 20
                 self.screen.blit(timer_surf, (tx, ty))
+                if self._headless_snap_surf is not None:
+                    snap_x = self.width // 2 - self._SNAP_W // 2
+                    snap_y = ty + timer_surf.get_height() + self._SNAP_PAD
+                    self.screen.blit(self._headless_snap_surf, (snap_x, snap_y))
                 pygame.display.flip()
         else:
             # Grab the mouse at game start

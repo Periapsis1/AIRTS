@@ -11,7 +11,7 @@ from entities.base import Entity
 from entities.shapes import RectEntity, CircleEntity
 from entities.command_center import CommandCenter
 from entities.metal_spot import MetalSpot
-from config.settings import OBSTACLE_COLOR, CC_SPAWN_INTERVAL, METAL_SPOT_RADIUS
+from config.settings import OBSTACLE_COLOR, CC_SPAWN_INTERVAL, METAL_SPOT_RADIUS, CC_OBSTACLE_EXCLUSION
 
 
 class BaseMapGenerator:
@@ -43,8 +43,18 @@ class DefaultMapGenerator(BaseMapGenerator):
         obs_type: str,
         entities: list[Entity]
     ) -> tuple[float, float]:
+        command_centers = [e for e in entities if isinstance(e, CommandCenter)]
         while True:
             x, y = self._random_point_in_rectangle(x1, y1, x2, y2)
+
+            # Enforce exclusion zone around command centers
+            if obs_type == "rect":
+                cx, cy = x + obs_width / 2, y + obs_height / 2
+            else:
+                cx, cy = x, y
+            if any(math.hypot(cx - cc.x, cy - cc.y) < CC_OBSTACLE_EXCLUSION for cc in command_centers):
+                continue
+
             if obs_type == "rect":
                 if not any(e.get_rect().colliderect(x, y, obs_width, obs_height) for e in entities):
                     return x, y

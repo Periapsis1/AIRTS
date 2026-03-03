@@ -1,12 +1,25 @@
 """Combat system: laser attacks, heal-laser healing."""
 from __future__ import annotations
 import math
+from dataclasses import dataclass, field
 from entities.base import Entity
 from entities.shapes import CircleEntity, RectEntity
 from entities.unit import Unit, HOLD_FIRE, TARGET_FIRE, FREE_FIRE
+from entities.weapon import Weapon
 from entities.command_center import CommandCenter
 from entities.laser import LaserFlash
 from core.helpers import line_intersects_circle, line_intersects_rect, angle_diff, circle_overlaps_aabb
+import config.audio as audio
+
+
+@dataclass
+class PendingChain:
+    source: Unit            # attacker (for color/width/stats)
+    weapon: Weapon          # weapon ref (damage, chain_range, colors)
+    last_target: Entity     # chain origin point
+    hit_set: set[int] = field(default_factory=set)  # entity_ids already hit
+    delay: float = 0.0      # countdown; fires when <= 0
+    team: int = 1           # attacker's team
 
 
 def _has_los(x1: float, y1: float, x2: float, y2: float,
@@ -125,6 +138,8 @@ def combat_step(
     circle_obs=None,
     rect_obs=None,
     team_aabb=None,
+    sounds=None,
+    pending_chains: list[PendingChain] | None = None,
 ):
     # Use pre-extracted obstacle geometry if provided, else extract here
     if circle_obs is None:
@@ -181,9 +196,90 @@ def combat_step(
                             stats.record_kill(a.team, target_team)
 
             a.laser_cooldown = a_cd
+            for ability in a.abilities:
+                ability.on_fire(a)
             lc = wpn.laser_color
             w = wpn.laser_width
             laser_flashes.append(
                 LaserFlash(ax, ay, best_target.x, best_target.y, lc, w,
                            source=a, target=best_target)
             )
+            if sounds is not None:
+                snd = sounds.get(wpn.sound)
+                if snd is not None:
+                    snd.set_volume(audio.master_volume)
+                    snd.play()
+
+            # Chain initiation
+            if pending_chains is not None and wpn.chain_range > 0 and a_dmg > 0:
+                pending_chains.append(PendingChain(
+                    source=a,
+                    weapon=wpn,
+                    last_target=best_target,
+                    hit_set={a.entity_id, best_target.entity_id},
+                    delay=wpn.chain_delay,
+                    team=a.team,
+                ))
+
+    # -- process pending chains ----------------------------------------------
+    if pending_chains is not None:
+        still_active: list[PendingChain] = []
+        for chain in pending_chains:
+            chain.delay -= dt
+            if chain.delay > 0:
+                still_active.append(chain)
+                continue
+
+            # Find nearest valid target within chain_range of last_target
+            origin = chain.last_target
+            ox, oy = origin.x, origin.y
+            best_next: Entity | None = None
+            best_dist_sq = float("inf")
+            cr_sq = chain.weapon.chain_range ** 2
+
+            candidates = grid.query_radius(ox, oy, chain.weapon.chain_range) if grid is not None else combatants
+            for b in candidates:
+                if not b.alive or b.entity_id in chain.hit_set:
+                    continue
+                if not hasattr(b, "team") or b.team == chain.team:
+                    continue
+                dx = b.x - ox
+                dy = b.y - oy
+                d_sq = dx * dx + dy * dy
+                if d_sq <= cr_sq and d_sq < best_dist_sq:
+                    best_dist_sq = d_sq
+                    best_next = b
+
+            if best_next is not None:
+                # Apply damage
+                was_alive = best_next.alive
+                best_next.take_damage(chain.weapon.damage)
+                if stats is not None:
+                    target_team = best_next.team if hasattr(best_next, "team") else 0
+                    if target_team:
+                        stats.record_damage(chain.team, target_team, chain.weapon.damage)
+                        if was_alive and not best_next.alive:
+                            stats.record_kill(chain.team, target_team)
+
+                # Create laser flash from last_target to new target
+                lc = chain.weapon.laser_color
+                w = chain.weapon.laser_width
+                laser_flashes.append(
+                    LaserFlash(ox, oy, best_next.x, best_next.y, lc, w,
+                               source=chain.last_target, target=best_next)
+                )
+                if sounds is not None:
+                    snd = sounds.get(chain.weapon.sound)
+                    if snd is not None:
+                        snd.set_volume(audio.master_volume)
+                        snd.play()
+
+                # Queue next bounce
+                chain.hit_set.add(best_next.entity_id)
+                chain.last_target = best_next
+                chain.delay = chain.weapon.chain_delay
+                still_active.append(chain)
+            # else: no valid target, chain ends (not re-added)
+
+        pending_chains.clear()
+        pending_chains.extend(still_active)

@@ -30,6 +30,10 @@ MACHINE_GUNNER_SYMBOL = (
     (-10, -10), (10, -10), (10, 10), (-10, 10),
 )
 
+SHOCKWAVE_SYMBOL = (
+    (0, -12), (12, 0), (0, 12), (-12, 0),
+)
+
 SCOUT_SYMBOL = (
     (0, -12), (8, 4), (-8, 4),
 )
@@ -53,7 +57,7 @@ UNIT_TYPES = {
         },
     },
     "tank": {
-        "hp": 300, "speed": 20, "radius": 7,
+        "hp": 250, "speed": 20, "radius": 7,
         "symbol": TANK_SYMBOL, "can_attack": True,
         "fov": 150, "turn_rate": 180, "los": 100,
         "weapon": {"name": "Laser", "damage": 7, "range": 50, "cooldown": 2.0},
@@ -62,7 +66,8 @@ UNIT_TYPES = {
         "hp": 50, "speed": 30, "radius": 5,
         "symbol": SNIPER_SYMBOL, "can_attack": True,
         "fov": 45, "turn_rate": 180, "los": 200,
-        "weapon": {"name": "Laser", "damage": 35, "range": 150, "cooldown": 6.0},
+        "weapon": {"name": "Heavy Laser", "damage": 35, "range": 140, "cooldown": 6.0,
+                   "laser_width": 3, "sound": "laser"},
     },
     "machine_gunner": {
         "hp": 70, "speed": 40, "radius": 5,
@@ -76,6 +81,15 @@ UNIT_TYPES = {
         "fov": 180, "turn_rate": 180, "los": 150,
         "spawn_count": 3,
         "weapon": {"name": "Laser", "damage": 4, "range": 15, "cooldown": 0.5},
+    },
+    "shockwave": {
+        "hp": 70, "speed": 30, "radius": 5,
+        "symbol": SHOCKWAVE_SYMBOL, "can_attack": True,
+        "fov": 360, "turn_rate": 180, "los": 100,
+        "weapon": {
+            "name": "ChainLaser", "damage": 5, "range": 60, "cooldown": 3.0,
+            "chain_range": 70.0, "chain_delay": 0.2,
+        },
     },
     "command_center": {
         "hp": 1000, "speed": 0, "radius": 10,

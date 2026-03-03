@@ -24,10 +24,11 @@ def capture_step(entities: list[Entity], command_centers: list[CommandCenter], u
             dy = unit.y - sy
             if dx * dx + dy * dy > cap_radius_sq:
                 continue
+            weight = 0.3 if unit.unit_type == "scout" else 1
             if unit.team == 1:
-                unit_difference += 1
+                unit_difference += weight
             elif unit.team == 2:
-                unit_difference -= 1
+                unit_difference -= weight
         metal_spot.update_progress(unit_difference, dt)
         if metal_spot.capture_progress >= 1.0:
             metal_spot.claim(1)

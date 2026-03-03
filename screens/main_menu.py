@@ -73,7 +73,7 @@ class MainMenuScreen(BaseScreen):
         for i, (label, target) in enumerate(labels):
             bx = self.width // 2 - BTN_WIDTH // 2
             by = start_y + i * spacing
-            enabled = target not in ("options",)
+            enabled = True
             btn = Button(bx, by, BTN_WIDTH, BTN_HEIGHT, label, enabled=enabled)
             self._buttons.append((btn, target))
 

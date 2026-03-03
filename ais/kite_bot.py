@@ -72,8 +72,8 @@ class KiteBot(BaseAI):
         """Cooldown-driven kiting: close in to fire, back off while reloading."""
         sniper_range = sniper.attack_range  # 150
 
-        # Prefer enemies we outrange
-        outranged = [e for e in enemies if sniper_range > e.attack_range]
+        # Prefer mobile enemies we outrange (exclude buildings like CC)
+        outranged = [e for e in enemies if sniper_range > e.attack_range and not e.is_building]
         target_pool = outranged if outranged else enemies
         nearest = self._closest(sniper, target_pool)
 
