@@ -71,6 +71,10 @@ class Game:
         replay_config: dict | None = None,
         player_name: str = "Human",
         headless: bool = False,
+        max_ticks: int = 0,
+        save_replay: bool = True,
+        step_timeout_ms: float = 0,
+        replay_output_dir: str = "replays",
     ):
         """
         *team_ai* maps team numbers to AI controllers.  Teams **not** present
@@ -101,6 +105,10 @@ class Game:
         self.running = False
         self.fps = 60
         self._headless = headless
+        self._max_ticks = max_ticks
+        self._save_replay = save_replay
+        self._step_timeout_ms = step_timeout_ms
+        self._replay_output_dir = replay_output_dir
         self._player_name = player_name
         self._fps_font = pygame.font.SysFont(None, 22)
         self._label_font = pygame.font.SysFont(None, 20)
@@ -110,11 +118,14 @@ class Game:
         self._pending_chains: list[PendingChain] = []
 
         # -- sounds -----------------------------------------------------------
-        _sounds_dir = os.path.join(os.path.dirname(__file__), "sounds")
-        self._sounds: dict[str, pygame.mixer.Sound] = {
-            "fast_laser": pygame.mixer.Sound(os.path.join(_sounds_dir, "fast_laser.mp3")),
-            "laser": pygame.mixer.Sound(os.path.join(_sounds_dir, "laser.mp3")),
-        }
+        if not headless:
+            _sounds_dir = os.path.join(os.path.dirname(__file__), "sounds")
+            self._sounds: dict[str, pygame.mixer.Sound] = {
+                "fast_laser": pygame.mixer.Sound(os.path.join(_sounds_dir, "fast_laser.mp3")),
+                "laser": pygame.mixer.Sound(os.path.join(_sounds_dir, "laser.mp3")),
+            }
+        else:
+            self._sounds: dict[str, pygame.mixer.Sound] = {}
 
         gen = map_generator or DefaultMapGenerator()
         self.entities = gen.generate(width, height)
@@ -168,7 +179,10 @@ class Game:
         self._mid_dragging = False
         self._mid_last: tuple[int, int] = (0, 0)
 
-        self._replay_recorder = ReplayRecorder(width, height, replay_config)
+        if save_replay:
+            self._replay_recorder = ReplayRecorder(width, height, replay_config)
+        else:
+            self._replay_recorder = None
 
         # -- phase state machine: warp_in → playing → explode ----------------
         self._phase: str = "warp_in"
@@ -670,8 +684,14 @@ class Game:
         self._stats.record_subsystem("filtering", (_perf() - _t) * 1000)
 
         _t = _perf()
-        for ai in self.team_ai.values():
-            ai.on_step(self._iteration)
+        for team, ai in self.team_ai.items():
+            try:
+                ai.on_step(self._iteration)
+            except Exception:
+                other_team = 2 if team == 1 else 1
+                self._winner = other_team
+                self._phase = "explode"
+                self._anim_timer = 0.0
         self._stats.record_subsystem("ai_step", (_perf() - _t) * 1000)
 
         _t = _perf()
@@ -770,9 +790,10 @@ class Game:
         if self._headless and (self._iteration == 1 or self._iteration % 5000 == 0):
             self._take_headless_snapshot()
 
-        self._replay_recorder.capture_tick(
-            self._iteration, self.entities, self.laser_flashes,
-        )
+        if self._replay_recorder is not None:
+            self._replay_recorder.capture_tick(
+                self._iteration, self.entities, self.laser_flashes,
+            )
 
         # -- win condition: check if < 2 teams have a living CC ----------------
         ccs = self._get_command_centers()
@@ -790,8 +811,20 @@ class Game:
             for t in losing_teams:
                 self._init_fragments(t)
 
+        # Tick limit — force draw if exceeded
+        if self._max_ticks > 0 and self._iteration >= self._max_ticks and self._winner == 0:
+            self._winner = -1
+            self._phase = "explode"
+            self._anim_timer = 0.0
+
         _elapsed_ms = (time.perf_counter() - _t0) * 1000.0
         self._stats.record_step_time(_elapsed_ms)
+
+        # Step timeout — force draw if a single step is too slow
+        if self._step_timeout_ms > 0 and _elapsed_ms > self._step_timeout_ms and self._winner == 0:
+            self._winner = -1
+            self._phase = "explode"
+            self._anim_timer = 0.0
 
     # -- serialization --------------------------------------------------------
 
@@ -1276,7 +1309,13 @@ class Game:
             self._set_mouse_grab(False)
 
         stats_data = self._stats.finalize(self._winner, self.entities)
-        replay_path = self._replay_recorder.save(self._winner, self.human_teams, stats=stats_data)
+        if self._replay_recorder is not None:
+            replay_path = self._replay_recorder.save(
+                self._winner, self.human_teams, stats=stats_data,
+                output_dir=self._replay_output_dir,
+            )
+        else:
+            replay_path = ""
 
         team_names = {}
         for team in [1, 2]:
