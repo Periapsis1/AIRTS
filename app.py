@@ -14,6 +14,7 @@ from screens.replay_list import ReplayListScreen
 from screens.replay_playback import ReplayPlaybackScreen
 from screens.crash_notice import CrashNoticeScreen
 from screens.options import OptionsScreen
+from screens.arena_screen import ArenaScreen
 
 
 class App:
@@ -69,6 +70,10 @@ class App:
 
         elif name == "options":
             return OptionsScreen(self._screen, self._clock).run()
+
+        elif name == "arena":
+            choices = self._registry.get_choices()
+            return ArenaScreen(self._screen, self._clock, choices).run()
 
         elif name == "replays":
             return ReplayListScreen(self._screen, self._clock).run()

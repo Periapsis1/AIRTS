@@ -253,8 +253,9 @@ class ReplayRecorder:
         winner: int,
         human_teams: set[int],
         stats: dict | None = None,
+        output_dir: str = "replays",
     ) -> str:
-        """Serialise and write replay to replays/ directory. Returns filepath."""
+        """Serialise and write replay to *output_dir*. Returns filepath."""
         start = self._start_tick or 0
         duration_ticks = self._last_tick - start
         duration_seconds = round(duration_ticks / 60.0, 2)
@@ -279,10 +280,10 @@ class ReplayRecorder:
             data["stats"] = stats
         data["frames"] = self._frames
 
-        os.makedirs("replays", exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"replay_{ts}.rtsreplay"
-        filepath = os.path.join("replays", filename)
+        filepath = os.path.join(output_dir, filename)
 
         raw = json.dumps(data, separators=(",", ":"))
         with gzip.open(filepath, "wt", encoding="utf-8", compresslevel=9) as f:

@@ -48,7 +48,7 @@ class _BackgroundUnit:
 
 
 class MainMenuScreen(BaseScreen):
-    """Title screen with background animation and 5 navigation buttons."""
+    """Title screen with background animation and 6 navigation buttons."""
 
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock):
         super().__init__(screen, clock)
@@ -62,12 +62,13 @@ class MainMenuScreen(BaseScreen):
         # Buttons — vertically stacked in center
         labels = [
             ("Create Lobby", "create_lobby"),
+            ("AI Arena", "arena"),
             ("Replays", "replays"),
             ("Learn to Play", "guides"),
             ("Options", "options"),
             ("Exit", "quit"),
         ]
-        start_y = self.height // 2 + 10
+        start_y = self.height // 2 - 20
         spacing = BTN_HEIGHT + 10
         self._buttons: list[tuple[Button, str]] = []
         for i, (label, target) in enumerate(labels):
