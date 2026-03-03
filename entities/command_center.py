@@ -91,12 +91,14 @@ class CommandCenter(Unit):
         if self.selected:
             pygame.draw.polygon(surface, SELECTED_COLOR, translated, 2)
 
-        heal_surf = pygame.Surface((int(CC_HEAL_RADIUS * 2), int(CC_HEAL_RADIUS * 2)), pygame.SRCALPHA)
-        fill_c = CC_HEAL_COLOR_T1 if self.team == 1 else CC_HEAL_COLOR_T2
-        ring_c = CC_HEAL_RING_T1 if self.team == 1 else CC_HEAL_RING_T2
-        pygame.draw.circle(heal_surf, fill_c, (int(CC_HEAL_RADIUS), int(CC_HEAL_RADIUS)), int(CC_HEAL_RADIUS))
-        pygame.draw.circle(heal_surf, ring_c, (int(CC_HEAL_RADIUS), int(CC_HEAL_RADIUS)), int(CC_HEAL_RADIUS), 1)
-        surface.blit(heal_surf, (self.x - CC_HEAL_RADIUS, self.y - CC_HEAL_RADIUS))
+        # Allied CC: only show heal radius and FOV when selected; enemies: always
+        if not self.selectable or self.selected:
+            heal_surf = pygame.Surface((int(CC_HEAL_RADIUS * 2), int(CC_HEAL_RADIUS * 2)), pygame.SRCALPHA)
+            fill_c = CC_HEAL_COLOR_T1 if self.team == 1 else CC_HEAL_COLOR_T2
+            ring_c = CC_HEAL_RING_T1 if self.team == 1 else CC_HEAL_RING_T2
+            pygame.draw.circle(heal_surf, fill_c, (int(CC_HEAL_RADIUS), int(CC_HEAL_RADIUS)), int(CC_HEAL_RADIUS))
+            pygame.draw.circle(heal_surf, ring_c, (int(CC_HEAL_RADIUS), int(CC_HEAL_RADIUS)), int(CC_HEAL_RADIUS), 1)
+            surface.blit(heal_surf, (self.x - CC_HEAL_RADIUS, self.y - CC_HEAL_RADIUS))
 
         progress = min(self._spawn_timer / CC_SPAWN_INTERVAL, 1.0)
         if progress < 1.0:
@@ -109,8 +111,9 @@ class CommandCenter(Unit):
             arc_r = CC_RADIUS + 5
             pygame.draw.circle(surface, SELECTED_COLOR, (int(self.x), int(self.y)), int(arc_r), 2)
 
-        # FOV/range arc (inherited from Unit)
-        self._draw_fov_arc(surface, RANGE_COLOR)
+        # FOV/range arc (inherited from Unit) — allied: selected only
+        if not self.selectable or self.selected:
+            self._draw_fov_arc(surface, RANGE_COLOR)
 
         self.draw_health_bar(surface, self.x, self.y, CC_RADIUS + HEALTH_BAR_OFFSET, bar_w=40)
 

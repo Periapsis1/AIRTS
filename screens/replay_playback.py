@@ -15,6 +15,11 @@ from config.settings import (
     METAL_SPOT_CAPTURE_ARC_COLOR_T1,
     METAL_SPOT_CAPTURE_ARC_COLOR_T2,
     METAL_EXTRACTOR_SPAWN_BONUS,
+    SELECTED_COLOR, SELECTION_FILL_COLOR, SELECTION_RECT_COLOR,
+    TEAM1_COLOR, TEAM2_COLOR, RANGE_COLOR, MEDIC_HEAL_COLOR,
+    CC_LASER_RANGE, CC_HEAL_RADIUS,
+    CC_HEAL_COLOR_T1, CC_HEAL_COLOR_T2,
+    CC_HEAL_RING_T1, CC_HEAL_RING_T2,
 )
 from config.unit_types import UNIT_TYPES
 from ui.widgets import Slider, Button, ToggleGroup, LineGraph, _get_font
@@ -29,8 +34,13 @@ TOP_BAR_HEIGHT = 40
 BOTTOM_BAR_HEIGHT = 50
 _SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0]
 
+# Command line colors for selected unit action indicators
+_MOVE_CMD_COLOR = (0, 140, 40)     # dark green for move commands
+_ATTACK_CMD_COLOR = (180, 30, 30)  # dark red for attack commands
+_ARROW_SIZE = 6                     # arrowhead half-length
+
 # Fields that get linearly interpolated between frames
-_LERP_FIELDS = {"x", "y", "rot", "cp", "tx", "ty"}
+_LERP_FIELDS = {"x", "y", "rot", "cp", "tx", "ty", "fa", "atx", "aty"}
 
 _STAT_TABS = [
     ("cc_health", "CC HP"), ("army_count", "Army Size"),
@@ -56,6 +66,14 @@ def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
 
+def _angle_lerp(a: float, b: float, t: float) -> float:
+    """Lerp between two angles (radians) using shortest path."""
+    d = (b - a) % math.tau
+    if d > math.pi:
+        d -= math.tau
+    return a + d * t
+
+
 def _lerp_entity(prev: dict, cur: dict, t: float) -> dict:
     """Blend numeric visual fields between two snapshots of the same entity."""
     result = dict(cur)
@@ -64,7 +82,10 @@ def _lerp_entity(prev: dict, cur: dict, t: float) -> dict:
             pv = prev[key]
             cv = cur[key]
             if isinstance(pv, (int, float)) and isinstance(cv, (int, float)):
-                result[key] = _lerp(float(pv), float(cv), t)
+                if key == "fa":
+                    result[key] = _angle_lerp(float(pv), float(cv), t)
+                else:
+                    result[key] = _lerp(float(pv), float(cv), t)
     return result
 
 
@@ -130,9 +151,23 @@ class ReplayPlaybackScreen(BaseScreen):
                                         "Show Stats", enabled=has_stats)
         self._score_screen_btn = Button(mw - 200, top_cy, 100, btn_h,
                                         "Score Screen", enabled=has_stats)
-        self._show_actions_btn = Button(mw - 300, top_cy, 95, btn_h,
-                                        "Show Actions")
-        self._show_actions = False
+        self._team_view = 0  # 0=All Teams, 1=Team 1, 2=Team 2
+        self._team_view_btn = Button(mw - 300, top_cy, 95, btn_h,
+                                     "All Teams")
+
+        # Selection state
+        self._selected_ids: set[int] = set()
+        self._dragging = False
+        self._drag_start: tuple[int, int] = (0, 0)
+        self._drag_end: tuple[int, int] = (0, 0)
+        self._selection_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
+        self._last_click_time = 0
+        self._last_click_pos: tuple[int, int] = (0, 0)
+
+        # Fog of war surfaces
+        self._fog_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
+        self._fog_border = pygame.Surface((mw, mh))
+        self._fog_border.set_colorkey((0, 0, 0))
 
         # ── Bottom bar: Play/Pause (left), Scrubber (middle), Speed (right) ──
         self._play_btn = Button(8, bot_y + 12, 45, btn_h, "||",
@@ -315,8 +350,11 @@ class ReplayPlaybackScreen(BaseScreen):
                     self._score_anim_start = pygame.time.get_ticks()
                     continue
 
-                if self._show_actions_btn.handle_event(event):
-                    self._show_actions = not self._show_actions
+                if self._team_view_btn.handle_event(event):
+                    self._team_view = (self._team_view + 1) % 3
+                    _TV_LABELS = ["All Teams", self._name1, self._name2]
+                    self._team_view_btn.label = _TV_LABELS[self._team_view]
+                    self._selected_ids.clear()
                     continue
 
                 if self._play_btn.handle_event(event):
@@ -336,6 +374,46 @@ class ReplayPlaybackScreen(BaseScreen):
                         self._ended = False
                         self._play_btn.label = ">"
                         self._play_btn.icon = "play"
+
+                # Selection input handling (only in game area)
+                mw = self._reader.map_width
+                mh = self._reader.map_height
+                game_rect = pygame.Rect(0, self._gy, mw, mh)
+
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    if game_rect.collidepoint(event.pos):
+                        self._dragging = True
+                        self._drag_start = event.pos
+                        self._drag_end = event.pos
+
+                elif event.type == pygame.MOUSEMOTION and self._dragging:
+                    self._drag_end = event.pos
+
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self._dragging:
+                    self._dragging = False
+                    mx, my = event.pos
+                    sx, sy = self._drag_start
+                    drag_r = math.hypot(mx - sx, my - sy)
+                    additive = pygame.key.get_mods() & pygame.KMOD_SHIFT
+                    entities = self._get_interpolated_entities()
+
+                    if drag_r < 5:
+                        # Click or double-click
+                        now = pygame.time.get_ticks()
+                        lx, ly = self._last_click_pos
+                        if (now - self._last_click_time < 400
+                                and math.hypot(mx - lx, my - ly) < 10):
+                            self._select_all_of_type(entities, mx, my - self._gy)
+                        else:
+                            self._click_select(entities, mx, my - self._gy, additive)
+                        self._last_click_time = now
+                        self._last_click_pos = (mx, my)
+                    else:
+                        # Circle select using center and radius of drag
+                        cx = (sx + mx) / 2.0
+                        cy = (sy + my) / 2.0 - self._gy
+                        sr = drag_r / 2.0
+                        self._circle_select(entities, cx, cy, sr, additive)
 
             if self._show_score_screen:
                 self._draw_stats_overlay()
@@ -399,9 +477,43 @@ class ReplayPlaybackScreen(BaseScreen):
             elif t == "U":
                 self._draw_unit(ent)
 
+        # FOV arcs and selection rings (drawn on top of entities)
+        for ent in entities:
+            t = ent.get("t")
+            if t in ("U", "CC", "ME"):
+                self._draw_fov_arc(ent)
+                eid = ent.get("id")
+                if eid in self._selected_ids:
+                    ex = ent.get("x", 0)
+                    ey = ent.get("y", 0) + gy
+                    r = CC_RADIUS + 2 if t == "CC" else ent.get("r", 5) + 2
+                    pygame.draw.circle(self.screen, SELECTED_COLOR,
+                                       (int(ex), int(ey)), int(r), 1)
+
         # Draw laser flashes
         for lf in self._cur_lasers:
             self._draw_laser(lf)
+
+        # Team name labels above command centers
+        self._draw_team_labels(entities)
+
+        # Drag selection circle
+        if self._dragging:
+            sx, sy = self._drag_start
+            ex, ey = self._drag_end
+            cx = (sx + ex) / 2.0
+            cy = (sy + ey) / 2.0
+            r = math.hypot(ex - sx, ey - sy) / 2.0
+            if r >= 5:
+                self._selection_surface.fill((0, 0, 0, 0))
+                pygame.draw.circle(self._selection_surface, SELECTION_FILL_COLOR,
+                                   (int(cx), int(cy - gy)), int(r))
+                pygame.draw.circle(self._selection_surface, SELECTION_RECT_COLOR,
+                                   (int(cx), int(cy - gy)), int(r), 1)
+                self.screen.blit(self._selection_surface, (0, gy))
+
+        # Fog of war
+        self._draw_fog(entities)
 
         # Remove clip
         self.screen.set_clip(None)
@@ -417,7 +529,7 @@ class ReplayPlaybackScreen(BaseScreen):
 
         # Top bar buttons
         self._back_btn.draw(self.screen)
-        self._show_actions_btn.draw(self.screen)
+        self._team_view_btn.draw(self.screen)
         self._score_screen_btn.draw(self.screen)
         self._inline_stats_btn.draw(self.screen)
 
@@ -711,6 +823,247 @@ class ReplayPlaybackScreen(BaseScreen):
 
         self.screen.set_clip(old_clip)
 
+    # -- selection system ---------------------------------------------------
+
+    def _is_selectable(self, ent: dict) -> bool:
+        """Check if an entity is selectable in the current team view mode."""
+        t = ent.get("t")
+        if t not in ("U", "CC", "ME"):
+            return False
+        if self._team_view == 0:
+            return True
+        return ent.get("tm") == self._team_view
+
+    def _click_select(self, entities: list[dict], mx: float, my: float,
+                      additive: bool):
+        """Select the closest selectable entity under cursor."""
+        best_id: int | None = None
+        best_dist = float("inf")
+        for ent in entities:
+            if not self._is_selectable(ent):
+                continue
+            ex, ey = ent.get("x", 0), ent.get("y", 0)
+            t = ent.get("t")
+            r = CC_RADIUS if t == "CC" else ent.get("r", 5)
+            d = math.hypot(ex - mx, ey - my)
+            if d <= r and d < best_dist:
+                best_dist = d
+                best_id = ent.get("id")
+        if not additive:
+            self._selected_ids.clear()
+        if best_id is not None:
+            self._selected_ids.add(best_id)
+
+    def _circle_select(self, entities: list[dict], cx: float, cy: float,
+                       sr: float, additive: bool):
+        """Select all selectable entities in a drag circle (CC only if no units)."""
+        if not additive:
+            self._selected_ids.clear()
+        selected_units: list[int] = []
+        cc_id: int | None = None
+        for ent in entities:
+            if not self._is_selectable(ent):
+                continue
+            ex, ey = ent.get("x", 0), ent.get("y", 0)
+            t = ent.get("t")
+            er = CC_RADIUS if t == "CC" else ent.get("r", 5)
+            if math.hypot(ex - cx, ey - cy) <= sr + er:
+                if t == "CC":
+                    cc_id = ent.get("id")
+                elif t == "U":
+                    selected_units.append(ent.get("id"))
+        if selected_units:
+            self._selected_ids.update(selected_units)
+        elif cc_id is not None:
+            self._selected_ids.add(cc_id)
+
+    def _select_all_of_type(self, entities: list[dict], mx: float, my: float):
+        """Double-click: select all selectable units of the same type under cursor."""
+        best: dict | None = None
+        best_dist = float("inf")
+        for ent in entities:
+            if ent.get("t") != "U" or not self._is_selectable(ent):
+                continue
+            ex, ey = ent.get("x", 0), ent.get("y", 0)
+            r = ent.get("r", 5)
+            d = math.hypot(ex - mx, ey - my)
+            if d <= r and d < best_dist:
+                best_dist = d
+                best = ent
+        if best is None:
+            return
+        self._selected_ids.clear()
+        target_type = best.get("ut")
+        target_team = best.get("tm")
+        for ent in entities:
+            if (ent.get("t") == "U" and self._is_selectable(ent)
+                    and ent.get("ut") == target_type
+                    and ent.get("tm") == target_team):
+                self._selected_ids.add(ent.get("id"))
+
+    # -- FOV arc drawing ----------------------------------------------------
+
+    def _draw_fov_arc(self, ent: dict):
+        """Draw FOV arc for a unit/CC/ME, mirroring Unit._draw_fov_arc."""
+        t = ent.get("t")
+        ut = ent.get("ut", "soldier")
+        eid = ent.get("id")
+        stats = UNIT_TYPES.get(ut, {})
+        fov_deg = stats.get("fov", 90)
+        fov = math.radians(fov_deg)
+
+        # Visibility rules: selected → show; non-selectable (enemy) → show;
+        # selectable but not selected (ally) → hide
+        is_selected = eid in self._selected_ids
+        is_selectable = self._is_selectable(ent)
+        if not is_selected and is_selectable:
+            # CC heal ring: also show when selected
+            return
+
+        ex = ent.get("x", 0)
+        ey = ent.get("y", 0) + self._gy
+        tm = ent.get("tm", 1)
+
+        # CC: show heal radius circle + attack range
+        if t == "CC":
+            # Heal radius circle
+            heal_r = int(CC_HEAL_RADIUS)
+            heal_color = CC_HEAL_COLOR_T1 if tm == 1 else CC_HEAL_COLOR_T2
+            heal_ring = CC_HEAL_RING_T1 if tm == 1 else CC_HEAL_RING_T2
+            temp = pygame.Surface((heal_r * 2, heal_r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(temp, heal_color, (heal_r, heal_r), heal_r)
+            pygame.draw.circle(temp, heal_ring, (heal_r, heal_r), heal_r, 1)
+            self.screen.blit(temp, (int(ex) - heal_r, int(ey) - heal_r))
+
+            # Attack range circle
+            atk_r = int(CC_LASER_RANGE)
+            temp2 = pygame.Surface((atk_r * 2, atk_r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(temp2, RANGE_COLOR, (atk_r, atk_r), atk_r, 1)
+            self.screen.blit(temp2, (int(ex) - atk_r, int(ey) - atk_r))
+            return
+
+        # ME: no weapon, skip
+        if t == "ME":
+            return
+
+        # Unit: draw FOV arc
+        weapon = stats.get("weapon")
+        if not weapon:
+            return
+        r = int(weapon.get("range", 50))
+        if r <= 0:
+            return
+        is_healer = weapon.get("hits_only_friendly", False)
+        color = MEDIC_HEAL_COLOR if is_healer else RANGE_COLOR
+        fa = ent.get("fa", 0.0)
+
+        half_fov = fov / 2.0
+        if fov >= math.tau - 0.01:
+            temp = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+            pygame.draw.circle(temp, color, (r, r), r, 1)
+            self.screen.blit(temp, (int(ex) - r, int(ey) - r))
+            return
+
+        # Polygon arc: center -> arc points -> center
+        start = fa - half_fov
+        steps = max(int(math.degrees(fov) / 3), 8)
+        points = [(ex, ey)]
+        for i in range(steps + 1):
+            a = start + fov * i / steps
+            points.append((ex + r * math.cos(a), ey + r * math.sin(a)))
+        points.append((ex, ey))
+
+        temp_size = r * 2 + 4
+        temp = pygame.Surface((temp_size, temp_size), pygame.SRCALPHA)
+        ox = temp_size // 2 - ex
+        oy = temp_size // 2 - ey
+        shifted = [(px + ox, py + oy) for px, py in points]
+        pygame.draw.lines(temp, color, False, shifted, 1)
+        self.screen.blit(temp, (ex - temp_size // 2, ey - temp_size // 2))
+
+    # -- fog of war ---------------------------------------------------------
+
+    def _draw_fog(self, entities: list[dict]):
+        """Draw fog of war overlay when in team view mode."""
+        if self._team_view == 0:
+            return
+
+        FOG_ALPHA = 200
+        mw = self._reader.map_width
+        mh = self._reader.map_height
+        self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
+
+        # Collect LOS circles from the viewed team's entities
+        los_circles: list[tuple[int, int, int]] = []
+        for ent in entities:
+            t = ent.get("t")
+            if t not in ("U", "CC", "ME"):
+                continue
+            if ent.get("tm") != self._team_view:
+                continue
+            ut = ent.get("ut", "soldier")
+            stats = UNIT_TYPES.get(ut, {})
+            los = int(stats.get("los", 100))
+            if los <= 0:
+                continue
+            los_circles.append((int(ent.get("x", 0)), int(ent.get("y", 0)), los))
+
+        # Punch transparent holes for LOS
+        for ex, ey, r in los_circles:
+            size = r * 2
+            cutout = pygame.Surface((size, size), pygame.SRCALPHA)
+            pygame.draw.circle(cutout, (0, 0, 0, FOG_ALPHA), (r, r), r)
+            self._fog_surface.blit(cutout, (ex - r, ey - r),
+                                   special_flags=pygame.BLEND_RGBA_SUB)
+
+        self.screen.blit(self._fog_surface, (0, self._gy))
+
+        # Border at the fog edge
+        self._fog_border.fill((0, 0, 0))
+        for ex, ey, r in los_circles:
+            pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)
+        for ex, ey, r in los_circles:
+            pygame.draw.circle(self._fog_border, (0, 0, 0), (ex, ey), max(r - 1, 0))
+        self.screen.blit(self._fog_border, (0, self._gy))
+
+    # -- team name labels ---------------------------------------------------
+
+    def _draw_team_labels(self, entities: list[dict]):
+        """Draw player/AI name labels above command centers."""
+        font = _get_font(20)
+        for ent in entities:
+            if ent.get("t") != "CC":
+                continue
+            tm = ent.get("tm", 1)
+            name = self._team_names.get(tm, f"Team {tm}")
+            team_color = TEAM1_COLOR if tm == 1 else TEAM2_COLOR
+            name_surf = font.render(name, True, team_color)
+            nx = int(ent.get("x", 0)) - name_surf.get_width() // 2
+            ny = int(ent.get("y", 0)) + self._gy - 40
+            self.screen.blit(name_surf, (nx, ny))
+
+    # -- command line helper ------------------------------------------------
+
+    def _draw_command_line(self, x1: float, y1: float, x2: float, y2: float,
+                           color: tuple):
+        """Draw a command line from (x1,y1) to (x2,y2) with an arrowhead at the end."""
+        pygame.draw.line(self.screen, color, (x1, y1), (x2, y2), 1)
+        # Arrowhead
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = math.hypot(dx, dy)
+        if dist < 1:
+            return
+        # Unit direction vector
+        ux, uy = dx / dist, dy / dist
+        # Perpendicular
+        px, py = -uy, ux
+        s = _ARROW_SIZE
+        # Arrow tip is at (x2, y2), two wings behind it
+        wing1 = (x2 - ux * s + px * s * 0.5, y2 - uy * s + py * s * 0.5)
+        wing2 = (x2 - ux * s - px * s * 0.5, y2 - uy * s - py * s * 0.5)
+        pygame.draw.polygon(self.screen, color, [(x2, y2), wing1, wing2])
+
     # -- entity renderers ---------------------------------------------------
     # All entity positions are offset by self._gy (top bar height)
 
@@ -721,12 +1074,19 @@ class ReplayPlaybackScreen(BaseScreen):
         hp = ent.get("hp", 100)
         ut = ent.get("ut", "soldier")
 
-        # Move indicator: line + circle at target
-        if self._show_actions and "tx" in ent and "ty" in ent:
-            tx = ent["tx"]
-            ty = ent["ty"] + self._gy
-            pygame.draw.line(self.screen, c, (x, y), (tx, ty), 1)
-            pygame.draw.circle(self.screen, c, (int(tx), int(ty)), 3, 1)
+        # Command indicators (shown for selected units)
+        eid = ent.get("id")
+        if eid in self._selected_ids:
+            if "atx" in ent and "aty" in ent:
+                # Attack command: dark red line + arrow
+                atx = ent["atx"]
+                aty = ent["aty"] + self._gy
+                self._draw_command_line(x, y, atx, aty, _ATTACK_CMD_COLOR)
+            elif "tx" in ent and "ty" in ent:
+                # Move command: dark green line + arrow
+                tx = ent["tx"]
+                ty = ent["ty"] + self._gy
+                self._draw_command_line(x, y, tx, ty, _MOVE_CMD_COLOR)
 
         pygame.draw.circle(self.screen, c, (x, y), r)
 

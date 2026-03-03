@@ -18,6 +18,28 @@ HOLD_FIRE = "hold_fire"
 TARGET_FIRE = "target_fire"
 FREE_FIRE = "free_fire"
 
+# Command line colors
+_MOVE_CMD_COLOR = (0, 140, 40)     # dark green for move commands
+_ATTACK_CMD_COLOR = (180, 30, 30)  # dark red for attack commands
+_ARROW_SIZE = 6
+
+
+def _draw_command_line(surface: pygame.Surface, x1: float, y1: float,
+                       x2: float, y2: float, color: tuple):
+    """Draw a command line from (x1,y1) to (x2,y2) with an arrowhead."""
+    pygame.draw.line(surface, color, (x1, y1), (x2, y2), 1)
+    dx = x2 - x1
+    dy = y2 - y1
+    dist = math.hypot(dx, dy)
+    if dist < 1:
+        return
+    ux, uy = dx / dist, dy / dist
+    px, py = -uy, ux
+    s = _ARROW_SIZE
+    wing1 = (x2 - ux * s + px * s * 0.5, y2 - uy * s + py * s * 0.5)
+    wing2 = (x2 - ux * s - px * s * 0.5, y2 - uy * s - py * s * 0.5)
+    pygame.draw.polygon(surface, color, [(x2, y2), wing1, wing2])
+
 
 class Unit(CircleEntity, Damageable):
     _steer_obstacles: tuple = ()  # set by Game; tuples of (x, y, radius)
@@ -285,15 +307,21 @@ class Unit(CircleEntity, Damageable):
         if self.selected:
             pygame.draw.circle(surface, SELECTED_COLOR, (self.x, self.y), self.radius + 2, 1)
 
-            if self.target is not None:
-                pygame.draw.line(surface, self._base_color, (self.x, self.y), self.target, 1)
-                tx, ty = self.target
-                pygame.draw.circle(surface, self._base_color, (int(tx), int(ty)), 3, 1)
+            if self.attack_target is not None and self.attack_target.alive:
+                _draw_command_line(surface, self.x, self.y,
+                                  self.attack_target.x, self.attack_target.y,
+                                  _ATTACK_CMD_COLOR)
+            elif self.target is not None:
+                _draw_command_line(surface, self.x, self.y,
+                                  self.target[0], self.target[1],
+                                  _MOVE_CMD_COLOR)
 
-        if self.weapon and self.weapon.hits_only_friendly:
-            self._draw_fov_arc(surface, MEDIC_HEAL_COLOR)
-        else:
-            self._draw_fov_arc(surface, RANGE_COLOR)
+        # Allied units: only show FOV arc when selected; enemies: always
+        if not self.selectable or self.selected:
+            if self.weapon and self.weapon.hits_only_friendly:
+                self._draw_fov_arc(surface, MEDIC_HEAL_COLOR)
+            else:
+                self._draw_fov_arc(surface, RANGE_COLOR)
 
         self.draw_health_bar(surface, self.x, self.y, self.radius + HEALTH_BAR_OFFSET)
 

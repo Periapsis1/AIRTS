@@ -486,16 +486,18 @@ class Game:
         for e in self.entities:
             if isinstance(e, Unit) and e.alive:
                 grid.insert(e)
+                # AABB includes all alive units (buildings + mobile) so
+                # combat targeting doesn't skip buildings as potential targets
+                bb = team_aabb.get(e.team)
+                if bb is None:
+                    team_aabb[e.team] = (e.x, e.y, e.x, e.y)
+                else:
+                    team_aabb[e.team] = (
+                        min(bb[0], e.x), min(bb[1], e.y),
+                        max(bb[2], e.x), max(bb[3], e.y),
+                    )
                 if not e.is_building:
                     alive_mobile_units.append(e)
-                    bb = team_aabb.get(e.team)
-                    if bb is None:
-                        team_aabb[e.team] = (e.x, e.y, e.x, e.y)
-                    else:
-                        team_aabb[e.team] = (
-                            min(bb[0], e.x), min(bb[1], e.y),
-                            max(bb[2], e.x), max(bb[3], e.y),
-                        )
                     if e.hp < e.max_hp:
                         team_any_hurt[e.team] = True
         Unit._spatial_grid = grid

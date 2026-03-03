@@ -70,9 +70,15 @@ def _entity_visual(e: Entity) -> dict | None:
         elif e.unit_type == "metal_extractor":
             d["t"] = "ME"
             d["rot"] = _q2(e.rotation)
+        else:
+            # Non-building units: record facing angle for FOV arc rendering
+            d["fa"] = _q2(e.facing_angle)
         if e.target is not None:
             d["tx"] = _q1(e.target[0])
             d["ty"] = _q1(e.target[1])
+        if e.attack_target is not None and e.attack_target.alive:
+            d["atx"] = _q1(e.attack_target.x)
+            d["aty"] = _q1(e.attack_target.y)
         return d
     if isinstance(e, MetalSpot):
         return {
