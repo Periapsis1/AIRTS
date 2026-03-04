@@ -107,12 +107,10 @@ STATS_HEADER_FONT_SIZE = 40
 DEBUG_LINE_COLORS = [
     (255, 215, 0),     # step_ms — gold/yellow
     (200, 200, 200),   # commands — light gray
-    (80, 160, 255),    # grid_build — blue
-    (255, 90, 90),     # facing_precompute — red
     (80, 220, 120),    # entity_update — green
     (180, 100, 255),   # ai_step — purple
     (255, 165, 60),    # capture — orange
-    (140, 100, 80),    # obs_geom — brown
+    (80, 160, 255),    # targeting_build — blue
     (80, 220, 220),    # combat — cyan
     (255, 130, 180),   # spawn — pink
     (255, 255, 140),   # cleanup — pale yellow

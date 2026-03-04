@@ -10,7 +10,7 @@ from entities.base import Entity
 from entities.unit import Unit
 from entities.command_center import CommandCenter
 from entities.laser import LaserFlash
-from systems.combat import combat_step, PendingChain
+from systems.combat import combat_step, PendingChain, TargetingData
 from systems.physics import clamp_units_to_bounds
 from systems.spawning import spawn_step
 from systems.selection import click_select, apply_circle_selection, select_all_of_type
@@ -31,8 +31,6 @@ from entities.shapes import RectEntity, CircleEntity, PolygonEntity
 from systems.commands import GameCommand, CommandQueue
 from systems.replay import ReplayRecorder
 from systems.stats import GameStats
-from core.spatial_grid import SpatialGrid
-from core.helpers import circle_overlaps_aabb
 from core.vectorized import build_obstacle_arrays, batch_obstacle_push, batch_unit_collisions
 from core.camera import Camera
 import numpy as np
@@ -130,6 +128,8 @@ class Game:
             e for e in self.entities if isinstance(e, MetalSpot)
         ]
         self.units: list[Unit] = [e for e in self.entities if isinstance(e, Unit)]
+        self.team_1_units: list[Unit] = [u for u in self.units if u.team == 1]
+        self.team_2_units: list[Unit] = [u for u in self.units if u.team == 2]
         self.command_centers: list[CommandCenter] = [
             e for e in self.entities if isinstance(e, CommandCenter)
         ]
@@ -141,7 +141,6 @@ class Game:
         self._next_entity_id: int = 1
         self._speed_multiplier: float = 1.0
         self._accumulator: float = 0.0
-        self._grid = SpatialGrid(cell_size=10.0)
         self._assign_entity_ids()
 
         self.team_ai: dict[int, BaseAI] = team_ai if team_ai is not None else {2: WanderAI()}
@@ -605,98 +604,121 @@ class Game:
         self._refresh_steer_obstacles()
         self._stats.record_subsystem("commands", (_perf() - _t) * 1000)
 
-        # Build spatial grid once per step — shared by all systems.
-        # Single-pass: also build alive_mobile_units, team AABBs, and
-        # team_any_hurt (for healer early-exit).
+        # Build distance matrices for targeting
         _t = _perf()
-        grid = self._grid
-        grid.clear()
-        alive_mobile_units: list[Unit] = []
-        team_aabb: dict[int, tuple[float, float, float, float]] = {}
-        team_any_hurt: dict[int, bool] = {}
-        for e in self.entities:
-            if isinstance(e, Unit) and e.alive:
-                grid.insert(e)
-                bb = team_aabb.get(e.team)
-                if bb is None:
-                    team_aabb[e.team] = (e.x, e.y, e.x, e.y)
-                else:
-                    team_aabb[e.team] = (
-                        min(bb[0], e.x), min(bb[1], e.y),
-                        max(bb[2], e.x), max(bb[3], e.y),
-                    )
-                if not e.is_building:
-                    alive_mobile_units.append(e)
-                    if e.hp < e.max_hp:
-                        team_any_hurt[e.team] = True
-        Unit._spatial_grid = grid
-        self._stats.record_subsystem("grid_build", (_perf() - _t) * 1000)
+        alive_t1 = [u for u in self.team_1_units if u.alive]
+        alive_t2 = [u for u in self.team_2_units if u.alive]
+        n1, n2 = len(alive_t1), len(alive_t2)
 
-        # Precompute facing targets — sticky targeting with periodic re-evaluation.
-        # Units keep their current facing target and only run a grid query when:
-        #   - they have no target (or it died / left LOS)
-        #   - their re-evaluation cooldown expires (~20 ticks, staggered)
-        _t = _perf()
-        _FACING_REEVAL_INTERVAL = 20  # ticks between full re-evaluations
-        _query = grid.query_radius
-        for e in alive_mobile_units:
-            # Skip units whose facing is determined by their attack_target
-            if e.attack_target is not None and e.attack_target.alive:
-                e._facing_target = None
-                continue
+        t1_index = {id(u): i for i, u in enumerate(alive_t1)}
+        t2_index = {id(u): i for i, u in enumerate(alive_t2)}
 
-            # Check if current sticky target is still valid
-            ft = e._facing_target
-            if ft is not None:
-                if not ft.alive:
-                    ft = None
-                else:
-                    dx = ft.x - e.x
-                    dy = ft.y - e.y
-                    if dx * dx + dy * dy > e.line_of_sight * e.line_of_sight:
-                        ft = None
+        # Empty arrays for degenerate cases
+        _empty_0 = np.empty((0, 0), dtype=np.float64)
+        _empty_idx = np.empty((0, 0), dtype=np.intp)
 
-            # If target is valid and re-eval timer hasn't expired, keep it
-            if ft is not None:
-                e._facing_reeval_cd -= 1
-                if e._facing_reeval_cd > 0:
-                    continue
-                # Timer expired — fall through to full re-evaluation
+        t1_pos = np.array([(u.x, u.y) for u in alive_t1], dtype=np.float64).reshape(n1, 2) if n1 > 0 else np.empty((0, 2), dtype=np.float64)
+        t2_pos = np.array([(u.x, u.y) for u in alive_t2], dtype=np.float64).reshape(n2, 2) if n2 > 0 else np.empty((0, 2), dtype=np.float64)
 
-            healer = e.weapon is not None and e.weapon.hits_only_friendly
-            if healer:
-                if not team_any_hurt.get(e.team, False):
-                    e._facing_target = None
-                    continue
+        if n1 > 0 and n2 > 0:
+            diff = t1_pos[:, None, :] - t2_pos[None, :, :]  # (N1, N2, 2)
+            enemy_dist_sq = np.sum(diff * diff, axis=2)       # (N1, N2)
+            t1_sorted_enemy_idx = np.argsort(enemy_dist_sq, axis=1)
+            t1_sorted_enemy_dist_sq = np.take_along_axis(enemy_dist_sq, t1_sorted_enemy_idx, axis=1)
+            enemy_dist_sq_T = enemy_dist_sq.T.copy()          # (N2, N1)
+            t2_sorted_enemy_idx = np.argsort(enemy_dist_sq_T, axis=1)
+            t2_sorted_enemy_dist_sq = np.take_along_axis(enemy_dist_sq_T, t2_sorted_enemy_idx, axis=1)
+        else:
+            t1_sorted_enemy_idx = _empty_idx
+            t1_sorted_enemy_dist_sq = _empty_0
+            t2_sorted_enemy_idx = _empty_idx
+            t2_sorted_enemy_dist_sq = _empty_0
+
+        # Ally matrices (within-team, for healers)
+        if n1 > 1:
+            diff1 = t1_pos[:, None, :] - t1_pos[None, :, :]
+            ally1_dist_sq = np.sum(diff1 * diff1, axis=2)
+            np.fill_diagonal(ally1_dist_sq, np.inf)
+            t1_sorted_ally_idx = np.argsort(ally1_dist_sq, axis=1)
+            t1_sorted_ally_dist_sq = np.take_along_axis(ally1_dist_sq, t1_sorted_ally_idx, axis=1)
+        else:
+            t1_sorted_ally_idx = _empty_idx
+            t1_sorted_ally_dist_sq = _empty_0
+
+        if n2 > 1:
+            diff2 = t2_pos[:, None, :] - t2_pos[None, :, :]
+            ally2_dist_sq = np.sum(diff2 * diff2, axis=2)
+            np.fill_diagonal(ally2_dist_sq, np.inf)
+            t2_sorted_ally_idx = np.argsort(ally2_dist_sq, axis=1)
+            t2_sorted_ally_dist_sq = np.take_along_axis(ally2_dist_sq, t2_sorted_ally_idx, axis=1)
+        else:
+            t2_sorted_ally_idx = _empty_idx
+            t2_sorted_ally_dist_sq = _empty_0
+
+        targeting = TargetingData(
+            alive_t1=alive_t1, alive_t2=alive_t2,
+            t1_sorted_enemy_idx=t1_sorted_enemy_idx,
+            t1_sorted_enemy_dist_sq=t1_sorted_enemy_dist_sq,
+            t2_sorted_enemy_idx=t2_sorted_enemy_idx,
+            t2_sorted_enemy_dist_sq=t2_sorted_enemy_dist_sq,
+            t1_sorted_ally_idx=t1_sorted_ally_idx,
+            t1_sorted_ally_dist_sq=t1_sorted_ally_dist_sq,
+            t2_sorted_ally_idx=t2_sorted_ally_idx,
+            t2_sorted_ally_dist_sq=t2_sorted_ally_dist_sq,
+            t1_index=t1_index, t2_index=t2_index,
+        )
+
+        # Populate per-unit targeting lists and collision neighbor lists
+        for i, u in enumerate(alive_t1):
+            diam_sq = u.diameter_sq
+            rng_sq = u.attack_range_sq
+            if n2 > 0:
+                enemy_dsq = t1_sorted_enemy_dist_sq[i]
+                enemy_idx = t1_sorted_enemy_idx[i]
+                u.nearest_enemies = [alive_t2[j] for j in enemy_idx]
+                u.enemies_in_range = u.nearest_enemies[:int(np.searchsorted(enemy_dsq, rng_sq, side='right'))]
+                nearby_enemies = u.nearest_enemies[:int(np.searchsorted(enemy_dsq, diam_sq, side='right'))]
             else:
-                enemy_team = 2 if e.team == 1 else 1
-                enemy_bb = team_aabb.get(enemy_team)
-                if enemy_bb is None or not circle_overlaps_aabb(e.x, e.y, e.line_of_sight, enemy_bb):
-                    e._facing_target = None
-                    continue
+                u.nearest_enemies = []
+                u.enemies_in_range = []
+                nearby_enemies = []
+            if n1 > 1:
+                ally_dsq = t1_sorted_ally_dist_sq[i]
+                ally_idx = t1_sorted_ally_idx[i]
+                u.nearest_allies = [alive_t1[j] for j in ally_idx]
+                u.allies_in_range = u.nearest_allies[:int(np.searchsorted(ally_dsq, rng_sq, side='right'))]
+                nearby_allies = u.nearest_allies[:int(np.searchsorted(ally_dsq, diam_sq, side='right'))]
+            else:
+                u.nearest_allies = []
+                u.allies_in_range = []
+                nearby_allies = []
+            u.nearby_units = nearby_enemies + nearby_allies
+        for i, u in enumerate(alive_t2):
+            diam_sq = u.diameter_sq
+            rng_sq = u.attack_range_sq
+            if n1 > 0:
+                enemy_dsq = t2_sorted_enemy_dist_sq[i]
+                enemy_idx = t2_sorted_enemy_idx[i]
+                u.nearest_enemies = [alive_t1[j] for j in enemy_idx]
+                u.enemies_in_range = u.nearest_enemies[:int(np.searchsorted(enemy_dsq, rng_sq, side='right'))]
+                nearby_enemies = u.nearest_enemies[:int(np.searchsorted(enemy_dsq, diam_sq, side='right'))]
+            else:
+                u.nearest_enemies = []
+                u.enemies_in_range = []
+                nearby_enemies = []
+            if n2 > 1:
+                ally_dsq = t2_sorted_ally_dist_sq[i]
+                ally_idx = t2_sorted_ally_idx[i]
+                u.nearest_allies = [alive_t2[j] for j in ally_idx]
+                u.allies_in_range = u.nearest_allies[:int(np.searchsorted(ally_dsq, rng_sq, side='right'))]
+                nearby_allies = u.nearest_allies[:int(np.searchsorted(ally_dsq, diam_sq, side='right'))]
+            else:
+                u.nearest_allies = []
+                u.allies_in_range = []
+                nearby_allies = []
+            u.nearby_units = nearby_enemies + nearby_allies
 
-            ux, uy, uteam = e.x, e.y, e.team
-            los_sq = e.line_of_sight * e.line_of_sight
-            best_dsq = 1e30
-            best_entity = None
-            for c in _query(ux, uy, e.line_of_sight):
-                if c is e or not c.alive:
-                    continue
-                if healer:
-                    if c.team != uteam or c.hp >= c.max_hp:
-                        continue
-                else:
-                    if c.team == uteam:
-                        continue
-                dx = c.x - ux
-                dy = c.y - uy
-                d_sq = dx * dx + dy * dy
-                if d_sq <= los_sq and d_sq < best_dsq:
-                    best_dsq = d_sq
-                    best_entity = c
-            e._facing_target = best_entity
-            e._facing_reeval_cd = _FACING_REEVAL_INTERVAL
-        self._stats.record_subsystem("facing_precompute", (_perf() - _t) * 1000)
+        self._stats.record_subsystem("targeting_build", (_perf() - _t) * 1000)
 
         _t = _perf()
         for entity in self.entities:
@@ -704,7 +726,6 @@ class Game:
         self._stats.record_subsystem("entity_update", (_perf() - _t) * 1000)
 
         units = self.units
-        ccs = self.command_centers
         obstacles = self._static_obstacles
         metal_extractors = self.metal_extractors
 
@@ -719,29 +740,48 @@ class Game:
                 self._anim_timer = 0.0
         self._stats.record_subsystem("ai_step", (_perf() - _t) * 1000)
 
+        # Capture — track new entities so extractors join units + team lists
+        entity_count_before_capture = len(self.entities)
         _t = _perf()
-        capture_step(self.entities, ccs, units, self.metal_spots, metal_extractors, dt, stats=self._stats, grid=grid)
+        capture_step(self.entities, self.command_centers, self.units, self.metal_spots, metal_extractors, dt, stats=self._stats)
         self._stats.record_subsystem("capture", (_perf() - _t) * 1000)
 
+        if len(self.entities) > entity_count_before_capture:
+            for e in self.entities[entity_count_before_capture:]:
+                if isinstance(e, Unit):
+                    self.units.append(e)
+                    if e.team == 1:
+                        self.team_1_units.append(e)
+                    elif e.team == 2:
+                        self.team_2_units.append(e)
+
         _t = _perf()
-        combat_step(units, obstacles, self.laser_flashes, dt, stats=self._stats, grid=grid,
-                    circle_obs=self._obs_circle, rect_obs=self._obs_rect, team_aabb=team_aabb,
+        combat_step(self.units, obstacles, self.laser_flashes, dt, targeting=targeting,
+                    circle_obs=self._obs_circle, rect_obs=self._obs_rect,
                     sounds=None if self._headless else self._sounds,
-                    pending_chains=self._pending_chains)
+                    pending_chains=self._pending_chains, stats=self._stats)
         self._stats.record_subsystem("combat", (_perf() - _t) * 1000)
 
-        # Spawn — track entity count to detect new spawns for physics cooldown
+        # Spawn — spawn_step already appends to self.units; add to team lists
         entity_count_before_spawn = len(self.entities)
         _t = _perf()
-        spawn_step(self.entities, ccs, self.human_teams, stats=self._stats, tick=self._iteration, units=self.units)
+        spawn_step(self.entities, self.command_centers, self.human_teams, stats=self._stats, tick=self._iteration, units=self.units)
         self._stats.record_subsystem("spawn", (_perf() - _t) * 1000)
 
         if len(self.entities) > entity_count_before_spawn:
             self._physics_cooldown = 60  # 1 second to settle after spawn
+            for e in self.entities[entity_count_before_spawn:]:
+                if isinstance(e, Unit):
+                    if e.team == 1:
+                        self.team_1_units.append(e)
+                    elif e.team == 2:
+                        self.team_2_units.append(e)
 
         _t = _perf()
         self.entities = [e for e in self.entities if e.alive]
         self.units = [u for u in self.units if u.alive]
+        self.team_1_units = [u for u in self.team_1_units if u.alive]
+        self.team_2_units = [u for u in self.team_2_units if u.alive]
         self.command_centers = [c for c in self.command_centers if c.alive]
         self.metal_extractors = [m for m in self.metal_extractors if m.alive]
         self._assign_entity_ids()
@@ -772,10 +812,29 @@ class Game:
                 ])
                 all_radii = np.array([u.radius for u in units], dtype=np.float64)
                 all_is_bld = np.array([u.is_building for u in units], dtype=bool)
+
+                # Build collision pairs from nearby_units (diameter-clipped)
+                uid_to_idx = {id(u): i for i, u in enumerate(units)}
+                _pairs_i: list[int] = []
+                _pairs_j: list[int] = []
+                for u in units:
+                    ui = uid_to_idx[id(u)]
+                    for nb in u.nearby_units:
+                        nj = uid_to_idx.get(id(nb))
+                        if nj is not None and ui < nj:
+                            _pairs_i.append(ui)
+                            _pairs_j.append(nj)
+                if _pairs_i:
+                    col_pi = np.array(_pairs_i, dtype=np.int64)
+                    col_pj = np.array(_pairs_j, dtype=np.int64)
+                else:
+                    col_pi = None
+                    col_pj = None
                 self._stats.record_subsystem("phys_array_build", (_perf() - _tp) * 1000)
 
                 _tp = _perf()
-                all_positions = batch_unit_collisions(all_positions, all_radii, all_is_bld)
+                all_positions = batch_unit_collisions(all_positions, all_radii, all_is_bld,
+                                                     pair_i=col_pi, pair_j=col_pj)
                 self._stats.record_subsystem("phys_unit_collisions", (_perf() - _tp) * 1000)
 
                 # Obstacle push on mobile units only
@@ -918,6 +977,8 @@ class Game:
         self.entities = [e for e, _ in pairs]
         self.metal_spots = [e for e in self.entities if isinstance(e, MetalSpot)]
         self.units = [e for e in self.entities if isinstance(e, Unit)]
+        self.team_1_units = [u for u in self.units if u.team == 1]
+        self.team_2_units = [u for u in self.units if u.team == 2]
         self.command_centers = [e for e in self.entities if isinstance(e, CommandCenter)]
         self.metal_extractors = [e for e in self.entities if isinstance(e, MetalExtractor)]
         self._precompute_obstacles()

@@ -6,8 +6,8 @@ from ui.theme import MENU_BG, DEBUG_LINE_COLORS, GRAPH_BG, GRAPH_GRID, GRAPH_AXI
 from ui.widgets import BackButton, MultiLineGraph, _get_font
 
 _SUBSYSTEM_ORDER = [
-    "commands", "grid_build", "facing_precompute", "entity_update",
-    "ai_step", "capture", "obs_geom", "combat",
+    "commands", "entity_update",
+    "ai_step", "capture", "targeting_build", "combat",
     "spawn", "cleanup", "physics",
     "phys_array_build", "phys_unit_collisions",
     "phys_obstacle_push", "phys_writeback", "phys_clamp",

@@ -44,8 +44,8 @@ class GameStats:
 
         # Per-subsystem timing breakdown (ms)
         self._subsystem_names = [
-            "commands", "grid_build", "facing_precompute", "entity_update",
-            "ai_step", "capture", "obs_geom", "combat",
+            "commands", "entity_update",
+            "ai_step", "capture", "targeting_build", "combat",
             "spawn", "cleanup", "physics",
             "phys_array_build", "phys_unit_collisions",
             "phys_obstacle_push", "phys_writeback", "phys_clamp",

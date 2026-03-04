@@ -95,6 +95,9 @@ def _team_name(team: int, config: dict, human_teams: list) -> str:
 class ReplayListScreen(BaseScreen):
     """Scrollable list of saved replays with Watch and Delete buttons."""
 
+    _INITIAL_LIMIT = 10
+    _LOAD_MORE_COUNT = 20
+
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock):
         super().__init__(screen, clock)
         self._back = BackButton()
@@ -103,8 +106,15 @@ class ReplayListScreen(BaseScreen):
         self._scroll: int = 0
         self._loading = True
 
+        # Display limit: only show this many replays (None = show all)
+        self._display_limit: int | None = self._INITIAL_LIMIT
+
         # Per-card buttons (created dynamically during draw)
         self._card_buttons: list[tuple[Button, Button]] = []
+
+        # "Show 20 More" / "Show All" buttons
+        self._show_more_btn = Button(0, 0, 140, 30, "Show 20 More", font_size=18)
+        self._show_all_btn = Button(0, 0, 100, 30, "Show All", font_size=18)
 
         # Double-click tracking
         self._last_click_time: int = 0
@@ -134,20 +144,39 @@ class ReplayListScreen(BaseScreen):
         self._loading = False
 
     def _refresh(self):
+        self._display_limit = self._INITIAL_LIMIT
         self._start_loading()
 
+    @property
+    def _displayed_count(self) -> int:
+        """Number of replays to display (respecting the limit)."""
+        total = len(self._replays)
+        if self._display_limit is None:
+            return total
+        return min(self._display_limit, total)
+
+    @property
+    def _has_more(self) -> bool:
+        """True if there are hidden replays beyond the display limit."""
+        return (self._display_limit is not None
+                and len(self._replays) > self._display_limit)
+
     def _visible_rows(self) -> int:
-        return (self.height - _LIST_TOP - 20) // (_CARD_HEIGHT + _CARD_PAD)
+        rows = (self.height - _LIST_TOP - 20) // (_CARD_HEIGHT + _CARD_PAD)
+        # Reserve a row for "Show More" / "Show All" buttons
+        if self._has_more:
+            rows = max(1, rows - 1)
+        return rows
 
     def _card_y(self, vi: int) -> int:
         return _LIST_TOP + vi * (_CARD_HEIGHT + _CARD_PAD)
 
     def _max_scroll(self) -> int:
-        return max(0, len(self._replays) - self._visible_rows())
+        return max(0, self._displayed_count - self._visible_rows())
 
     def _scrollbar_geometry(self) -> tuple[pygame.Rect, pygame.Rect] | None:
         """Return (track_rect, thumb_rect) or None if scrollbar not needed."""
-        total = len(self._replays)
+        total = self._displayed_count
         visible = self._visible_rows()
         if total <= visible:
             return None
@@ -174,6 +203,13 @@ class ReplayListScreen(BaseScreen):
                     return ScreenResult("main_menu")
                 if self._open_folder_btn.handle_event(event):
                     self._open_replays_folder()
+                if self._has_more:
+                    if self._show_more_btn.handle_event(event):
+                        self._display_limit += self._LOAD_MORE_COUNT
+                        self._scroll = min(self._scroll, self._max_scroll())
+                    if self._show_all_btn.handle_event(event):
+                        self._display_limit = None
+                        self._scroll = min(self._scroll, self._max_scroll())
 
                 # Per-card Watch/Delete buttons
                 for i, (wb, db) in enumerate(self._card_buttons):
@@ -256,7 +292,7 @@ class ReplayListScreen(BaseScreen):
         track_rect, thumb_rect = geom
         visible = self._visible_rows()
         list_h = visible * (_CARD_HEIGHT + _CARD_PAD)
-        thumb_h = max(20, int(list_h * visible / len(self._replays)))
+        thumb_h = max(20, int(list_h * visible / self._displayed_count))
         usable = list_h - thumb_h
         if usable <= 0:
             return
@@ -294,7 +330,7 @@ class ReplayListScreen(BaseScreen):
         small_font = _get_font(CONTENT_FONT_SIZE - 4)
 
         # Snapshot current count (thread may be appending)
-        replay_count = len(self._replays)
+        replay_count = self._displayed_count
 
         if replay_count == 0:
             if self._loading:
@@ -406,6 +442,24 @@ class ReplayListScreen(BaseScreen):
                     self.screen.blit(loading_surf, (
                         self.width // 2 - loading_surf.get_width() // 2,
                         loading_y))
+
+            # "Show More" / "Show All" buttons when there are hidden replays
+            if self._has_more:
+                total_all = len(self._replays)
+                hidden = total_all - self._display_limit
+                # Position below the last visible card
+                last_vi = min(visible, replay_count - self._scroll)
+                btns_y = self._card_y(last_vi) + 6
+                # Center the two buttons
+                gap = 12
+                total_w = 140 + 100 + gap
+                bx = self.width // 2 - total_w // 2
+                self._show_more_btn.label = "Show 20 More"
+                self._show_more_btn.rect = pygame.Rect(bx, btns_y, 140, 30)
+                self._show_more_btn.draw(self.screen)
+                self._show_all_btn.label = f"Show All ({hidden})"
+                self._show_all_btn.rect = pygame.Rect(bx + 140 + gap, btns_y, 130, 30)
+                self._show_all_btn.draw(self.screen)
 
             # Scrollbar
             geom = self._scrollbar_geometry()

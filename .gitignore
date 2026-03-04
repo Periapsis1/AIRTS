@@ -24,3 +24,4 @@ build/
 replays/
 logs/
 CLAUDE.md
+ai_arena/arena_ratings.json

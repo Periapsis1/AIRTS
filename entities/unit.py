@@ -44,7 +44,6 @@ def _draw_command_line(surface: pygame.Surface, x1: float, y1: float,
 
 class Unit(CircleEntity, Damageable):
     _steer_obstacles: tuple = ()  # set by Game; tuples of (x, y, radius)
-    _spatial_grid = None          # set by Game; SpatialGrid for nearby-unit queries
 
     def __init__(self, x: float = 0, y: float = 0, team: int = 1,
                  unit_type: str = "soldier"):
@@ -83,8 +82,11 @@ class Unit(CircleEntity, Damageable):
 
         self.attack_damage: float = self.weapon.damage if self.weapon else 0
         self.attack_range: float = self.weapon.range if self.weapon else 0
+        self.attack_range_sq: float = self.attack_range * self.attack_range
         self.attack_cooldown_max: float = self.weapon.cooldown if self.weapon else 0
         self.laser_cooldown: float = 0.0
+        self.diameter: float = self.radius * 2.0
+        self.diameter_sq: float = self.diameter * self.diameter
 
         self._symbol: tuple | None = stats["symbol"]
         self.is_building: bool = stats.get("is_building", False)
@@ -107,8 +109,15 @@ class Unit(CircleEntity, Damageable):
         self.fire_mode: str = FREE_FIRE
 
         self.selectable: bool = False
-        self._facing_target: Entity | None = None   # entity ref, set by facing_precompute
-        self._facing_reeval_cd: int = 0              # ticks until next re-evaluation
+        self._facing_target: Entity | None = None   # entity ref, set by combat system
+
+        # -- targeting data (populated each tick by Game) -----------------------
+        self.pos: tuple[float, float] = (x, y)      # snapshot used by distance matrix
+        self.nearest_enemies: list[Unit] = []        # sorted nearest-first
+        self.nearest_allies: list[Unit] = []         # sorted nearest-first, excludes self
+        self.enemies_in_range: list[Unit] = []       # nearest_enemies clipped to weapon range
+        self.allies_in_range: list[Unit] = []        # nearest_allies clipped to weapon range
+        self.nearby_units: list[Unit] = []           # all units within diameter distance (for collisions)
 
         # -- abilities ----------------------------------------------------------
         self.abilities: list = []
@@ -154,6 +163,7 @@ class Unit(CircleEntity, Damageable):
     # -- update -------------------------------------------------------------
 
     def update(self, dt: float):
+        self.pos = (self.x, self.y)
         self.laser_cooldown = max(0.0, self.laser_cooldown - dt)
 
         for ability in self.abilities:
