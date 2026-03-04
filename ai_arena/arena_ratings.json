@@ -1,0 +1,62 @@
+{
+  "coward_bot": {
+    "rating": 1067.5741177335453,
+    "wins": 137,
+    "losses": 96,
+    "draws": 8
+  },
+  "easy": {
+    "rating": 931.7713553148535,
+    "wins": 83,
+    "losses": 101,
+    "draws": 51
+  },
+  "example": {
+    "rating": 741.5476154832625,
+    "wins": 40,
+    "losses": 147,
+    "draws": 40
+  },
+  "hard": {
+    "rating": 1280.9196285823534,
+    "wins": 163,
+    "losses": 40,
+    "draws": 24
+  },
+  "hard_bot_2": {
+    "rating": 1418.592817015683,
+    "wins": 124,
+    "losses": 30,
+    "draws": 6
+  },
+  "kite_bot": {
+    "rating": 1283.0886144210986,
+    "wins": 186,
+    "losses": 41,
+    "draws": 1
+  },
+  "medium": {
+    "rating": 931.708942709229,
+    "wins": 101,
+    "losses": 119,
+    "draws": 8
+  },
+  "null": {
+    "rating": 646.2078538040383,
+    "wins": 0,
+    "losses": 137,
+    "draws": 89
+  },
+  "terror_bot": {
+    "rating": 1176.502766677899,
+    "wins": 107,
+    "losses": 41,
+    "draws": 3
+  },
+  "wander": {
+    "rating": 522.0862882580383,
+    "wins": 0,
+    "losses": 189,
+    "draws": 38
+  }
+}

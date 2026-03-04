@@ -1,6 +1,9 @@
 """AI Arena screen — leaderboard, tournament controls, scrollable game log."""
 from __future__ import annotations
 
+import os
+import time
+
 import pygame
 from screens.base import BaseScreen, ScreenResult
 from ui.theme import (
@@ -8,7 +11,10 @@ from ui.theme import (
     BTN_WIDTH, BTN_HEIGHT,
 )
 from ui.widgets import Button, BackButton, Slider, _get_font
-from systems.arena import EloTracker, ArenaRunner, TournamentProgress, MatchResult
+from systems.arena import (
+    EloTracker, ArenaRunner, TournamentProgress, MatchResult,
+    write_tournament_summary,
+)
 
 # Colors
 _HEADER_COLOR = (220, 220, 240)
@@ -30,6 +36,9 @@ _ELO_UP = (80, 255, 120)
 _ELO_DOWN = (255, 100, 100)
 _ONGOING_COLOR = (255, 200, 60)
 _LINK_COLOR = (100, 170, 255)
+_FILTER_BG = (35, 35, 52)
+_FILTER_ACTIVE = (65, 100, 180)
+_QUEUED_COLOR = (90, 90, 110)
 
 # Layout constants
 _TABLE_X = 30
@@ -42,26 +51,31 @@ _LOG_FONT = 14
 
 class _LogEntry:
     """Processed match result for display in the game log."""
-    __slots__ = ("ai1_name", "ai2_name", "result_text", "result_color",
-                 "length_text", "avg_step_text", "elo_text", "elo_color_a",
-                 "elo_color_b", "finished", "replay_path")
+    __slots__ = ("ai1_name", "ai2_name", "ai1_id", "ai2_id",
+                 "result_text", "result_color",
+                 "length_text", "avg_step_text",
+                 "elo_delta_a", "elo_delta_b", "elo_color_a", "elo_color_b",
+                 "finished", "replay_path", "error_log_path", "match_index",
+                 "status")
 
-    def __init__(self, ai1_name: str, ai2_name: str,
-                 result_text: str, result_color: tuple,
-                 length_text: str, avg_step_text: str,
-                 elo_text: str, elo_color_a: tuple, elo_color_b: tuple,
-                 finished: bool, replay_path: str):
-        self.ai1_name = ai1_name
-        self.ai2_name = ai2_name
-        self.result_text = result_text
-        self.result_color = result_color
-        self.length_text = length_text
-        self.avg_step_text = avg_step_text
-        self.elo_text = elo_text
-        self.elo_color_a = elo_color_a
-        self.elo_color_b = elo_color_b
-        self.finished = finished
-        self.replay_path = replay_path
+    def __init__(self):
+        self.ai1_name: str = ""
+        self.ai2_name: str = ""
+        self.ai1_id: str = ""
+        self.ai2_id: str = ""
+        self.result_text: str = "-"
+        self.result_color: tuple = _TEXT_DIM
+        self.length_text: str = "-"
+        self.avg_step_text: str = "-"
+        self.elo_delta_a: float | None = None
+        self.elo_delta_b: float | None = None
+        self.elo_color_a: tuple = _TEXT_DIM
+        self.elo_color_b: tuple = _TEXT_DIM
+        self.finished: bool = False
+        self.replay_path: str = ""
+        self.error_log_path: str = ""
+        self.match_index: int = -1
+        self.status: str = "Queued"  # "Queued", "Running", "Done", "Error"
 
 
 class ArenaScreen(BaseScreen):
@@ -94,6 +108,12 @@ class ArenaScreen(BaseScreen):
         self._last_seen_count: int = 0
         self._pre_ratings: dict[str, float] = {}  # snapshot before tournament
         self._watch_rects: list[tuple[pygame.Rect, str]] = []  # (rect, replay_path)
+        self._error_rects: list[tuple[pygame.Rect, str]] = []  # (rect, error_log_path)
+        self._tournament_start_time: float = 0.0
+
+        # Bot filter
+        self._filter_bots: set[str] = set()  # empty = show all
+        self._filter_chips: list[tuple[pygame.Rect, str]] = []
 
         # UI elements
         cx = self.width // 2
@@ -155,6 +175,7 @@ class ArenaScreen(BaseScreen):
                             self._elo.ensure(aid)
                         self._match_log.clear()
                         self._log_scroll = 0
+                        self._filter_bots.clear()
                         self._status_text = "Ratings reset to 1000."
                         self._status_color = _STATUS_OK
 
@@ -171,6 +192,20 @@ class ArenaScreen(BaseScreen):
                                 self._runner.cancel()
                             return ScreenResult("replay_playback",
                                                 data={"filepath": path})
+
+                    # Click on "Error" links
+                    for rect, path in self._error_rects:
+                        if rect.collidepoint(event.pos) and path:
+                            os.startfile(path)
+
+                    # Click on filter chips
+                    for rect, bot_id in self._filter_chips:
+                        if rect.collidepoint(event.pos):
+                            if bot_id in self._filter_bots:
+                                self._filter_bots.discard(bot_id)
+                            else:
+                                self._filter_bots.add(bot_id)
+                            self._clamp_scroll()
 
             # Poll tournament progress
             if self._runner.running:
@@ -195,6 +230,8 @@ class ArenaScreen(BaseScreen):
         self._match_log.clear()
         self._log_scroll = 0
         self._last_seen_count = 0
+        self._filter_bots.clear()
+        self._tournament_start_time = time.time()
 
         ai_ids = [aid for aid, _ in self._ai_choices]
         self._runner.start(
@@ -205,10 +242,25 @@ class ArenaScreen(BaseScreen):
         self._start_btn.label = "Cancel"
         self._status_text = "Tournament in progress..."
         self._status_color = _PROGRESS_FILL
-        self._progress = TournamentProgress(total=0)
+
+        # First poll to get matchups
+        self._progress = self._runner.poll()
+
+        # Pre-populate log entries for all matchups
+        for idx, (ai1, ai2) in enumerate(self._progress.matchups):
+            entry = _LogEntry()
+            entry.ai1_id = ai1
+            entry.ai2_id = ai2
+            entry.ai1_name = self._ai_names.get(ai1, ai1)
+            entry.ai2_name = self._ai_names.get(ai2, ai2)
+            entry.match_index = idx
+            self._match_log.append(entry)
+
+        # Process any results that already arrived in this first poll
+        self._process_new_results()
 
     def _process_new_results(self) -> None:
-        """Convert newly completed MatchResults into log entries."""
+        """Update log entries from newly completed MatchResults."""
         if self._progress is None:
             return
 
@@ -216,69 +268,78 @@ class ArenaScreen(BaseScreen):
         while self._last_seen_count < len(results):
             mr = results[self._last_seen_count]
             self._last_seen_count += 1
-            self._match_log.append(self._make_log_entry(mr))
 
-            # Auto-scroll to bottom when new results arrive
-            max_visible = self._log_visible_rows()
-            if len(self._match_log) > max_visible:
-                self._log_scroll = len(self._match_log) - max_visible
+            # Update the pre-populated entry by match_index (O(1))
+            if 0 <= mr.match_index < len(self._match_log):
+                self._update_log_entry(self._match_log[mr.match_index], mr)
 
-    def _make_log_entry(self, mr: MatchResult) -> _LogEntry:
+        # Mark active matches as "Running"
+        active_set = set(self._progress.active_match_indices)
+        for entry in self._match_log:
+            if not entry.finished:
+                if entry.match_index in active_set:
+                    entry.status = "Running"
+                else:
+                    entry.status = "Queued"
+
+        # Auto-scroll to latest completed match
+        visible = self._get_visible_entries()
+        max_visible = self._log_visible_rows()
+        if len(visible) > max_visible:
+            # Find the last completed entry in visible list
+            self._clamp_scroll()
+
+    def _update_log_entry(self, entry: _LogEntry, mr: MatchResult) -> None:
+        """Mutate an existing _LogEntry in-place when a result arrives."""
         ai1_name = self._ai_names.get(mr.ai1_id, mr.ai1_id)
         ai2_name = self._ai_names.get(mr.ai2_id, mr.ai2_id)
+        entry.ai1_name = ai1_name
+        entry.ai2_name = ai2_name
 
         # Result
         if mr.winner == 0:
-            result_text = "Error"
-            result_color = _STATUS_ERR
+            entry.result_text = "Error"
+            entry.result_color = _STATUS_ERR
+            entry.status = "Error"
         elif mr.winner == 1:
-            result_text = f"{ai1_name} wins"
-            result_color = _WIN_COLOR
+            entry.result_text = f"{ai1_name} wins"
+            entry.result_color = _WIN_COLOR
+            entry.status = "Done"
         elif mr.winner == 2:
-            result_text = f"{ai2_name} wins"
-            result_color = _WIN_COLOR
+            entry.result_text = f"{ai2_name} wins"
+            entry.result_color = _WIN_COLOR
+            entry.status = "Done"
         else:
-            result_text = "Draw"
-            result_color = _DRAW_COLOR
+            entry.result_text = "Draw"
+            entry.result_color = _DRAW_COLOR
+            entry.status = "Done"
 
         # Game length
         seconds = mr.ticks / 60.0
         mins = int(seconds) // 60
         secs = int(seconds) % 60
-        length_text = f"{mins}:{secs:02d}"
+        entry.length_text = f"{mins}:{secs:02d}"
 
         # Avg step
-        avg_step_text = f"{mr.avg_step_ms:.1f}ms" if mr.avg_step_ms > 0 else "-"
+        entry.avg_step_text = f"{mr.avg_step_ms:.1f}ms" if mr.avg_step_ms > 0 else "-"
 
         # Elo delta
-        elo_color_a = _TEXT_DIM
-        elo_color_b = _TEXT_DIM
         if mr.winner != 0:
             da, db = self._elo.compute_delta(
                 mr.ai1_id, mr.ai2_id, mr.winner,
                 ratings_snapshot=self._pre_ratings,
             )
-            sign_a = "+" if da >= 0 else ""
-            sign_b = "+" if db >= 0 else ""
-            elo_text = f"{sign_a}{da:.0f} / {sign_b}{db:.0f}"
-            elo_color_a = _ELO_UP if da >= 0 else _ELO_DOWN
-            elo_color_b = _ELO_UP if db >= 0 else _ELO_DOWN
+            entry.elo_delta_a = da
+            entry.elo_delta_b = db
+            entry.elo_color_a = _ELO_UP if da >= 0 else _ELO_DOWN
+            entry.elo_color_b = _ELO_UP if db >= 0 else _ELO_DOWN
         else:
-            elo_text = "-"
+            entry.elo_delta_a = None
+            entry.elo_delta_b = None
 
-        return _LogEntry(
-            ai1_name=ai1_name,
-            ai2_name=ai2_name,
-            result_text=result_text,
-            result_color=result_color,
-            length_text=length_text,
-            avg_step_text=avg_step_text,
-            elo_text=elo_text,
-            elo_color_a=elo_color_a,
-            elo_color_b=elo_color_b,
-            finished=True,
-            replay_path=mr.replay_path,
-        )
+        entry.finished = True
+        entry.replay_path = mr.replay_path
+        entry.error_log_path = mr.error_log_path
 
     def _on_tournament_complete(self) -> None:
         """Process results and update Elo."""
@@ -295,10 +356,25 @@ class ArenaScreen(BaseScreen):
         self._elo.save()
         self._start_btn.label = "Start Tournament"
 
+        # Write tournament summary log
+        write_tournament_summary(
+            self._progress.results, self._elo, self._pre_ratings,
+            self._ai_names, self._tournament_start_time,
+        )
+
         n = self._progress.completed
         err_str = f" ({errors} errors)" if errors else ""
         self._status_text = f"Tournament complete — {n} games played{err_str}."
         self._status_color = _STATUS_OK
+
+    # -- filter helpers --------------------------------------------------------
+
+    def _get_visible_entries(self) -> list[_LogEntry]:
+        """Return entries filtered by _filter_bots."""
+        if not self._filter_bots:
+            return self._match_log
+        return [e for e in self._match_log
+                if e.ai1_id in self._filter_bots or e.ai2_id in self._filter_bots]
 
     # -- layout helpers --------------------------------------------------------
 
@@ -320,7 +396,8 @@ class ArenaScreen(BaseScreen):
         return max(1, available // _LOG_ROW_H)
 
     def _clamp_scroll(self) -> None:
-        max_scroll = max(0, len(self._match_log) - self._log_visible_rows())
+        visible = self._get_visible_entries()
+        max_scroll = max(0, len(visible) - self._log_visible_rows())
         self._log_scroll = max(0, min(self._log_scroll, max_scroll))
 
     # -- drawing ---------------------------------------------------------------
@@ -431,6 +508,48 @@ class ArenaScreen(BaseScreen):
         self._rounds_slider.draw(self.screen)
         self._workers_slider.draw(self.screen)
 
+    def _draw_bot_filter(self, y: int) -> int:
+        """Draw horizontal row of toggle pill chips. Returns new y below chips."""
+        font = _get_font(_LOG_FONT)
+        self._filter_chips.clear()
+
+        # Collect unique bot IDs from current match log
+        bot_ids: list[str] = []
+        seen: set[str] = set()
+        for entry in self._match_log:
+            for bid in (entry.ai1_id, entry.ai2_id):
+                if bid not in seen:
+                    seen.add(bid)
+                    bot_ids.append(bid)
+
+        if not bot_ids:
+            return y
+
+        pad_x = 6
+        pad_y = 2
+        chip_h = font.get_height() + pad_y * 2
+        gap = 4
+        x = _TABLE_X
+        mx, my = pygame.mouse.get_pos()
+
+        for bid in bot_ids:
+            name = self._ai_names.get(bid, bid)
+            text_surf = font.render(name, True, CONTENT_TEXT)
+            chip_w = text_surf.get_width() + pad_x * 2
+            chip_rect = pygame.Rect(x, y, chip_w, chip_h)
+
+            active = bid in self._filter_bots
+            bg = _FILTER_ACTIVE if active else _FILTER_BG
+            if chip_rect.collidepoint(mx, my):
+                bg = tuple(min(c + 20, 255) for c in bg)
+            pygame.draw.rect(self.screen, bg, chip_rect, border_radius=8)
+
+            self.screen.blit(text_surf, (x + pad_x, y + pad_y))
+            self._filter_chips.append((chip_rect, bid))
+            x += chip_w + gap
+
+        return y + chip_h + 4
+
     def _draw_game_log(self) -> None:
         """Draw progress bar + scrollable game log table."""
         font = _get_font(_LOG_FONT)
@@ -440,6 +559,7 @@ class ArenaScreen(BaseScreen):
         log_top = self._log_top_y()
         log_bottom = self._log_area_bottom()
         self._watch_rects.clear()
+        self._error_rects.clear()
 
         # -- Progress bar (thin, at top of log area) --
         if self._runner.running and self._progress:
@@ -465,7 +585,7 @@ class ArenaScreen(BaseScreen):
                 True, _HEADER_COLOR)
             self.screen.blit(ptext, (bar_x + bar_w // 2 - ptext.get_width() // 2,
                                      bar_y + bar_h + 2))
-            header_y = bar_y + bar_h + 18
+            filter_y = bar_y + bar_h + 18
         elif self._match_log:
             # Settings sliders above the log when tournament is done
             cx = self.width // 2
@@ -475,18 +595,20 @@ class ArenaScreen(BaseScreen):
             self._workers_slider.y = log_top
             self._rounds_slider.draw(self.screen)
             self._workers_slider.draw(self.screen)
-            header_y = log_top + 48
+            filter_y = log_top + 48
         else:
-            header_y = log_top
+            filter_y = log_top
 
-        # -- Column positions --
+        # -- Bot filter chips --
+        header_y = self._draw_bot_filter(filter_y)
+
+        # -- Column positions (no Elo column; wider matchup) --
         col_matchup = 0
-        col_result = 220
-        col_length = 340
-        col_step = 400
-        col_elo = 470
+        col_result = 310
+        col_length = 430
+        col_step = 500
         col_status = 580
-        col_watch = 660
+        col_replay = 660
 
         # -- Header row --
         for cx, label in [
@@ -494,9 +616,8 @@ class ArenaScreen(BaseScreen):
             (col_result, "Result"),
             (col_length, "Length"),
             (col_step, "Avg Step"),
-            (col_elo, "Elo +/-"),
             (col_status, "Status"),
-            (col_watch, "Replay"),
+            (col_replay, "Replay"),
         ]:
             surf = font.render(label, True, _TEXT_DIM)
             self.screen.blit(surf, (table_x + cx, header_y))
@@ -509,6 +630,7 @@ class ArenaScreen(BaseScreen):
         rows_top = header_y + row_h
         rows_bottom = log_bottom
         visible_count = max(1, (rows_bottom - rows_top) // row_h)
+        visible_entries = self._get_visible_entries()
         self._clamp_scroll()
 
         old_clip = self.screen.get_clip()
@@ -517,13 +639,13 @@ class ArenaScreen(BaseScreen):
 
         mx, my = pygame.mouse.get_pos()
 
-        # -- Completed game rows --
+        # -- Game rows --
         for i in range(visible_count):
             idx = self._log_scroll + i
-            if idx >= len(self._match_log):
+            if idx >= len(visible_entries):
                 break
 
-            entry = self._match_log[idx]
+            entry = visible_entries[idx]
             y = rows_top + i * row_h
 
             bg = _ROW_BG_EVEN if idx % 2 == 0 else _ROW_BG_ODD
@@ -532,19 +654,10 @@ class ArenaScreen(BaseScreen):
                 bg = _ROW_HOVER
             pygame.draw.rect(self.screen, bg, row_rect)
 
-            # Matchup
-            matchup = f"{entry.ai1_name} vs {entry.ai2_name}"
-            # Truncate if too long
-            if font.size(matchup)[0] > 210:
-                while font.size(matchup + "..")[0] > 210 and len(matchup) > 3:
-                    matchup = matchup[:-1]
-                matchup += ".."
-            surf = font.render(matchup, True, CONTENT_TEXT)
-            self.screen.blit(surf, (table_x + col_matchup,
-                                    y + row_h // 2 - surf.get_height() // 2))
+            # Matchup with inline Elo
+            self._draw_matchup_cell(font, entry, table_x + col_matchup, y, row_h)
 
             # Result
-            # Truncate result text if too long
             r_text = entry.result_text
             if font.size(r_text)[0] > 110:
                 while font.size(r_text + "..")[0] > 110 and len(r_text) > 3:
@@ -564,29 +677,42 @@ class ArenaScreen(BaseScreen):
             self.screen.blit(surf, (table_x + col_step,
                                     y + row_h // 2 - surf.get_height() // 2))
 
-            # Elo +/-  (color based on the first AI's delta direction)
-            surf = font.render(entry.elo_text, True, entry.elo_color_a)
-            self.screen.blit(surf, (table_x + col_elo,
-                                    y + row_h // 2 - surf.get_height() // 2))
-
             # Status
-            if entry.finished:
+            if entry.status == "Queued":
+                status_text = "Queued"
+                status_color = _QUEUED_COLOR
+            elif entry.status == "Running":
+                status_text = "Running"
+                status_color = _ONGOING_COLOR
+            elif entry.status == "Error":
+                status_text = "Error"
+                status_color = _STATUS_ERR
+            else:
                 status_text = "Done"
                 status_color = _STATUS_OK
-            else:
-                status_text = "Ongoing"
-                status_color = _ONGOING_COLOR
             surf = font.render(status_text, True, status_color)
             self.screen.blit(surf, (table_x + col_status,
                                     y + row_h // 2 - surf.get_height() // 2))
 
-            # Watch replay link
-            if entry.replay_path and not self._runner.running:
+            # Replay / Error link
+            if entry.error_log_path:
+                err_surf = font.render("Error", True, _STATUS_ERR)
+                ex = table_x + col_replay
+                ey = y + row_h // 2 - err_surf.get_height() // 2
+                self.screen.blit(err_surf, (ex, ey))
+                err_rect = pygame.Rect(ex, ey, err_surf.get_width(),
+                                       err_surf.get_height())
+                if err_rect.collidepoint(mx, my):
+                    pygame.draw.line(self.screen, _STATUS_ERR,
+                                     (ex, ey + err_surf.get_height()),
+                                     (ex + err_surf.get_width(),
+                                      ey + err_surf.get_height()), 1)
+                self._error_rects.append((err_rect, entry.error_log_path))
+            elif entry.replay_path and not self._runner.running:
                 watch_surf = font.render("Watch", True, _LINK_COLOR)
-                wx = table_x + col_watch
+                wx = table_x + col_replay
                 wy = y + row_h // 2 - watch_surf.get_height() // 2
                 self.screen.blit(watch_surf, (wx, wy))
-                # Underline on hover
                 watch_rect = pygame.Rect(wx, wy, watch_surf.get_width(),
                                          watch_surf.get_height())
                 if watch_rect.collidepoint(mx, my):
@@ -599,7 +725,7 @@ class ArenaScreen(BaseScreen):
         self.screen.set_clip(old_clip)
 
         # -- Scroll indicator --
-        total_rows = len(self._match_log)
+        total_rows = len(visible_entries)
         if total_rows > visible_count:
             track_h = rows_bottom - rows_top
             thumb_h = max(12, int(track_h * visible_count / total_rows))
@@ -612,3 +738,78 @@ class ArenaScreen(BaseScreen):
                              (thumb_x, rows_top, 4, track_h), border_radius=2)
             pygame.draw.rect(self.screen, (120, 120, 150),
                              (thumb_x, thumb_y, 4, thumb_h), border_radius=2)
+
+    def _draw_matchup_cell(self, font: pygame.font.Font, entry: _LogEntry,
+                           x: int, y: int, row_h: int) -> None:
+        """Render matchup with inline Elo deltas as multi-colored segments."""
+        cy = y + row_h // 2
+        max_w = 300
+        cursor = x
+
+        n1 = entry.ai1_name
+        n2 = entry.ai2_name
+
+        if entry.elo_delta_a is not None:
+            # Format: "Name1 (+16) vs Name2 (-16)"
+            da_sign = "+" if entry.elo_delta_a >= 0 else ""
+            db_sign = "+" if entry.elo_delta_b >= 0 else ""
+            elo_a_str = f" ({da_sign}{entry.elo_delta_a:.0f})"
+            elo_b_str = f" ({db_sign}{entry.elo_delta_b:.0f})"
+            vs_str = " vs "
+
+            # Check if it fits
+            total_w = (font.size(n1)[0] + font.size(elo_a_str)[0] +
+                       font.size(vs_str)[0] + font.size(n2)[0] +
+                       font.size(elo_b_str)[0])
+            if total_w > max_w:
+                # Truncate names
+                avail = max_w - (font.size(elo_a_str)[0] +
+                                 font.size(vs_str)[0] +
+                                 font.size(elo_b_str)[0])
+                half = avail // 2
+                while font.size(n1)[0] > half and len(n1) > 2:
+                    n1 = n1[:-1]
+                n1_trunc = True
+                while font.size(n2)[0] > half and len(n2) > 2:
+                    n2 = n2[:-1]
+                n2_trunc = True
+            else:
+                n1_trunc = False
+                n2_trunc = False
+
+            if n1_trunc:
+                n1 += ".."
+            if n2_trunc:
+                n2 += ".."
+
+            segments = [
+                (n1, CONTENT_TEXT),
+                (elo_a_str, entry.elo_color_a),
+                (vs_str, _TEXT_DIM),
+                (n2, CONTENT_TEXT),
+                (elo_b_str, entry.elo_color_b),
+            ]
+        else:
+            # No Elo yet — just "Name1 vs Name2"
+            vs_str = " vs "
+            total_w = font.size(n1)[0] + font.size(vs_str)[0] + font.size(n2)[0]
+            if total_w > max_w:
+                avail = max_w - font.size(vs_str)[0]
+                half = avail // 2
+                while font.size(n1)[0] > half and len(n1) > 2:
+                    n1 = n1[:-1]
+                n1 += ".."
+                while font.size(n2)[0] > half and len(n2) > 2:
+                    n2 = n2[:-1]
+                n2 += ".."
+
+            segments = [
+                (n1, CONTENT_TEXT),
+                (vs_str, _TEXT_DIM),
+                (n2, CONTENT_TEXT),
+            ]
+
+        for text, color in segments:
+            surf = font.render(text, True, color)
+            self.screen.blit(surf, (cursor, cy - surf.get_height() // 2))
+            cursor += surf.get_width()

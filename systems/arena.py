@@ -1,8 +1,8 @@
 """AI Arena — Elo-rated round-robin tournament system.
 
 Runs headless games in parallel via ProcessPoolExecutor and tracks
-Elo ratings in ai_arena/arena_ratings.json.  Per-bot match and error
-logs are written to ai_arena/bots/{ai_id}/logs/.
+Elo ratings in ai_arena/arena_ratings.json.  Error logs and tournament
+summaries are written to ai_arena/logs/.
 """
 from __future__ import annotations
 
@@ -52,6 +52,8 @@ class MatchResult:
     replay_path: str = ""
     error: str = ""
     error_traceback: str = ""
+    error_log_path: str = ""
+    match_index: int = -1
 
 
 @dataclass
@@ -61,6 +63,8 @@ class TournamentProgress:
     results: list[MatchResult] = field(default_factory=list)
     pending_matchups: list[tuple[str, str]] = field(default_factory=list)
     done: bool = False
+    matchups: list[tuple[str, str]] = field(default_factory=list)
+    active_match_indices: list[int] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -70,100 +74,130 @@ class TournamentProgress:
 _ARENA_DIR = "ai_arena"
 _RATINGS_PATH = os.path.join(_ARENA_DIR, "arena_ratings.json")
 _REPLAYS_DIR = os.path.join(_ARENA_DIR, "replays")
-_BOTS_DIR = os.path.join(_ARENA_DIR, "bots")
+_LOGS_DIR = os.path.join(_ARENA_DIR, "logs")
 _K = 32
 
 
 # ---------------------------------------------------------------------------
-# Per-bot logging helpers
+# Logging helpers
 # ---------------------------------------------------------------------------
 
-def _bot_log_dir(ai_id: str) -> str:
-    """Return (and create) the logs directory for a bot."""
-    d = os.path.join(_BOTS_DIR, ai_id, "logs")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def _write_bot_log(
-    ai_id: str,
-    ai_name: str,
-    opponent_id: str,
-    opponent_name: str,
-    *,
-    winner: int,
-    bot_team: int,
-    ticks: int = 0,
-    avg_step_ms: float = 0.0,
-    replay_path: str = "",
-    error_traceback: str = "",
-) -> None:
-    """Write a per-match log file into the bot's logs folder.
-
-    *winner*: 1 = team-1 won, 2 = team-2 won, -1 = draw, 0 = error.
-    *bot_team*: 1 or 2 — which team this bot was on.
-    """
-    now = datetime.now()
-    ts_file = now.strftime("%Y-%m-%d_%H-%M-%S")
-    ts_iso = now.isoformat(timespec="seconds")
-
-    if winner == 0:
-        outcome = "error"
-    elif winner == bot_team:
-        outcome = "win"
-    elif winner == -1:
-        outcome = "draw"
-    else:
-        outcome = "loss"
-
-    filename = f"{ts_file}_vs_{opponent_id}_{outcome}.log"
-    log_dir = _bot_log_dir(ai_id)
-    filepath = os.path.join(log_dir, filename)
-
-    lines: list[str] = ["AIRTS Arena Match Log"]
-    lines.append(f"Time: {ts_iso}")
-    lines.append(f"Bot: {ai_name} ({ai_id})")
-    lines.append(f"Opponent: {opponent_name} ({opponent_id})")
-
-    if winner == 0:
-        lines.append("Result: Error")
-        if error_traceback:
-            lines.append("=" * 60)
-            lines.append(error_traceback.rstrip())
-    else:
-        lines.append(f"Result: {outcome.capitalize()}")
-        seconds = ticks / 60.0
-        mins = int(seconds) // 60
-        secs = int(seconds) % 60
-        lines.append(f"Ticks: {ticks} ({mins}:{secs:02d})")
-        lines.append(f"Avg Step: {avg_step_ms:.1f}ms")
-        if replay_path:
-            lines.append(f"Replay: {replay_path}")
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-
-
-def _write_discovery_error_log(bot_id: str, error_msg: str) -> None:
-    """Write an initialization/discovery error log for a bot."""
-    now = datetime.now()
-    ts_file = now.strftime("%Y-%m-%d_%H-%M-%S")
-    ts_iso = now.isoformat(timespec="seconds")
-
-    filename = f"{ts_file}_discovery_error.log"
-    log_dir = _bot_log_dir(bot_id)
-    filepath = os.path.join(log_dir, filename)
-
+def _write_error_log(
+    ai1_id: str, ai2_id: str, error_msg: str, tb: str,
+) -> str:
+    """Write an error log for a failed match. Returns the filepath."""
+    os.makedirs(_LOGS_DIR, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"error_{ai1_id}_vs_{ai2_id}_{ts}.log"
+    filepath = os.path.join(_LOGS_DIR, filename)
     lines = [
-        "AIRTS Arena Bot Error",
-        f"Time: {ts_iso}",
-        f"Bot: {bot_id}",
-        "Context: AI discovery",
+        "AIRTS Arena Match Error",
+        f"Time: {datetime.now().isoformat(timespec='seconds')}",
+        f"Match: {ai1_id} vs {ai2_id}",
         "=" * 60,
         error_msg.rstrip(),
+        "",
+        "Traceback:",
+        tb.rstrip(),
     ]
     with open(filepath, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+    return filepath
+
+
+def write_tournament_summary(
+    results: list[MatchResult],
+    elo_tracker: EloTracker,
+    pre_ratings: dict[str, float],
+    ai_names: dict[str, str],
+    start_time: float,
+) -> str:
+    """Write a tournament summary log. Returns the filepath."""
+    import time as _time
+    os.makedirs(_LOGS_DIR, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filepath = os.path.join(_LOGS_DIR, f"tournament_result_{ts}.log")
+
+    elapsed = _time.time() - start_time
+    mins = int(elapsed) // 60
+    secs = int(elapsed) % 60
+
+    errors = sum(1 for r in results if r.winner == 0)
+    lines: list[str] = [
+        "AIRTS Arena Tournament Summary",
+        f"Date: {datetime.now().isoformat(timespec='seconds')}",
+        f"Duration: {mins}m {secs}s",
+        f"Total matches: {len(results)} ({errors} errors)",
+        "",
+        "=" * 60,
+        "Final Elo Ratings (with deltas)",
+        "=" * 60,
+    ]
+
+    for ai_id, record in elo_tracker.get_leaderboard():
+        name = ai_names.get(ai_id, ai_id)
+        old = pre_ratings.get(ai_id, 1000.0)
+        delta = record.rating - old
+        sign = "+" if delta >= 0 else ""
+        lines.append(
+            f"  {name:<20s}  Elo: {record.rating:7.1f}  ({sign}{delta:.1f})  "
+            f"W:{record.wins} L:{record.losses} D:{record.draws}"
+        )
+
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("Per-Match Results")
+    lines.append("=" * 60)
+    for i, r in enumerate(results, 1):
+        n1 = ai_names.get(r.ai1_id, r.ai1_id)
+        n2 = ai_names.get(r.ai2_id, r.ai2_id)
+        if r.winner == 1:
+            outcome = f"{n1} wins"
+        elif r.winner == 2:
+            outcome = f"{n2} wins"
+        elif r.winner == -1:
+            outcome = "Draw"
+        else:
+            outcome = "Error"
+        secs_game = r.ticks / 60.0
+        m = int(secs_game) // 60
+        s = int(secs_game) % 60
+        lines.append(f"  {i:3d}. {n1} vs {n2}  ->  {outcome}  ({m}:{s:02d})")
+
+    # Per-bot summary
+    bot_stats: dict[str, dict[str, int]] = {}
+    for r in results:
+        for aid in (r.ai1_id, r.ai2_id):
+            if aid not in bot_stats:
+                bot_stats[aid] = {"wins": 0, "losses": 0, "draws": 0, "errors": 0}
+        if r.winner == 0:
+            bot_stats[r.ai1_id]["errors"] += 1
+            bot_stats[r.ai2_id]["errors"] += 1
+        elif r.winner == 1:
+            bot_stats[r.ai1_id]["wins"] += 1
+            bot_stats[r.ai2_id]["losses"] += 1
+        elif r.winner == 2:
+            bot_stats[r.ai2_id]["wins"] += 1
+            bot_stats[r.ai1_id]["losses"] += 1
+        else:
+            bot_stats[r.ai1_id]["draws"] += 1
+            bot_stats[r.ai2_id]["draws"] += 1
+
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("Per-Bot Summary (this tournament)")
+    lines.append("=" * 60)
+    for aid, s in sorted(bot_stats.items()):
+        name = ai_names.get(aid, aid)
+        total = s["wins"] + s["losses"] + s["draws"] + s["errors"]
+        lines.append(
+            f"  {name:<20s}  W:{s['wins']} L:{s['losses']} D:{s['draws']} "
+            f"E:{s['errors']}  Total:{total}"
+        )
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return filepath
 
 
 class EloTracker:
@@ -262,6 +296,7 @@ class EloTracker:
 def _run_arena_game(
     ai1_id: str,
     ai2_id: str,
+    match_index: int,
     map_width: int,
     map_height: int,
     obstacle_count: tuple[int, int],
@@ -273,11 +308,7 @@ def _run_arena_game(
 
     import pygame as _pg
     _pg.init()
-    # Dummy 1x1 display so SDL doesn't complain
     _pg.display.set_mode((1, 1))
-
-    ai1_name = ai1_id
-    ai2_name = ai2_id
 
     try:
         from systems.ai import AIRegistry
@@ -287,13 +318,14 @@ def _run_arena_game(
         registry = AIRegistry()
         registry.discover()
 
-        # Log any AI discovery errors
-        for err_msg in registry.errors:
-            # Extract bot filename from error message (format: "filename.py: ...")
-            colon_idx = err_msg.find(":")
-            if colon_idx > 0:
-                bot_file = err_msg[:colon_idx].replace(".py", "")
-                _write_discovery_error_log(bot_file, err_msg)
+        # Retry once if either bot failed to register (transient import errors)
+        needed = {ai1_id, ai2_id}
+        registered = {aid for aid, _ in registry.get_choices()}
+        if not needed.issubset(registered):
+            import time as _time
+            _time.sleep(0.1)
+            registry = AIRegistry()
+            registry.discover()
 
         ai1 = registry.create(ai1_id)
         ai2 = registry.create(ai2_id)
@@ -327,38 +359,22 @@ def _run_arena_game(
         ticks = game._iteration
         replay_path = result.get("replay_filepath", "")
 
-        # Compute average step time from stats
         avg_step_ms = 0.0
         stats = result.get("stats")
         if stats and stats.get("step_ms"):
             step_ms_list = stats["step_ms"]
             avg_step_ms = sum(step_ms_list) / len(step_ms_list)
 
-        mr = MatchResult(ai1_id, ai2_id, winner=winner, ticks=ticks,
-                         avg_step_ms=avg_step_ms, replay_path=replay_path)
-
-        # Write per-bot match logs
-        _write_bot_log(ai1_id, ai1_name, ai2_id, ai2_name,
-                       winner=winner, bot_team=1, ticks=ticks,
-                       avg_step_ms=avg_step_ms, replay_path=replay_path)
-        _write_bot_log(ai2_id, ai2_name, ai1_id, ai1_name,
-                       winner=winner, bot_team=2, ticks=ticks,
-                       avg_step_ms=avg_step_ms, replay_path=replay_path)
-
-        return mr
+        return MatchResult(ai1_id, ai2_id, winner=winner, ticks=ticks,
+                           avg_step_ms=avg_step_ms, replay_path=replay_path,
+                           match_index=match_index)
 
     except Exception as exc:
         tb = traceback.format_exc()
-        mr = MatchResult(ai1_id, ai2_id, winner=0, error=str(exc),
-                         error_traceback=tb)
-
-        # Write error logs for both bots
-        _write_bot_log(ai1_id, ai1_name, ai2_id, ai2_name,
-                       winner=0, bot_team=1, error_traceback=tb)
-        _write_bot_log(ai2_id, ai2_name, ai1_id, ai1_name,
-                       winner=0, bot_team=2, error_traceback=tb)
-
-        return mr
+        error_log = _write_error_log(ai1_id, ai2_id, str(exc), tb)
+        return MatchResult(ai1_id, ai2_id, winner=0, error=str(exc),
+                           error_traceback=tb, error_log_path=error_log,
+                           match_index=match_index)
 
     finally:
         _pg.quit()
@@ -368,15 +384,56 @@ def _run_arena_game(
 # Arena Runner
 # ---------------------------------------------------------------------------
 
+def _distribute_matchups(
+    matchups: list[tuple[str, str, int]], n_workers: int,
+) -> list[list[tuple[str, str, int]]]:
+    """Greedy bot-aware assignment of matchups to worker queues.
+
+    Each entry is (ai1_id, ai2_id, match_index).  Assigns each matchup to
+    the worker whose queue has the fewest matches involving either bot,
+    tiebreak by shortest queue.
+    """
+    queues: list[list[tuple[str, str, int]]] = [[] for _ in range(n_workers)]
+    # Per-worker bot counts for fast lookup
+    bot_counts: list[dict[str, int]] = [{} for _ in range(n_workers)]
+
+    for ai1, ai2, idx in matchups:
+        best_w = 0
+        best_score = (float("inf"), float("inf"))
+        for w in range(n_workers):
+            overlap = bot_counts[w].get(ai1, 0) + bot_counts[w].get(ai2, 0)
+            score = (overlap, len(queues[w]))
+            if score < best_score:
+                best_score = score
+                best_w = w
+        queues[best_w].append((ai1, ai2, idx))
+        bot_counts[best_w][ai1] = bot_counts[best_w].get(ai1, 0) + 1
+        bot_counts[best_w][ai2] = bot_counts[best_w].get(ai2, 0) + 1
+
+    return queues
+
+
 class ArenaRunner:
-    """Orchestrates a round-robin tournament using a process pool."""
+    """Orchestrates a round-robin tournament using a process pool with
+    slot-based submission (one match per worker at a time)."""
 
     def __init__(self):
         self._executor: ProcessPoolExecutor | None = None
-        self._futures: list[tuple[Future, str, str]] = []  # (future, ai1, ai2)
         self._results: list[MatchResult] = []
         self._total: int = 0
         self._running: bool = False
+        self._matchups: list[tuple[str, str]] = []
+
+        # Slot-based state
+        self._worker_queues: list[list[tuple[str, str, int]]] = []
+        self._active_futures: dict[int, tuple[Future, int]] = {}  # slot -> (future, match_index)
+        self._n_workers: int = 0
+
+        # Game params stored for _submit_next
+        self._map_width: int = 800
+        self._map_height: int = 600
+        self._obstacle_count: tuple[int, int] = (4, 8)
+        self._max_ticks: int = 54000
 
     @property
     def running(self) -> bool:
@@ -390,9 +447,9 @@ class ArenaRunner:
         map_width: int = 800,
         map_height: int = 600,
         obstacle_count: tuple[int, int] = (4, 8),
-        max_ticks: int = 72000,
+        max_ticks: int = 54000,
     ) -> None:
-        """Generate round-robin matchups and submit to process pool."""
+        """Generate round-robin matchups, distribute to worker queues, start."""
         if self._running:
             return
 
@@ -401,64 +458,95 @@ class ArenaRunner:
         for i, a in enumerate(ai_ids):
             for b in ai_ids[i + 1:]:
                 for _ in range(rounds):
-                    matchups.append((a, b))  # a as T1, b as T2
-                    matchups.append((b, a))  # swap sides
+                    matchups.append((a, b))
+                    matchups.append((b, a))
 
+        self._matchups = matchups
         self._total = len(matchups)
         self._results = []
-        self._futures = []
         self._running = True
+        self._n_workers = min(workers, self._total)
 
-        self._executor = ProcessPoolExecutor(max_workers=workers)
-        for ai1, ai2 in matchups:
-            fut = self._executor.submit(
-                _run_arena_game, ai1, ai2,
-                map_width, map_height, obstacle_count, max_ticks,
-            )
-            self._futures.append((fut, ai1, ai2))
+        # Store game params
+        self._map_width = map_width
+        self._map_height = map_height
+        self._obstacle_count = obstacle_count
+        self._max_ticks = max_ticks
+
+        # Distribute into per-worker queues
+        indexed = [(a, b, idx) for idx, (a, b) in enumerate(matchups)]
+        self._worker_queues = _distribute_matchups(indexed, self._n_workers)
+        self._active_futures = {}
+
+        self._executor = ProcessPoolExecutor(max_workers=self._n_workers)
+        for slot in range(self._n_workers):
+            self._submit_next(slot)
+
+    def _submit_next(self, slot: int) -> None:
+        """Pop next matchup from this worker's queue and submit it."""
+        if not self._worker_queues[slot]:
+            return
+        ai1, ai2, match_index = self._worker_queues[slot].pop(0)
+        fut = self._executor.submit(
+            _run_arena_game, ai1, ai2, match_index,
+            self._map_width, self._map_height,
+            self._obstacle_count, self._max_ticks,
+        )
+        self._active_futures[slot] = (fut, match_index)
 
     def poll(self) -> TournamentProgress:
         """Non-blocking progress check. Call each frame."""
         if not self._running:
-            return TournamentProgress(done=True, results=self._results,
-                                      total=self._total,
-                                      completed=len(self._results))
+            return TournamentProgress(
+                done=True, results=self._results,
+                total=self._total, completed=len(self._results),
+                matchups=self._matchups,
+            )
 
-        newly_done: list[tuple[Future, str, str]] = []
-        for fut, ai1, ai2 in self._futures:
+        # Check active futures for completion
+        completed_slots: list[int] = []
+        for slot, (fut, match_index) in list(self._active_futures.items()):
             if fut.done():
                 try:
                     result = fut.result()
                 except Exception as exc:
-                    result = MatchResult(ai1, ai2, winner=0, error=str(exc))
+                    ai1, ai2 = self._matchups[match_index]
+                    result = MatchResult(ai1, ai2, winner=0, error=str(exc),
+                                         match_index=match_index)
                 self._results.append(result)
-                newly_done.append((fut, ai1, ai2))
+                completed_slots.append(slot)
 
-        for item in newly_done:
-            self._futures.remove(item)
+        # Chain next matches for completed slots
+        for slot in completed_slots:
+            del self._active_futures[slot]
+            self._submit_next(slot)
 
-        done = len(self._futures) == 0
+        # Done when all queues empty and no active futures
+        done = (not self._active_futures and
+                all(len(q) == 0 for q in self._worker_queues))
         if done:
             self._running = False
             if self._executor is not None:
                 self._executor.shutdown(wait=False)
                 self._executor = None
 
-        pending = [(ai1, ai2) for _, ai1, ai2 in self._futures]
+        active_indices = [mi for _, mi in self._active_futures.values()]
 
         return TournamentProgress(
             total=self._total,
             completed=len(self._results),
             results=list(self._results),
-            pending_matchups=pending,
             done=done,
+            matchups=self._matchups,
+            active_match_indices=active_indices,
         )
 
     def cancel(self) -> None:
         """Cancel remaining futures and shut down."""
-        for fut, _, _ in self._futures:
+        for fut, _ in self._active_futures.values():
             fut.cancel()
-        self._futures.clear()
+        self._active_futures.clear()
+        self._worker_queues = []
         self._running = False
         if self._executor is not None:
             self._executor.shutdown(wait=False, cancel_futures=True)
