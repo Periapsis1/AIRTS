@@ -668,13 +668,55 @@ class Game:
             t1_index=t1_index, t2_index=t2_index,
         )
 
-        # Populate per-unit nearest_enemies / nearest_allies from sorted matrices
+        # Populate per-unit targeting lists and collision neighbor lists
         for i, u in enumerate(alive_t1):
-            u.nearest_enemies = [alive_t2[j] for j in t1_sorted_enemy_idx[i]] if n2 > 0 else []
-            u.nearest_allies = [alive_t1[j] for j in t1_sorted_ally_idx[i]] if n1 > 1 else []
+            diam_sq = u.diameter_sq
+            rng_sq = u.attack_range_sq
+            if n2 > 0:
+                enemy_dsq = t1_sorted_enemy_dist_sq[i]
+                enemy_idx = t1_sorted_enemy_idx[i]
+                u.nearest_enemies = [alive_t2[j] for j in enemy_idx]
+                u.enemies_in_range = u.nearest_enemies[:int(np.searchsorted(enemy_dsq, rng_sq, side='right'))]
+                nearby_enemies = u.nearest_enemies[:int(np.searchsorted(enemy_dsq, diam_sq, side='right'))]
+            else:
+                u.nearest_enemies = []
+                u.enemies_in_range = []
+                nearby_enemies = []
+            if n1 > 1:
+                ally_dsq = t1_sorted_ally_dist_sq[i]
+                ally_idx = t1_sorted_ally_idx[i]
+                u.nearest_allies = [alive_t1[j] for j in ally_idx]
+                u.allies_in_range = u.nearest_allies[:int(np.searchsorted(ally_dsq, rng_sq, side='right'))]
+                nearby_allies = u.nearest_allies[:int(np.searchsorted(ally_dsq, diam_sq, side='right'))]
+            else:
+                u.nearest_allies = []
+                u.allies_in_range = []
+                nearby_allies = []
+            u.nearby_units = nearby_enemies + nearby_allies
         for i, u in enumerate(alive_t2):
-            u.nearest_enemies = [alive_t1[j] for j in t2_sorted_enemy_idx[i]] if n1 > 0 else []
-            u.nearest_allies = [alive_t2[j] for j in t2_sorted_ally_idx[i]] if n2 > 1 else []
+            diam_sq = u.diameter_sq
+            rng_sq = u.attack_range_sq
+            if n1 > 0:
+                enemy_dsq = t2_sorted_enemy_dist_sq[i]
+                enemy_idx = t2_sorted_enemy_idx[i]
+                u.nearest_enemies = [alive_t1[j] for j in enemy_idx]
+                u.enemies_in_range = u.nearest_enemies[:int(np.searchsorted(enemy_dsq, rng_sq, side='right'))]
+                nearby_enemies = u.nearest_enemies[:int(np.searchsorted(enemy_dsq, diam_sq, side='right'))]
+            else:
+                u.nearest_enemies = []
+                u.enemies_in_range = []
+                nearby_enemies = []
+            if n2 > 1:
+                ally_dsq = t2_sorted_ally_dist_sq[i]
+                ally_idx = t2_sorted_ally_idx[i]
+                u.nearest_allies = [alive_t2[j] for j in ally_idx]
+                u.allies_in_range = u.nearest_allies[:int(np.searchsorted(ally_dsq, rng_sq, side='right'))]
+                nearby_allies = u.nearest_allies[:int(np.searchsorted(ally_dsq, diam_sq, side='right'))]
+            else:
+                u.nearest_allies = []
+                u.allies_in_range = []
+                nearby_allies = []
+            u.nearby_units = nearby_enemies + nearby_allies
 
         self._stats.record_subsystem("targeting_build", (_perf() - _t) * 1000)
 
@@ -698,9 +740,20 @@ class Game:
                 self._anim_timer = 0.0
         self._stats.record_subsystem("ai_step", (_perf() - _t) * 1000)
 
+        # Capture — track new entities so extractors join units + team lists
+        entity_count_before_capture = len(self.entities)
         _t = _perf()
         capture_step(self.entities, self.command_centers, self.units, self.metal_spots, metal_extractors, dt, stats=self._stats)
         self._stats.record_subsystem("capture", (_perf() - _t) * 1000)
+
+        if len(self.entities) > entity_count_before_capture:
+            for e in self.entities[entity_count_before_capture:]:
+                if isinstance(e, Unit):
+                    self.units.append(e)
+                    if e.team == 1:
+                        self.team_1_units.append(e)
+                    elif e.team == 2:
+                        self.team_2_units.append(e)
 
         _t = _perf()
         combat_step(self.units, obstacles, self.laser_flashes, dt, targeting=targeting,
@@ -709,7 +762,7 @@ class Game:
                     pending_chains=self._pending_chains, stats=self._stats)
         self._stats.record_subsystem("combat", (_perf() - _t) * 1000)
 
-        # Spawn — track entity count to detect new spawns for physics cooldown
+        # Spawn — spawn_step already appends to self.units; add to team lists
         entity_count_before_spawn = len(self.entities)
         _t = _perf()
         spawn_step(self.entities, self.command_centers, self.human_teams, stats=self._stats, tick=self._iteration, units=self.units)
@@ -717,7 +770,6 @@ class Game:
 
         if len(self.entities) > entity_count_before_spawn:
             self._physics_cooldown = 60  # 1 second to settle after spawn
-            # Append newly spawned units to team lists
             for e in self.entities[entity_count_before_spawn:]:
                 if isinstance(e, Unit):
                     if e.team == 1:
@@ -760,10 +812,29 @@ class Game:
                 ])
                 all_radii = np.array([u.radius for u in units], dtype=np.float64)
                 all_is_bld = np.array([u.is_building for u in units], dtype=bool)
+
+                # Build collision pairs from nearby_units (diameter-clipped)
+                uid_to_idx = {id(u): i for i, u in enumerate(units)}
+                _pairs_i: list[int] = []
+                _pairs_j: list[int] = []
+                for u in units:
+                    ui = uid_to_idx[id(u)]
+                    for nb in u.nearby_units:
+                        nj = uid_to_idx.get(id(nb))
+                        if nj is not None and ui < nj:
+                            _pairs_i.append(ui)
+                            _pairs_j.append(nj)
+                if _pairs_i:
+                    col_pi = np.array(_pairs_i, dtype=np.int64)
+                    col_pj = np.array(_pairs_j, dtype=np.int64)
+                else:
+                    col_pi = None
+                    col_pj = None
                 self._stats.record_subsystem("phys_array_build", (_perf() - _tp) * 1000)
 
                 _tp = _perf()
-                all_positions = batch_unit_collisions(all_positions, all_radii, all_is_bld)
+                all_positions = batch_unit_collisions(all_positions, all_radii, all_is_bld,
+                                                     pair_i=col_pi, pair_j=col_pj)
                 self._stats.record_subsystem("phys_unit_collisions", (_perf() - _tp) * 1000)
 
                 # Obstacle push on mobile units only

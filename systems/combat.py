@@ -61,12 +61,11 @@ def _pick_unit_target(
     a: Unit,
     ax: float, ay: float,
     a_range: float,
-    targeting: TargetingData,
     circle_obs, rect_obs,
 ) -> Entity | None:
     """Select a target respecting the unit's fire_mode and attack_target.
 
-    Uses pre-sorted distance matrices from TargetingData.
+    Uses pre-clipped enemies_in_range list on the unit.
     """
     if a.fire_mode == HOLD_FIRE:
         return None
@@ -90,28 +89,8 @@ def _pick_unit_target(
         if d <= a_range and _in_fov(a, preferred.x, preferred.y) and _has_los(ax, ay, preferred.x, preferred.y, circle_obs, rect_obs):
             return preferred
 
-    # Walk sorted enemy list (nearest first)
-    range_sq = a_range * a_range
-    if a.team == 1:
-        my_idx = targeting.t1_index.get(id(a))
-        if my_idx is None:
-            return None
-        sorted_idx = targeting.t1_sorted_enemy_idx[my_idx]
-        sorted_dsq = targeting.t1_sorted_enemy_dist_sq[my_idx]
-        enemy_list = targeting.alive_t2
-    else:
-        my_idx = targeting.t2_index.get(id(a))
-        if my_idx is None:
-            return None
-        sorted_idx = targeting.t2_sorted_enemy_idx[my_idx]
-        sorted_dsq = targeting.t2_sorted_enemy_dist_sq[my_idx]
-        enemy_list = targeting.alive_t1
-
-    for j in range(len(sorted_idx)):
-        d_sq = sorted_dsq[j]
-        if d_sq > range_sq:
-            break
-        b = enemy_list[sorted_idx[j]]
+    # Walk pre-clipped enemies_in_range (already sorted nearest-first, within weapon range)
+    for b in a.enemies_in_range:
         if not b.alive:
             continue
         if not _in_fov(a, b.x, b.y):
@@ -122,40 +101,14 @@ def _pick_unit_target(
 
 
 def _pick_friendly_target(
-    a: Unit, ax: float, ay: float, a_range: float,
-    targeting: TargetingData,
+    a: Unit, ax: float, ay: float,
     circle_obs, rect_obs,
 ) -> Unit | None:
     """Pick closest friendly unit that needs healing within range + LOS.
 
-    Uses pre-sorted ally distance matrices from TargetingData.
+    Uses pre-clipped allies_in_range list on the unit.
     """
-    range_sq = a_range * a_range
-    if a.team == 1:
-        my_idx = targeting.t1_index.get(id(a))
-        if my_idx is None:
-            return None
-        sorted_idx = targeting.t1_sorted_ally_idx
-        sorted_dsq = targeting.t1_sorted_ally_dist_sq
-        ally_list = targeting.alive_t1
-    else:
-        my_idx = targeting.t2_index.get(id(a))
-        if my_idx is None:
-            return None
-        sorted_idx = targeting.t2_sorted_ally_idx
-        sorted_dsq = targeting.t2_sorted_ally_dist_sq
-        ally_list = targeting.alive_t2
-
-    if sorted_idx.size == 0:
-        return None
-
-    row_idx = sorted_idx[my_idx]
-    row_dsq = sorted_dsq[my_idx]
-    for j in range(len(row_idx)):
-        d_sq = row_dsq[j]
-        if d_sq > range_sq:
-            break
-        u = ally_list[row_idx[j]]
+    for u in a.allies_in_range:
         if not u.alive:
             continue
         if isinstance(u, CommandCenter):
@@ -285,9 +238,11 @@ def combat_step(
 
         if a.laser_cooldown <= 0:
             if wpn.hits_only_friendly:
-                best_target = _pick_friendly_target(a, ax, ay, a_range, targeting, circle_obs, rect_obs) if targeting else None
+                if a.allies_in_range:
+                    best_target = _pick_friendly_target(a, ax, ay, circle_obs, rect_obs)
             else:
-                best_target = _pick_unit_target(a, ax, ay, a_range, targeting, circle_obs, rect_obs) if targeting else None
+                if a.enemies_in_range:
+                    best_target = _pick_unit_target(a, ax, ay, a_range, circle_obs, rect_obs)
 
         if best_target is not None:
             if a_dmg < 0:

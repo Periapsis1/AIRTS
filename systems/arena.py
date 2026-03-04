@@ -327,14 +327,6 @@ def _run_arena_game(
         ticks = game._iteration
         replay_path = result.get("replay_filepath", "")
 
-        # Rename replay with unique suffix to avoid collisions from parallel workers
-        if replay_path and _os.path.exists(replay_path):
-            import uuid
-            base, ext = _os.path.splitext(replay_path)
-            unique_path = f"{base}_{uuid.uuid4().hex[:6]}{ext}"
-            _os.rename(replay_path, unique_path)
-            replay_path = unique_path
-
         # Compute average step time from stats
         avg_step_ms = 0.0
         stats = result.get("stats")

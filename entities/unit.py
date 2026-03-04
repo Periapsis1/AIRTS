@@ -82,8 +82,11 @@ class Unit(CircleEntity, Damageable):
 
         self.attack_damage: float = self.weapon.damage if self.weapon else 0
         self.attack_range: float = self.weapon.range if self.weapon else 0
+        self.attack_range_sq: float = self.attack_range * self.attack_range
         self.attack_cooldown_max: float = self.weapon.cooldown if self.weapon else 0
         self.laser_cooldown: float = 0.0
+        self.diameter: float = self.radius * 2.0
+        self.diameter_sq: float = self.diameter * self.diameter
 
         self._symbol: tuple | None = stats["symbol"]
         self.is_building: bool = stats.get("is_building", False)
@@ -112,6 +115,9 @@ class Unit(CircleEntity, Damageable):
         self.pos: tuple[float, float] = (x, y)      # snapshot used by distance matrix
         self.nearest_enemies: list[Unit] = []        # sorted nearest-first
         self.nearest_allies: list[Unit] = []         # sorted nearest-first, excludes self
+        self.enemies_in_range: list[Unit] = []       # nearest_enemies clipped to weapon range
+        self.allies_in_range: list[Unit] = []        # nearest_allies clipped to weapon range
+        self.nearby_units: list[Unit] = []           # all units within diameter distance (for collisions)
 
         # -- abilities ----------------------------------------------------------
         self.abilities: list = []

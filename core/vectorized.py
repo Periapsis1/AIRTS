@@ -528,19 +528,23 @@ def batch_obstacle_push(positions: np.ndarray, radii: np.ndarray,
 
 
 def batch_unit_collisions(positions: np.ndarray, radii: np.ndarray,
-                          is_building: np.ndarray, iterations: int = 2) -> np.ndarray:
-    """Spatial-hash accelerated unit-vs-unit collision resolution.
+                          is_building: np.ndarray,
+                          pair_i: np.ndarray | None = None,
+                          pair_j: np.ndarray | None = None,
+                          iterations: int = 2) -> np.ndarray:
+    """Unit-vs-unit collision resolution with pre-computed neighbor pairs.
 
-    Uses a broad-phase spatial hash to find candidate pairs in O(N),
-    then resolves only those overlaps with vectorized numpy narrow-phase.
-    Replaces the previous O(N²) full-matrix approach.
+    When pair_i/pair_j are provided, uses them as the broad-phase candidate
+    pairs (generated from per-unit nearby_units lists).  Falls back to
+    spatial-hash broad phase when pairs are not supplied.
 
     Parameters
     ----------
     positions : float64[N, 2]  – unit (x, y) positions, modified in-place & returned
     radii : float64[N]         – collision radii
     is_building : bool[N]      – True for immovable buildings
-    iterations : int           – Jacobi relaxation passes (2 compensates for simultaneous solve)
+    pair_i, pair_j : int64[P]  – pre-computed candidate pair indices (optional)
+    iterations : int           – Jacobi relaxation passes
 
     Returns
     -------
@@ -551,12 +555,66 @@ def batch_unit_collisions(positions: np.ndarray, radii: np.ndarray,
         return positions
 
     pos = positions  # alias, mutate in-place
+
+    if pair_i is not None and pair_j is not None and len(pair_i) > 0:
+        # --- Pre-computed pairs path ---
+        # Exclude building-building pairs once up front
+        valid = ~(is_building[pair_i] & is_building[pair_j])
+        base_pi = pair_i[valid]
+        base_pj = pair_j[valid]
+        if len(base_pi) == 0:
+            return pos
+
+        for _ in range(iterations):
+            dx = pos[base_pj, 0] - pos[base_pi, 0]
+            dy = pos[base_pj, 1] - pos[base_pi, 1]
+            dist_sq = dx * dx + dy * dy
+            min_d = radii[base_pi] + radii[base_pj]
+            min_d_sq = min_d * min_d
+
+            overlapping = dist_sq < min_d_sq
+            if not np.any(overlapping):
+                break
+
+            pi = base_pi[overlapping]
+            pj = base_pj[overlapping]
+            dx = dx[overlapping]
+            dy = dy[overlapping]
+            dist_sq = dist_sq[overlapping]
+            min_d = min_d[overlapping]
+
+            dist = np.sqrt(np.maximum(dist_sq, 1e-24))
+
+            coinc = dist_sq == 0
+            if np.any(coinc):
+                n_coin = np.count_nonzero(coinc)
+                angles = np.random.uniform(0, 2 * math.pi, n_coin)
+                dx[coinc] = np.cos(angles)
+                dy[coinc] = np.sin(angles)
+                dist[coinc] = 1.0
+
+            nx_v = dx / dist
+            ny_v = dy / dist
+            overlap_amount = min_d - dist
+
+            i_bld = is_building[pi]
+            j_bld = is_building[pj]
+            share_i = np.where(i_bld, 0.0, np.where(j_bld, 1.0, 0.5))
+            share_j = np.where(j_bld, 0.0, np.where(i_bld, 1.0, 0.5))
+
+            np.add.at(pos[:, 0], pi, -nx_v * overlap_amount * share_i)
+            np.add.at(pos[:, 1], pi, -ny_v * overlap_amount * share_i)
+            np.add.at(pos[:, 0], pj, nx_v * overlap_amount * share_j)
+            np.add.at(pos[:, 1], pj, ny_v * overlap_amount * share_j)
+
+        return pos
+
+    # --- Fallback: spatial-hash broad phase ---
     max_collision_dist = float(radii.max()) * 2.0
     inv_cell = 1.0 / max_collision_dist
     _neighbor_offsets = ((1, 0), (-1, 1), (0, 1), (1, 1))
 
     for _ in range(iterations):
-        # --- Broad-phase: spatial hash to find candidate pairs ---
         cell_x = np.floor(pos[:, 0] * inv_cell).astype(np.int64)
         cell_y = np.floor(pos[:, 1] * inv_cell).astype(np.int64)
 
@@ -591,13 +649,11 @@ def batch_unit_collisions(positions: np.ndarray, radii: np.ndarray,
         pi = np.array(pairs_i, dtype=np.int64)
         pj = np.array(pairs_j, dtype=np.int64)
 
-        # Exclude building-building pairs
         valid = ~(is_building[pi] & is_building[pj])
         pi, pj = pi[valid], pj[valid]
         if len(pi) == 0:
             break
 
-        # --- Narrow-phase: vectorized overlap test on candidates only ---
         dx = pos[pj, 0] - pos[pi, 0]
         dy = pos[pj, 1] - pos[pi, 1]
         dist_sq = dx * dx + dy * dy
@@ -608,7 +664,6 @@ def batch_unit_collisions(positions: np.ndarray, radii: np.ndarray,
         if not np.any(overlapping):
             break
 
-        # Keep only overlapping pairs
         pi = pi[overlapping]
         pj = pj[overlapping]
         dx = dx[overlapping]
@@ -618,7 +673,6 @@ def batch_unit_collisions(positions: np.ndarray, radii: np.ndarray,
 
         dist = np.sqrt(np.maximum(dist_sq, 1e-24))
 
-        # Coincident pairs: push in random direction
         coinc = dist_sq == 0
         if np.any(coinc):
             n_coin = np.count_nonzero(coinc)
@@ -631,21 +685,14 @@ def batch_unit_collisions(positions: np.ndarray, radii: np.ndarray,
         ny_v = dy / dist
         overlap_amount = min_d - dist
 
-        # Push share: building=0, mobile vs building=1, mobile vs mobile=0.5
         i_bld = is_building[pi]
         j_bld = is_building[pj]
         share_i = np.where(i_bld, 0.0, np.where(j_bld, 1.0, 0.5))
         share_j = np.where(j_bld, 0.0, np.where(i_bld, 1.0, 0.5))
 
-        # Push i away from j (−normal), push j away from i (+normal)
-        push_ix = -nx_v * overlap_amount * share_i
-        push_iy = -ny_v * overlap_amount * share_i
-        push_jx = nx_v * overlap_amount * share_j
-        push_jy = ny_v * overlap_amount * share_j
-
-        np.add.at(pos[:, 0], pi, push_ix)
-        np.add.at(pos[:, 1], pi, push_iy)
-        np.add.at(pos[:, 0], pj, push_jx)
-        np.add.at(pos[:, 1], pj, push_jy)
+        np.add.at(pos[:, 0], pi, -nx_v * overlap_amount * share_i)
+        np.add.at(pos[:, 1], pi, -ny_v * overlap_amount * share_i)
+        np.add.at(pos[:, 0], pj, nx_v * overlap_amount * share_j)
+        np.add.at(pos[:, 1], pj, ny_v * overlap_amount * share_j)
 
     return pos

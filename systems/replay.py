@@ -7,6 +7,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -282,7 +283,8 @@ class ReplayRecorder:
 
         os.makedirs(output_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"replay_{ts}.rtsreplay"
+        uid = uuid.uuid4().hex[:6]
+        filename = f"replay_{ts}_{uid}.rtsreplay"
         filepath = os.path.join(output_dir, filename)
 
         raw = json.dumps(data, separators=(",", ":"))
