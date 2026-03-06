@@ -124,9 +124,15 @@ class CreateLobbyScreen(BaseScreen):
         self._sl_time_limit = Slider(sl_x, 400, 220, "Time Limit (min, 0=off)",
                                      0, 60, saved.get("time_limit", 15), 1)
 
+        # -- Save debug summary checkbox ------------------------------------
+        self._debug_summary_cb = Checkbox(
+            sl_x, 445, "Save game summary for debugging",
+            checked=saved.get("save_debug_summary", False),
+        )
+
         # -- Headless checkbox ----------------------------------------------
         self._headless_cb = Checkbox(
-            sl_x, 445, "Headless (no rendering, max speed)",
+            sl_x, 480, "Headless (no rendering, max speed)",
             checked=saved.get("headless", False),
             enabled=False,
         )
@@ -221,6 +227,7 @@ class CreateLobbyScreen(BaseScreen):
                 self._map_size.handle_event(event)
                 self._sl_obstacles.handle_event(event)
                 self._sl_time_limit.handle_event(event)
+                self._debug_summary_cb.handle_event(event)
                 self._headless_cb.handle_event(event)
 
                 if self._start_btn.handle_event(event):
@@ -243,6 +250,7 @@ class CreateLobbyScreen(BaseScreen):
             "map_size": self._map_size.value,
             "obstacles": self._sl_obstacles.value,
             "time_limit": self._sl_time_limit.value,
+            "save_debug_summary": self._debug_summary_cb.checked,
             "headless": self._headless_cb.checked,
         })
 
@@ -276,6 +284,7 @@ class CreateLobbyScreen(BaseScreen):
             "height": map_h,
             "obstacle_count": (obs_val, obs_val),
             "time_limit": self._sl_time_limit.value,
+            "save_debug_summary": self._debug_summary_cb.checked,
             "headless": self._headless_cb.checked,
         })
 
@@ -339,6 +348,7 @@ class CreateLobbyScreen(BaseScreen):
         self._map_size.draw(self.screen)
         self._sl_obstacles.draw(self.screen)
         self._sl_time_limit.draw(self.screen)
+        self._debug_summary_cb.draw(self.screen)
         self._headless_cb.draw(self.screen)
 
         # -- Start button ---------------------------------------------------
