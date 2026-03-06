@@ -28,7 +28,7 @@ replays/
 logs/
 CLAUDE.md
 ai_arena/arena_ratings.json
-lobby_settings.json
 Perigee/
 ais/perigee_ai.py
-
+*.pyd
+lobby_settings.json

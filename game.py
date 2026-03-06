@@ -767,6 +767,8 @@ class Game:
         self._stats.record_subsystem("spawn", (_perf() - _t) * 1000)
 
         _t = _perf()
+        # Always assign IDs (cheap — skips entities that already have one)
+        self._assign_entity_ids()
         # Remove dead units from quadfield; only rebuild lists if something died
         _had_deaths = False
         for u in self.units:
@@ -780,7 +782,6 @@ class Game:
             self.team_2_units = [u for u in self.team_2_units if u.alive]
             self.command_centers = [c for c in self.command_centers if c.alive]
             self.metal_extractors = [m for m in self.metal_extractors if m.alive]
-            self._assign_entity_ids()
         self._stats.record_subsystem("cleanup", (_perf() - _t) * 1000)
 
         # Physics cooldown: detect movement to keep physics running

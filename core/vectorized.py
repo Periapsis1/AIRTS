@@ -49,6 +49,8 @@ def batch_facing_update(units, dt_scaled: float) -> None:
             t = u.nearest_ally
             if t is None or not getattr(t, 'alive', False):
                 continue
+            if t.hp >= t.max_hp:
+                continue
         else:
             t = u.nearest_enemy
             if t is None or not getattr(t, 'alive', False):
