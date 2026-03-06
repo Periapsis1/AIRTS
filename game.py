@@ -76,6 +76,7 @@ class Game:
         headless: bool = False,
         max_ticks: int = 0,
         save_replay: bool = True,
+        save_debug_summary: bool = False,
         step_timeout_ms: float = 0,
         replay_output_dir: str = "replays",
     ):
@@ -110,6 +111,7 @@ class Game:
         self._headless = headless
         self._max_ticks = max_ticks
         self._save_replay = save_replay
+        self._save_debug_summary = save_debug_summary
         self._step_timeout_ms = step_timeout_ms
         self._replay_output_dir = replay_output_dir
         self._player_name = player_name
@@ -1398,10 +1400,11 @@ class Game:
             ai = self.team_ai.get(team)
             team_names[team] = ai.ai_name if ai else self._player_name
 
-        log_path = self._stats.save_summary_log(
-            stats_data, self._winner, team_names=team_names,
-        )
-        print(f"[AIRTS] Game summary saved to {log_path}")
+        if self._save_debug_summary:
+            log_path = self._stats.save_summary_log(
+                stats_data, self._winner, team_names=team_names,
+            )
+            print(f"[AIRTS] Game summary saved to {log_path}")
 
         result = {
             "winner": self._winner,
