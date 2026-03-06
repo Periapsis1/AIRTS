@@ -112,7 +112,6 @@ class Unit(CircleEntity, Damageable):
         self._facing_target: Entity | None = None   # entity ref, set by combat system
 
         # -- targeting data (populated every 15 ticks by Game) -------------------
-        self.pos: tuple[float, float] = (x, y)      # snapshot used by distance matrix
         self.nearest_enemy: Unit | None = None       # vectorized nearest enemy
         self.nearest_ally: Unit | None = None        # vectorized nearest ally
 
@@ -165,11 +164,11 @@ class Unit(CircleEntity, Damageable):
     # -- update -------------------------------------------------------------
 
     def update(self, dt: float):
-        self.pos = (self.x, self.y)
         self.laser_cooldown = max(0.0, self.laser_cooldown - dt)
 
-        for ability in self.abilities:
-            ability.update(self, dt)
+        if self.abilities:
+            for ability in self.abilities:
+                ability.update(self, dt)
 
         if self.attack_target is not None and not self.attack_target.alive:
             self.attack_target = None

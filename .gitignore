@@ -14,6 +14,9 @@ build/
 .ruff_cache/
 *.so
 *.dll
+*.pyd
+# Cython-generated C files (built from .pyx sources)
+core/*.c
 .env
 .idea/
 .vscode/
@@ -25,3 +28,4 @@ replays/
 logs/
 CLAUDE.md
 ai_arena/arena_ratings.json
+lobby_settings.json

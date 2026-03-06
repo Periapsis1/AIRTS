@@ -35,6 +35,13 @@ from core.vectorized import build_obstacle_arrays, batch_obstacle_push, batch_un
 from core.quadfield import QuadField
 from core.camera import Camera
 import numpy as np
+
+try:
+    from core.fast_collisions import collision_pass as _cy_collision_pass
+    _HAS_CYTHON = True
+except ImportError:
+    _HAS_CYTHON = False
+
 import os
 from ui.widgets import Slider, Button
 import gui
@@ -660,35 +667,39 @@ class Game:
 
 
 
-        # Collision detection + resolution via spatial queries
-        # Each mobile-mobile pair is resolved once (id check deduplicates).
+        # Collision detection + resolution
         _t_tgt = _perf()
-        _reuse_nearby: list = []
-        for u in alive_units:
-            if u.is_building:
-                continue
-            nearby = qf.get_units_exact(u.x, u.y, u.radius, out=_reuse_nearby)
-            for other in nearby:
-                if other is u:
+        if _HAS_CYTHON:
+            # Cython fast path: spatial hash + resolution entirely in C
+            _cy_collision_pass(alive_units)
+        else:
+            # Pure Python fallback via QuadField queries
+            _reuse_nearby: list = []
+            for u in alive_units:
+                if u.is_building:
                     continue
-                dx = other.x - u.x
-                dy = other.y - u.y
-                dist_sq = dx * dx + dy * dy
-                min_dist = u.radius + other.radius
-                if dist_sq < min_dist * min_dist:
-                    dist = math.sqrt(max(dist_sq, 1e-24))
-                    overlap = min_dist - dist
-                    nx = dx / dist
-                    ny = dy / dist
-                    if other.is_building:
-                        u.x -= nx * overlap
-                        u.y -= ny * overlap
-                    elif id(u) < id(other):
-                        half = overlap * 0.5
-                        u.x -= nx * half
-                        u.y -= ny * half
-                        other.x += nx * half
-                        other.y += ny * half
+                nearby = qf.get_units_exact(u.x, u.y, u.radius, out=_reuse_nearby)
+                for other in nearby:
+                    if other is u:
+                        continue
+                    dx = other.x - u.x
+                    dy = other.y - u.y
+                    dist_sq = dx * dx + dy * dy
+                    min_dist = u.radius + other.radius
+                    if dist_sq < min_dist * min_dist:
+                        dist = math.sqrt(max(dist_sq, 1e-24))
+                        overlap = min_dist - dist
+                        nx = dx / dist
+                        ny = dy / dist
+                        if other.is_building:
+                            u.x -= nx * overlap
+                            u.y -= ny * overlap
+                        elif id(u) < id(other):
+                            half = overlap * 0.5
+                            u.x -= nx * half
+                            u.y -= ny * half
+                            other.x += nx * half
+                            other.y += ny * half
         self._stats.record_subsystem("tgt_populate", (_perf() - _t_tgt) * 1000)
 
         # Batch facing update (replaces per-unit _update_facing)
@@ -756,17 +767,20 @@ class Game:
         self._stats.record_subsystem("spawn", (_perf() - _t) * 1000)
 
         _t = _perf()
-        # Remove dead units from quadfield before filtering lists
+        # Remove dead units from quadfield; only rebuild lists if something died
+        _had_deaths = False
         for u in self.units:
             if not u.alive:
                 self._quadfield.remove_unit(u)
-        self.entities = [e for e in self.entities if e.alive]
-        self.units = [u for u in self.units if u.alive]
-        self.team_1_units = [u for u in self.team_1_units if u.alive]
-        self.team_2_units = [u for u in self.team_2_units if u.alive]
-        self.command_centers = [c for c in self.command_centers if c.alive]
-        self.metal_extractors = [m for m in self.metal_extractors if m.alive]
-        self._assign_entity_ids()
+                _had_deaths = True
+        if _had_deaths:
+            self.entities = [e for e in self.entities if e.alive]
+            self.units = [u for u in self.units if u.alive]
+            self.team_1_units = [u for u in self.team_1_units if u.alive]
+            self.team_2_units = [u for u in self.team_2_units if u.alive]
+            self.command_centers = [c for c in self.command_centers if c.alive]
+            self.metal_extractors = [m for m in self.metal_extractors if m.alive]
+            self._assign_entity_ids()
         self._stats.record_subsystem("cleanup", (_perf() - _t) * 1000)
 
         # Physics cooldown: detect movement to keep physics running
