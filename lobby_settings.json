@@ -1,0 +1,11 @@
+{
+  "mode": "human_vs_ai",
+  "human_team": 1,
+  "ai_t1": "null",
+  "ai_t2": "hard_bot_2",
+  "player_name": "",
+  "map_size": "small",
+  "obstacles": 0,
+  "time_limit": 10,
+  "headless": false
+}

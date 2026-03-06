@@ -112,9 +112,7 @@ def combat_step(
             for obs in obstacles if isinstance(obs, RectEntity)
         )
 
-    combatants = [u for u in units if u.alive]
-
-    for a in combatants:
+    for a in units:
         if not a.alive:
             continue
         if not a.can_attack:
@@ -238,7 +236,7 @@ def combat_step(
             if quadfield is not None:
                 enemies = quadfield.get_enemy_units_exact(ox, oy, chain.weapon.chain_range, chain.team)
             else:
-                enemies = combatants
+                enemies = units
             for b in enemies:
                 if not b.alive or b.entity_id in chain.hit_set:
                     continue

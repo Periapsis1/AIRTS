@@ -718,7 +718,7 @@ class Game:
         # Capture — track new entities so extractors join units + team lists
         entity_count_before_capture = len(self.entities)
         _t = _perf()
-        capture_step(self.entities, self.command_centers, self.units, self.metal_spots, metal_extractors, dt, stats=self._stats)
+        capture_step(self.entities, self.command_centers, self.units, self.metal_spots, metal_extractors, dt, stats=self._stats, grid=self._quadfield)
 
         if len(self.entities) > entity_count_before_capture:
             for e in self.entities[entity_count_before_capture:]:
@@ -732,7 +732,7 @@ class Game:
         self._stats.record_subsystem("capture", (_perf() - _t) * 1000)
 
         _t = _perf()
-        combat_step(self.units, obstacles, self.laser_flashes, dt,
+        combat_step(alive_units, obstacles, self.laser_flashes, dt,
                     quadfield=self._quadfield,
                     circle_obs=self._obs_circle, rect_obs=self._obs_rect,
                     sounds=None if self._headless else self._sounds,

@@ -16,7 +16,7 @@ def capture_step(entities: list[Entity], command_centers: list[CommandCenter], u
             continue
         unit_difference = 0
         sx, sy = metal_spot.center()
-        nearby = grid.query_radius(sx, sy, METAL_SPOT_CAPTURE_RADIUS) if grid is not None else units
+        nearby = grid.get_units_exact(sx, sy, METAL_SPOT_CAPTURE_RADIUS) if grid is not None else units
         for unit in nearby:
             if getattr(unit, 'is_building', False):
                 continue

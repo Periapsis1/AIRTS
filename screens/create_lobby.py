@@ -1,5 +1,7 @@
 """Create-lobby screen — mode toggle, team columns, AI pickers, map settings."""
 from __future__ import annotations
+import json
+import os
 import pygame
 from screens.base import BaseScreen, ScreenResult
 from ui.theme import (
@@ -20,6 +22,39 @@ _T2_COLOR = (255, 80, 80)
 _COL1_CX = 200
 _COL2_CX = 600
 
+# Map size presets: (label, width, height)
+_MAP_PRESETS = [
+    ("small", "Small"),
+    ("medium", "Medium"),
+    ("large", "Large"),
+]
+_MAP_SIZES = {
+    "small": (800, 600),
+    "medium": (1200, 800),
+    "large": (1800, 1200),
+}
+
+# Settings file path (next to the executable / project root)
+_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "lobby_settings.json")
+
+
+def _load_settings() -> dict:
+    """Load saved lobby settings from disk, or return empty dict."""
+    try:
+        with open(_SETTINGS_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_settings(settings: dict):
+    """Persist lobby settings to disk."""
+    try:
+        with open(_SETTINGS_PATH, "w") as f:
+            json.dump(settings, f, indent=2)
+    except OSError:
+        pass
+
 
 class CreateLobbyScreen(BaseScreen):
     """Configure game mode, AIs, and map settings, then start."""
@@ -30,31 +65,39 @@ class CreateLobbyScreen(BaseScreen):
         self._ai_choices = ai_choices
         cx = self.width // 2
 
+        # Load saved settings
+        saved = _load_settings()
+
         # -- Mode toggle: Human vs AI | AI vs AI ----------------------------
+        mode_index = 1 if saved.get("mode") == "ai_vs_ai" else 0
         self._mode = ToggleGroup(
             cx - 145, 80,
             [
                 ("human_vs_ai", "Human vs AI"),
                 ("ai_vs_ai", "AI vs AI"),
             ],
-            selected_index=0,
+            selected_index=mode_index,
             btn_w=140,
             btn_h=32,
         )
 
         # Which team the human controls (1 or 2) in human_vs_ai mode
-        self._human_team: int = 1
+        self._human_team: int = saved.get("human_team", 1)
 
         # -- AI dropdowns (one per column) ----------------------------------
         dd_x1 = _COL1_CX - DD_WIDTH // 2
         dd_x2 = _COL2_CX - DD_WIDTH // 2
-        self._dd_t1 = Dropdown(dd_x1, 165, DD_WIDTH, ai_choices, 0)
-        self._dd_t2 = Dropdown(dd_x2, 165, DD_WIDTH, ai_choices, 0)
+
+        # Restore saved AI selections
+        t1_idx = self._find_ai_index(saved.get("ai_t1"), ai_choices, 0)
+        t2_idx = self._find_ai_index(saved.get("ai_t2"), ai_choices, 0)
+        self._dd_t1 = Dropdown(dd_x1, 165, DD_WIDTH, ai_choices, t1_idx)
+        self._dd_t2 = Dropdown(dd_x2, 165, DD_WIDTH, ai_choices, t2_idx)
 
         # -- Player name input (appears on the human side) ------------------
         self._name_input = TextInput(
             dd_x1, 228, DD_WIDTH,
-            text="",
+            text=saved.get("player_name", ""),
             placeholder="Unnamed Player",
             max_len=24,
         )
@@ -62,18 +105,30 @@ class CreateLobbyScreen(BaseScreen):
         # -- Swap sides button ----------------------------------------------
         self._swap_btn = Button(cx - 30, 168, 60, 28, "<->", font_size=14)
 
-        # -- Map sliders ----------------------------------------------------
+        # -- Map size preset toggle -----------------------------------------
+        saved_map = saved.get("map_size", "small")
+        map_idx = next((i for i, (v, _) in enumerate(_MAP_PRESETS) if v == saved_map), 0)
         sl_x = cx - 110
-        self._sl_width = Slider(sl_x, 310, 220, "Map Width", 200, 1600, 800, 100)
-        self._sl_height = Slider(sl_x, 355, 220, "Map Height", 200, 1200, 600, 100)
-        self._sl_obs_min = Slider(sl_x, 400, 220, "Obstacles Min", 0, 20, 4, 1)
-        self._sl_obs_max = Slider(sl_x, 445, 220, "Obstacles Max", 0, 20, 8, 1)
-        self._sl_time_limit = Slider(sl_x, 490, 220, "Time Limit (min, 0=off)", 0, 60, 15, 1)
+        self._map_size = ToggleGroup(
+            sl_x, 310, _MAP_PRESETS,
+            selected_index=map_idx,
+            btn_w=73,
+            btn_h=28,
+        )
+
+        # -- Obstacles slider (single, sets both min and max) ---------------
+        self._sl_obstacles = Slider(sl_x, 355, 220, "Obstacles", 0, 20,
+                                    saved.get("obstacles", 0), 1)
+
+        # -- Time limit slider ----------------------------------------------
+        self._sl_time_limit = Slider(sl_x, 400, 220, "Time Limit (min, 0=off)",
+                                     0, 60, saved.get("time_limit", 15), 1)
 
         # -- Headless checkbox ----------------------------------------------
         self._headless_cb = Checkbox(
-            sl_x, 535, "Headless (no rendering, max speed)",
-            checked=False, enabled=False,
+            sl_x, 445, "Headless (no rendering, max speed)",
+            checked=saved.get("headless", False),
+            enabled=False,
         )
 
         # -- Start button ---------------------------------------------------
@@ -84,6 +139,17 @@ class CreateLobbyScreen(BaseScreen):
         self._back = BackButton()
 
         self._update_layout()
+
+    @staticmethod
+    def _find_ai_index(ai_id: str | None, choices: list[tuple[str, str]],
+                       default: int) -> int:
+        """Find the index of an AI id in the choices list."""
+        if ai_id is None:
+            return default
+        for i, (val, _) in enumerate(choices):
+            if val == ai_id:
+                return i
+        return default
 
     # -- layout helpers -----------------------------------------------------
 
@@ -152,24 +218,33 @@ class CreateLobbyScreen(BaseScreen):
                 self._dd_t1.handle_event(event)
                 self._dd_t2.handle_event(event)
 
-                self._sl_width.handle_event(event)
-                self._sl_height.handle_event(event)
-                self._sl_obs_min.handle_event(event)
-                self._sl_obs_max.handle_event(event)
+                self._map_size.handle_event(event)
+                self._sl_obstacles.handle_event(event)
                 self._sl_time_limit.handle_event(event)
                 self._headless_cb.handle_event(event)
 
-                # Enforce obs_min <= obs_max
-                if self._sl_obs_min.value > self._sl_obs_max.value:
-                    self._sl_obs_max.value = self._sl_obs_min.value
-                if self._sl_obs_max.value < self._sl_obs_min.value:
-                    self._sl_obs_min.value = self._sl_obs_max.value
-
                 if self._start_btn.handle_event(event):
+                    self._persist_settings()
                     return self._build_result()
 
             self._draw()
             self.clock.tick(60)
+
+    # -- settings persistence -----------------------------------------------
+
+    def _persist_settings(self):
+        """Save current lobby settings to disk."""
+        _save_settings({
+            "mode": self._mode.value,
+            "human_team": self._human_team,
+            "ai_t1": self._dd_t1.value,
+            "ai_t2": self._dd_t2.value,
+            "player_name": self._name_input.text.strip(),
+            "map_size": self._map_size.value,
+            "obstacles": self._sl_obstacles.value,
+            "time_limit": self._sl_time_limit.value,
+            "headless": self._headless_cb.checked,
+        })
 
     # -- result builder -----------------------------------------------------
 
@@ -189,12 +264,17 @@ class CreateLobbyScreen(BaseScreen):
 
         player_name = self._name_input.text.strip() or "Unnamed Player"
 
+        # Resolve map size from preset
+        map_w, map_h = _MAP_SIZES[self._map_size.value]
+
+        obs_val = self._sl_obstacles.value
+
         return ScreenResult("game", data={
             "team_ai_ids": team_ai,
             "player_name": player_name,
-            "width": self._sl_width.value,
-            "height": self._sl_height.value,
-            "obstacle_count": (self._sl_obs_min.value, self._sl_obs_max.value),
+            "width": map_w,
+            "height": map_h,
+            "obstacle_count": (obs_val, obs_val),
             "time_limit": self._sl_time_limit.value,
             "headless": self._headless_cb.checked,
         })
@@ -256,13 +336,9 @@ class CreateLobbyScreen(BaseScreen):
         self.screen.blit(map_label,
                          (self.width // 2 - map_label.get_width() // 2, 280))
 
-        self._sl_width.draw(self.screen)
-        self._sl_height.draw(self.screen)
-        self._sl_obs_min.draw(self.screen)
-        self._sl_obs_max.draw(self.screen)
-
+        self._map_size.draw(self.screen)
+        self._sl_obstacles.draw(self.screen)
         self._sl_time_limit.draw(self.screen)
-
         self._headless_cb.draw(self.screen)
 
         # -- Start button ---------------------------------------------------

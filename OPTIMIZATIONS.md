@@ -1,23 +1,5 @@
 # AIRTS Performance Optimizations
 
-Baseline: 62 units (31/team), avg tick 1.15ms, max 3.0ms.
-After fixes 1+4: avg tick 1.01ms, max 2.07ms.
-
-## 1. Collision pair deduplication (tgt_populate — 0.43ms -> 0.36ms)
-
-`game.py` collision loop — each mobile-mobile pair was resolved from both sides.
-Fix: `id(u) < id(other)` guard, push both units symmetrically. Buildings skip outer loop.
-
-**Status: DONE**
-
-## 2. Batch facing update (entity_update — 0.12ms)
-
-Per-unit `_update_facing()` did atan2 + angle_diff in Python for each unit individually.
-Fix: `batch_facing_update()` in `core/vectorized.py` — collects eligible units, does all
-trig in numpy arrays. Called from `game.py` before entity_update loop.
-
-**Status: DONE**
-
 ## 3. Nearest-enemy O(N^2) distance matrix (tgt_nearest_enemy — 0.03ms avg, scales badly)
 
 `game.py:640` creates `(N, M, 2)` float64 arrays. At 200v200 = 640KB allocation every
@@ -34,7 +16,7 @@ already supports spatial queries via `grid.query_radius()` — but QuadField use
 `get_units_exact()`, so either add a `query_radius` adapter or call `get_units_exact`
 directly. Trivial change.
 
-**Status: TODO**
+**Status: DONE** — Pass `self._quadfield` as `grid` arg; changed `query_radius` to `get_units_exact`.
 
 ## 5. Eliminate redundant combatants list in combat_step (combat — 0.10ms)
 
@@ -42,7 +24,7 @@ directly. Trivial change.
 `alive_units` is already built in `game.py`. Pass it directly to `combat_step()` instead
 of `self.units` to skip the redundant filter.
 
-**Status: TODO**
+**Status: DONE** — Pass `alive_units` to `combat_step()`; removed redundant list comprehension.
 
 ## 6. Multiple list rebuilds every tick (cleanup — 0.03ms + spread overhead)
 
