@@ -21,15 +21,33 @@ def click_select(
 ):
     best: Entity | None = None
     best_dist = float("inf")
+    best_is_building = True
     for entity in entities:
         if not getattr(entity, "selectable", False):
             continue
         ex, ey = entity.center()
         er = entity.collision_radius()
         d = math.hypot(ex - mx, ey - my)
-        if d <= er and d < best_dist:
-            best_dist = d
+        if d > er:
+            continue
+        is_building = getattr(entity, "is_building", False)
+        # Army units always take priority over buildings
+        if best is None:
             best = entity
+            best_dist = d
+            best_is_building = is_building
+        elif not is_building and best_is_building:
+            # current is army, best was building → replace
+            best = entity
+            best_dist = d
+            best_is_building = False
+        elif is_building and not best_is_building:
+            # current is building, best is army → skip
+            pass
+        elif d < best_dist:
+            # same category, closer wins
+            best = entity
+            best_dist = d
     if not additive:
         _deselect_all(entities)
     if best is not None:
@@ -44,22 +62,22 @@ def apply_circle_selection(
     if not additive:
         _deselect_all(entities)
 
-    entities_to_select = []
-    cc = None
+    army_units = []
+    buildings = []
     for entity in entities:
-        selectable = getattr(entity, "selectable", False)
-        
-        if selectable and getattr(entity, 'is_building', False):
-            cc = entity
-        elif selectable and entity_in_circle(entity, cx, cy, sr):
-            entities_to_select.append(entity)
+        if not getattr(entity, "selectable", False):
+            continue
+        if not entity_in_circle(entity, cx, cy, sr):
+            continue
+        if getattr(entity, "is_building", False):
+            buildings.append(entity)
+        else:
+            army_units.append(entity)
 
-    # only select the command center if no other entities are selected
-    if cc is not None and len(entities_to_select) == 0:
-        cc.set_selected(True)
-    else:  # select the entities inside the circle
-        for entity in entities_to_select:
-            entity.set_selected(True)
+    # Army units take priority; fall back to buildings if none
+    targets = army_units if army_units else buildings
+    for entity in targets:
+        entity.set_selected(True)
 
 
 def select_all_of_type(entities: list[Entity], mx: float, my: float):

@@ -40,9 +40,9 @@ _FILTER_BG = (35, 35, 52)
 _FILTER_ACTIVE = (65, 100, 180)
 _QUEUED_COLOR = (90, 90, 110)
 
-# Layout constants
+# Layout constants (TABLE_X and TABLE_W are set dynamically per-instance)
 _TABLE_X = 30
-_TABLE_W = 740
+_TABLE_W = 740  # default, overridden in __init__
 _LB_ROW_H = 22
 _LB_HEADER_Y = 45
 _LOG_ROW_H = 20
@@ -84,6 +84,10 @@ class ArenaScreen(BaseScreen):
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock,
                  ai_choices: list[tuple[str, str]]):
         super().__init__(screen, clock)
+
+        # Dynamic table layout
+        self._table_x = 30
+        self._table_w = self.width - 60  # 30px margin on each side
 
         # Filter out Crash Test AI
         self._ai_choices = [(aid, name) for aid, name in ai_choices
@@ -439,12 +443,12 @@ class ArenaScreen(BaseScreen):
             return
 
         font = _get_font(CONTENT_FONT_SIZE)
-        table_x = _TABLE_X
-        table_w = _TABLE_W
+        table_x = self._table_x
+        table_w = self._table_w
         row_h = _LB_ROW_H
         header_y = _LB_HEADER_Y
 
-        # Column positions
+        # Column positions (relative to table_w for responsive layout)
         col_rank = 0
         col_name = 30
         col_elo = table_w - 280
@@ -529,7 +533,7 @@ class ArenaScreen(BaseScreen):
         pad_y = 2
         chip_h = font.get_height() + pad_y * 2
         gap = 4
-        x = _TABLE_X
+        x = self._table_x
         mx, my = pygame.mouse.get_pos()
 
         for bid in bot_ids:
@@ -553,8 +557,8 @@ class ArenaScreen(BaseScreen):
     def _draw_game_log(self) -> None:
         """Draw progress bar + scrollable game log table."""
         font = _get_font(_LOG_FONT)
-        table_x = _TABLE_X
-        table_w = _TABLE_W
+        table_x = self._table_x
+        table_w = self._table_w
         row_h = _LOG_ROW_H
         log_top = self._log_top_y()
         log_bottom = self._log_area_bottom()
@@ -602,13 +606,13 @@ class ArenaScreen(BaseScreen):
         # -- Bot filter chips --
         header_y = self._draw_bot_filter(filter_y)
 
-        # -- Column positions (no Elo column; wider matchup) --
+        # -- Column positions (proportional to table width) --
         col_matchup = 0
-        col_result = 310
-        col_length = 430
-        col_step = 500
-        col_status = 580
-        col_replay = 660
+        col_result = int(table_w * 0.40)
+        col_length = int(table_w * 0.55)
+        col_step = int(table_w * 0.65)
+        col_status = int(table_w * 0.75)
+        col_replay = int(table_w * 0.85)
 
         # -- Header row --
         for cx, label in [

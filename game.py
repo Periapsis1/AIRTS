@@ -48,6 +48,22 @@ import gui
 
 _DBLCLICK_MS = 400
 
+# -- metallic border colours (outer highlight → inner shadow) ----------
+_BORDER_OUTER = (160, 165, 175)
+_BORDER_MID = (100, 105, 115)
+_BORDER_INNER = (60, 62, 70)
+
+
+def _draw_metallic_border(surface: pygame.Surface, rect: pygame.Rect,
+                          thickness: int = 3) -> None:
+    """Draw a bevelled metallic border around *rect*."""
+    colors = [_BORDER_OUTER, _BORDER_MID, _BORDER_INNER]
+    for i in range(min(thickness, len(colors))):
+        c = colors[i]
+        r = rect.inflate(-i * 2, -i * 2)
+        if r.w > 0 and r.h > 0:
+            pygame.draw.rect(surface, c, r, 1)
+
 # Type registry for deserialization dispatch
 _ENTITY_TYPES: dict[str, type] = {
     "Entity": Entity,
@@ -79,6 +95,8 @@ class Game:
         save_debug_summary: bool = False,
         step_timeout_ms: float = 0,
         replay_output_dir: str = "replays",
+        screen_width: int | None = None,
+        screen_height: int | None = None,
     ):
         """
         *team_ai* maps team numbers to AI controllers.  Teams **not** present
@@ -103,8 +121,23 @@ class Game:
             self.screen = screen
             self._owns_pygame = False
 
+        # Map dimensions (world)
         self.width = width
         self.height = height
+
+        # Screen dimensions (display) — defaults to map dims for backward compat
+        self._screen_width = screen_width if screen_width is not None else width
+        self._screen_height = screen_height if screen_height is not None else height
+
+        # Layout areas
+        self._header_h = 40
+        self._hud_h = int(self._screen_height * 0.20)
+        self._header_rect = pygame.Rect(0, 0, self._screen_width, self._header_h)
+        self._hud_rect = pygame.Rect(0, self._screen_height - self._hud_h,
+                                     self._screen_width, self._hud_h)
+        self._game_area = pygame.Rect(0, self._header_h, self._screen_width,
+                                      self._screen_height - self._header_h - self._hud_h)
+
         self.clock = clock or pygame.time.Clock()
         self.running = False
         self.fps = 60
@@ -184,15 +217,16 @@ class Game:
         self._last_click_time: int = 0
         self._last_click_pos: tuple[int, int] = (0, 0)
 
-        self._speed_slider = Slider(width - 170, 10, 150, "Speed %", 25, 800, 100, 25)
-        self._pause_btn = Button(width - 210, 12, 32, 24, "||", icon="pause")
+        self._speed_slider = Slider(self._screen_width - 170, 10, 150, "Speed %", 25, 800, 100, 25)
+        self._pause_btn = Button(self._screen_width - 210, 12, 32, 24, "||", icon="pause")
+        self._reset_cam_btn = Button(70, 12, 50, 24, "Reset", font_size=18)
         self._paused = False
         self._pause_font = pygame.font.SysFont(None, 48)
         self._mouse_grabbed = False
 
         # -- camera & world surface -------------------------------------------
         self._world_surface = pygame.Surface((width, height))
-        self._camera = Camera(width, height, width, height,
+        self._camera = Camera(self._game_area.w, self._game_area.h, width, height,
                               max_zoom=CAMERA_MAX_ZOOM)
         self._mid_dragging = False
         self._mid_last: tuple[int, int] = (0, 0)
@@ -415,19 +449,22 @@ class Game:
         pygame.event.set_grab(grab)
 
     def _update_edge_pan(self, dt: float):
-        """Pan camera when mouse is at the screen edge (only while grabbed)."""
+        """Pan camera when mouse is at the game area edge (only while grabbed)."""
         if not self._mouse_grabbed:
             return
         mx, my = pygame.mouse.get_pos()
+        ga = self._game_area
+        if not ga.collidepoint(mx, my):
+            return
         dx = 0.0
         dy = 0.0
-        if mx <= EDGE_PAN_MARGIN:
+        if mx <= ga.left + EDGE_PAN_MARGIN:
             dx = EDGE_PAN_SPEED * dt
-        elif mx >= self.width - EDGE_PAN_MARGIN - 1:
+        elif mx >= ga.right - EDGE_PAN_MARGIN - 1:
             dx = -EDGE_PAN_SPEED * dt
-        if my <= EDGE_PAN_MARGIN:
+        if my <= ga.top + EDGE_PAN_MARGIN:
             dy = EDGE_PAN_SPEED * dt
-        elif my >= self.height - EDGE_PAN_MARGIN - 1:
+        elif my >= ga.bottom - EDGE_PAN_MARGIN - 1:
             dy = -EDGE_PAN_SPEED * dt
         if dx or dy:
             self._camera.pan(dx, dy)
@@ -436,7 +473,10 @@ class Game:
 
     def _screen_to_world(self, pos: tuple[int, int]) -> tuple[float, float]:
         """Convert a screen position to world coordinates via the camera."""
-        return self._camera.screen_to_world(float(pos[0]), float(pos[1]))
+        return self._camera.screen_to_world(
+            float(pos[0] - self._game_area.x),
+            float(pos[1] - self._game_area.y),
+        )
 
     # -- events -------------------------------------------------------------
 
@@ -460,6 +500,10 @@ class Game:
             if self._speed_slider.handle_event(event):
                 self._speed_multiplier = self._speed_slider.value / 100.0
 
+            if self._reset_cam_btn.handle_event(event):
+                self._camera.reset()
+                continue
+
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     if self._paused:
@@ -472,15 +516,19 @@ class Game:
             # Scroll wheel zoom (available always, not just for human)
             if event.type == pygame.MOUSEWHEEL:
                 mx, my = pygame.mouse.get_pos()
-                if event.y > 0:
-                    self._camera.zoom_at(mx, my, CAMERA_ZOOM_STEP)
-                elif event.y < 0:
-                    self._camera.zoom_at(mx, my, 1.0 / CAMERA_ZOOM_STEP)
+                if self._game_area.collidepoint(mx, my):
+                    vx = mx - self._game_area.x
+                    vy = my - self._game_area.y
+                    if event.y > 0:
+                        self._camera.zoom_at(vx, vy, CAMERA_ZOOM_STEP)
+                    elif event.y < 0:
+                        self._camera.zoom_at(vx, vy, 1.0 / CAMERA_ZOOM_STEP)
 
             # Middle mouse pan
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
-                self._mid_dragging = True
-                self._mid_last = event.pos
+                if self._game_area.collidepoint(event.pos):
+                    self._mid_dragging = True
+                    self._mid_last = event.pos
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 2:
                 self._mid_dragging = False
             elif event.type == pygame.MOUSEMOTION and self._mid_dragging:
@@ -493,20 +541,17 @@ class Game:
                 continue
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                # GUI click stays in screen space
-                gui_result = gui.handle_gui_click(
-                    self.entities, event.pos[0], event.pos[1],
-                    self.width, self.height,
-                )
-                if gui_result is not None:
-                    cc = gui.get_selected_cc(self.entities)
-                    if cc is not None:
-                        self._command_queue.enqueue(GameCommand(
-                            type="set_spawn_type",
-                            team=cc.team,
-                            tick=self._iteration,
-                            data={"team": cc.team, "unit_type": gui_result},
-                        ))
+                # HUD click — consume all clicks in the HUD area
+                if self._hud_rect.collidepoint(event.pos):
+                    hud_result = gui.handle_hud_click(
+                        self.entities, event.pos[0], event.pos[1],
+                        self._screen_width, self._screen_height, self._hud_h,
+                    )
+                    if hud_result is not None:
+                        self._handle_hud_action(hud_result)
+                    continue
+                # Only start drag if click is in game area
+                if not self._game_area.collidepoint(event.pos):
                     continue
                 # Drag start: store in world coords
                 wx, wy = self._screen_to_world(event.pos)
@@ -558,6 +603,8 @@ class Game:
                 self._dragging = False
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                if not self._game_area.collidepoint(event.pos):
+                    continue
                 wx, wy = self._screen_to_world(event.pos)
                 self._rdragging = True
                 self._rpath = [(wx, wy)]
@@ -603,6 +650,30 @@ class Game:
             for e in self.entities:
                 if isinstance(e, CommandCenter) and e.team == data["team"]:
                     e.spawn_type = data["unit_type"]
+
+    def _handle_hud_action(self, result: dict):
+        """Process an action dict returned by gui.handle_hud_click."""
+        action = result["action"]
+        if action == "set_spawn_type":
+            cc = gui.get_selected_cc(self.entities)
+            if cc is not None:
+                self._command_queue.enqueue(GameCommand(
+                    type="set_spawn_type",
+                    team=cc.team,
+                    tick=self._iteration,
+                    data={"team": cc.team, "unit_type": result["unit_type"]},
+                ))
+        elif action == "stop":
+            selected = [e for e in self.entities
+                        if isinstance(e, Unit) and e.selected and not e.is_building]
+            if selected:
+                team = selected[0].team
+                self._command_queue.enqueue(GameCommand(
+                    type="stop",
+                    team=team,
+                    tick=self._iteration,
+                    data={"unit_ids": [u.entity_id for u in selected]},
+                ))
 
     # -- step ---------------------------------------------------------------
 
@@ -1060,30 +1131,58 @@ class Game:
                 for px, py in preview:
                     pygame.draw.circle(ws, COMMAND_DOT_COLOR, (int(px), int(py)), 4, 1)
 
-        # Project world surface to screen via camera
+        # -- Composite to screen --
         self.screen.fill((0, 0, 0))
-        self._camera.apply(ws, self.screen)
 
-        # GUI stays in screen space
-        if self._has_human:
-            gui.draw_cc_gui(self.screen, self.entities, self.width, self.height)
+        # Header bar
+        pygame.draw.rect(self.screen, (20, 20, 30), self._header_rect)
+        pygame.draw.line(self.screen, (40, 40, 55),
+                         (0, self._header_h - 1),
+                         (self._screen_width, self._header_h - 1))
 
+        # Header widgets
         self._pause_btn.draw(self.screen)
+        self._reset_cam_btn.draw(self.screen)
         self._speed_slider.draw(self.screen)
-
-        # FPS counter
         fps_val = self.clock.get_fps()
         fps_surf = self._fps_font.render(f"FPS: {fps_val:.0f}", True, (200, 200, 200))
-        self.screen.blit(fps_surf, (4, 4))
+        self.screen.blit(fps_surf, (4, 12))
 
-        # Paused overlay
+        # Game area: black dead-space background then camera projection
+        ga = self._game_area
+        pygame.draw.rect(self.screen, (0, 0, 0), ga)
+        self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
+
+        # Metallic border around the world edge (rendered in screen space)
+        bx0, by0 = self._camera.world_to_screen(0, 0)
+        bx1, by1 = self._camera.world_to_screen(self.width, self.height)
+        border_rect = pygame.Rect(
+            int(bx0) + ga.x, int(by0) + ga.y,
+            int(bx1 - bx0), int(by1 - by0),
+        )
+        # Clip border drawing to the game area
+        clip_save = self.screen.get_clip()
+        self.screen.set_clip(ga)
+        _draw_metallic_border(self.screen, border_rect, 3)
+        self.screen.set_clip(clip_save)
+
+        # HUD area
+        pygame.draw.rect(self.screen, (20, 20, 30), self._hud_rect)
+        pygame.draw.line(self.screen, (40, 40, 55),
+                         (0, self._hud_rect.top),
+                         (self._screen_width, self._hud_rect.top))
+        if self._has_human:
+            gui.draw_hud(self.screen, self.entities,
+                         self._screen_width, self._screen_height, self._hud_h)
+
+        # Paused overlay (centered on game area)
         if self._paused:
             pause_surf = self._pause_font.render("PAUSED", True, (220, 220, 240))
             hint_surf = self._fps_font.render("ESC again to quit", True, (140, 140, 160))
-            px = self.width // 2 - pause_surf.get_width() // 2
-            py = self.height // 2 - pause_surf.get_height() // 2 - 10
+            px = ga.centerx - pause_surf.get_width() // 2
+            py = ga.centery - pause_surf.get_height() // 2 - 10
             self.screen.blit(pause_surf, (px, py))
-            hx = self.width // 2 - hint_surf.get_width() // 2
+            hx = ga.centerx - hint_surf.get_width() // 2
             self.screen.blit(hint_surf, (hx, py + pause_surf.get_height() + 4))
 
         pygame.display.flip()
@@ -1334,11 +1433,11 @@ class Game:
                 m, s = divmod(int(game_secs), 60)
                 timer_str = f"Headless  —  {m}:{s:02d}  (tick {self._iteration})"
                 timer_surf = headless_font.render(timer_str, True, (160, 160, 180))
-                tx = self.width // 2 - timer_surf.get_width() // 2
-                ty = self.height // 2 - timer_surf.get_height() // 2 - self._SNAP_H // 2 - 20
+                tx = self._screen_width // 2 - timer_surf.get_width() // 2
+                ty = self._screen_height // 2 - timer_surf.get_height() // 2 - self._SNAP_H // 2 - 20
                 self.screen.blit(timer_surf, (tx, ty))
                 if self._headless_snap_surf is not None:
-                    snap_x = self.width // 2 - self._SNAP_W // 2
+                    snap_x = self._screen_width // 2 - self._SNAP_W // 2
                     snap_y = ty + timer_surf.get_height() + self._SNAP_PAD
                     self.screen.blit(self._headless_snap_surf, (snap_x, snap_y))
                 pygame.display.flip()

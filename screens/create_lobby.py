@@ -18,9 +18,9 @@ from ui.widgets import (
 _T1_COLOR = (80, 140, 255)
 _T2_COLOR = (255, 80, 80)
 
-# Horizontal column centres
-_COL1_CX = 200
-_COL2_CX = 600
+# Horizontal column centres (computed dynamically from screen width)
+_COL1_CX = 200  # default, overridden per-instance
+_COL2_CX = 600  # default, overridden per-instance
 
 # Map size presets: (label, width, height)
 _MAP_PRESETS = [
@@ -65,6 +65,10 @@ class CreateLobbyScreen(BaseScreen):
         self._ai_choices = ai_choices
         cx = self.width // 2
 
+        # Dynamic column positions based on screen width
+        self._col1_cx = self.width // 4
+        self._col2_cx = self.width * 3 // 4
+
         # Load saved settings
         saved = _load_settings()
 
@@ -85,8 +89,8 @@ class CreateLobbyScreen(BaseScreen):
         self._human_team: int = saved.get("human_team", 1)
 
         # -- AI dropdowns (one per column) ----------------------------------
-        dd_x1 = _COL1_CX - DD_WIDTH // 2
-        dd_x2 = _COL2_CX - DD_WIDTH // 2
+        dd_x1 = self._col1_cx - DD_WIDTH // 2
+        dd_x2 = self._col2_cx - DD_WIDTH // 2
 
         # Restore saved AI selections
         t1_idx = self._find_ai_index(saved.get("ai_t1"), ai_choices, 0)
@@ -162,8 +166,8 @@ class CreateLobbyScreen(BaseScreen):
     def _update_layout(self):
         """Show/hide widgets and reposition name input based on mode + human side."""
         mode = self._mode.value
-        dd_x1 = _COL1_CX - DD_WIDTH // 2
-        dd_x2 = _COL2_CX - DD_WIDTH // 2
+        dd_x1 = self._col1_cx - DD_WIDTH // 2
+        dd_x2 = self._col2_cx - DD_WIDTH // 2
 
         if mode == "human_vs_ai":
             if self._human_team == 1:
@@ -317,19 +321,19 @@ class CreateLobbyScreen(BaseScreen):
         font = _get_font(CONTENT_FONT_SIZE + 2)
 
         t1_surf = font.render("Team 1", True, CONTENT_TEXT)
-        t1_x = _COL1_CX - t1_surf.get_width() // 2
+        t1_x = self._col1_cx - t1_surf.get_width() // 2
         pygame.draw.circle(self.screen, _T1_COLOR, (t1_x - 12, 140), 5)
         self.screen.blit(t1_surf, (t1_x, 132))
 
         t2_surf = font.render("Team 2", True, CONTENT_TEXT)
-        t2_x = _COL2_CX - t2_surf.get_width() // 2
+        t2_x = self._col2_cx - t2_surf.get_width() // 2
         pygame.draw.circle(self.screen, _T2_COLOR, (t2_x - 12, 140), 5)
         self.screen.blit(t2_surf, (t2_x, 132))
 
         # -- Human locked box (only in human_vs_ai) -------------------------
         mode = self._mode.value
         if mode == "human_vs_ai":
-            human_cx = _COL1_CX if self._human_team == 1 else _COL2_CX
+            human_cx = self._col1_cx if self._human_team == 1 else self._col2_cx
             self._draw_human_box(human_cx)
 
             # "Name:" label above the text input
