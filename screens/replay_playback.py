@@ -134,11 +134,16 @@ class ReplayPlaybackScreen(BaseScreen):
         mw = self._reader.map_width
         mh = self._reader.map_height
         total = self._reader.frame_count
+        sw = self.width   # screen width
+        sh = self.height  # screen height
 
+        # Layout: top bar, game area (with pink bg), bottom bar
+        self._game_area = pygame.Rect(0, TOP_BAR_HEIGHT, sw,
+                                      sh - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT)
         # Y offset for game area (below top bar)
         self._gy = TOP_BAR_HEIGHT
         # Bottom bar top edge
-        bot_y = TOP_BAR_HEIGHT + mh
+        bot_y = sh - BOTTOM_BAR_HEIGHT
 
         # ── Top bar: Back (left) → Show Actions, Score Screen, Show Stats (right) ──
         btn_h = 28
@@ -148,12 +153,12 @@ class ReplayPlaybackScreen(BaseScreen):
         self._stats_data = self._reader.stats_data
         has_stats = self._stats_data is not None
         # Right-aligned buttons (from right edge)
-        self._inline_stats_btn = Button(mw - 95, top_cy, 90, btn_h,
+        self._inline_stats_btn = Button(sw - 95, top_cy, 90, btn_h,
                                         "Show Stats", enabled=has_stats)
-        self._score_screen_btn = Button(mw - 200, top_cy, 100, btn_h,
+        self._score_screen_btn = Button(sw - 200, top_cy, 100, btn_h,
                                         "Score Screen", enabled=has_stats)
         self._team_view = 0  # 0=All Teams, 1=Team 1, 2=Team 2
-        self._team_view_btn = Button(mw - 300, top_cy, 95, btn_h,
+        self._team_view_btn = Button(sw - 300, top_cy, 95, btn_h,
                                      "All Teams")
 
         # Selection state
@@ -170,9 +175,10 @@ class ReplayPlaybackScreen(BaseScreen):
         self._fog_border = pygame.Surface((mw, mh))
         self._fog_border.set_colorkey((0, 0, 0))
 
-        # Camera & world surface for zoom/pan
+        # Camera & world surface for zoom/pan (viewport = game area)
         self._world_surface = pygame.Surface((mw, mh))
-        self._camera = Camera(mw, mh, mw, mh, max_zoom=CAMERA_MAX_ZOOM)
+        self._camera = Camera(self._game_area.w, self._game_area.h,
+                              mw, mh, max_zoom=CAMERA_MAX_ZOOM)
         self._mid_dragging = False
         self._mid_last: tuple[int, int] = (0, 0)
 
@@ -180,12 +186,12 @@ class ReplayPlaybackScreen(BaseScreen):
         self._play_btn = Button(8, bot_y + 12, 45, btn_h, "||",
                                 icon="pause")
         scrub_x = 60
-        scrub_w = mw - 145
+        scrub_w = sw - 145
         self._scrubber = Slider(
             scrub_x, bot_y + 10, scrub_w, "Snapshot",
             0, max(total - 1, 1), 0, 1,
         )
-        self._speed_btn = Button(mw - 70, bot_y + 12, 65, btn_h,
+        self._speed_btn = Button(sw - 70, bot_y + 12, 65, btn_h,
                                  f"{_SPEEDS[self._speed_idx]}x")
 
         # Score Screen overlay state
@@ -199,22 +205,21 @@ class ReplayPlaybackScreen(BaseScreen):
 
         # Score Screen overlay widgets
         if has_stats:
-            tab_w = min(90, (mw - 40) // len(_STAT_TABS) - 2)
-            tab_x = (mw - len(_STAT_TABS) * (tab_w + 2)) // 2
+            tab_w = min(90, (sw - 40) // len(_STAT_TABS) - 2)
+            tab_x = (sw - len(_STAT_TABS) * (tab_w + 2)) // 2
             self._stat_tabs = ToggleGroup(tab_x, 80, _STAT_TABS,
                                           selected_index=0, btn_w=tab_w, btn_h=28)
-            overlay_h = TOP_BAR_HEIGHT + mh + BOTTOM_BAR_HEIGHT
-            self._stat_graph = LineGraph(30, 115, mw - 60, overlay_h - 200,
+            self._stat_graph = LineGraph(30, 115, sw - 60, sh - 200,
                                          color1=GRAPH_LINE_T1, color2=GRAPH_LINE_T2)
             has_subsystem = "subsystem_ms" in (self._stats_data or {})
             btn_w = 120
             gap = 10
             total_btns_w = btn_w * 2 + gap
-            btn_start_x = mw // 2 - total_btns_w // 2
-            self._stat_close_btn = Button(btn_start_x, overlay_h - 45,
+            btn_start_x = sw // 2 - total_btns_w // 2
+            self._stat_close_btn = Button(btn_start_x, sh - 45,
                                           btn_w, 30, "Close")
             self._stat_debug_btn = Button(btn_start_x + btn_w + gap,
-                                          overlay_h - 45, btn_w, 30,
+                                          sh - 45, btn_w, 30,
                                           "Debug", enabled=has_subsystem)
             self._update_stat_graph()
 
@@ -223,9 +228,10 @@ class ReplayPlaybackScreen(BaseScreen):
         self._dd_right_btn = Button(0, 0, 22, 22, ">")
 
     def _screen_to_world(self, pos: tuple[int, int]) -> tuple[float, float]:
-        """Convert screen pos to world coords (accounting for top bar offset)."""
+        """Convert screen pos to world coords (accounting for game area offset)."""
         return self._camera.screen_to_world(
-            float(pos[0]), float(pos[1] - self._gy))
+            float(pos[0] - self._game_area.x),
+            float(pos[1] - self._game_area.y))
 
     def _update_stat_graph(self):
         if self._stats_data is None:
@@ -407,18 +413,17 @@ class ReplayPlaybackScreen(BaseScreen):
                         self._play_btn.icon = "play"
 
                 # Zoom/pan in game area
-                mw = self._reader.map_width
-                mh = self._reader.map_height
-                game_rect = pygame.Rect(0, self._gy, mw, mh)
+                game_rect = self._game_area
 
                 if event.type == pygame.MOUSEWHEEL:
                     mx, my = pygame.mouse.get_pos()
                     if game_rect.collidepoint(mx, my):
-                        vy = my - self._gy  # viewport-relative y
+                        vx = mx - game_rect.x
+                        vy = my - game_rect.y
                         if event.y > 0:
-                            self._camera.zoom_at(mx, vy, CAMERA_ZOOM_STEP)
+                            self._camera.zoom_at(vx, vy, CAMERA_ZOOM_STEP)
                         elif event.y < 0:
-                            self._camera.zoom_at(mx, vy, 1.0 / CAMERA_ZOOM_STEP)
+                            self._camera.zoom_at(vx, vy, 1.0 / CAMERA_ZOOM_STEP)
 
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 2:
                     if game_rect.collidepoint(event.pos):
@@ -572,19 +577,27 @@ class ReplayPlaybackScreen(BaseScreen):
         # Fog of war
         self._draw_fog(entities)
 
-        # Project world surface to screen via camera
-        gy = self._gy
-        self.screen.fill((0, 0, 0), (0, gy, mw, mh))
-        self._camera.apply(ws, self.screen, dest=(0, gy))
+        # Composite to screen
+        ga = self._game_area
+        sw = self.width
+        sh = self.height
+        bot_y = sh - BOTTOM_BAR_HEIGHT
 
-        # Top bar and bottom bar backgrounds
-        self.screen.fill((20, 20, 30), (0, 0, mw, TOP_BAR_HEIGHT))
+        self.screen.fill((0, 0, 0))
+
+        # Top bar
+        self.screen.fill((20, 20, 30), (0, 0, sw, TOP_BAR_HEIGHT))
         pygame.draw.line(self.screen, (40, 40, 55), (0, TOP_BAR_HEIGHT - 1),
-                         (mw, TOP_BAR_HEIGHT - 1))
+                         (sw, TOP_BAR_HEIGHT - 1))
 
-        self.screen.fill((20, 20, 30), (0, gy + mh, mw, BOTTOM_BAR_HEIGHT))
-        pygame.draw.line(self.screen, (40, 40, 55), (0, gy + mh),
-                         (mw, gy + mh))
+        # Game area: pink background then camera projection
+        pygame.draw.rect(self.screen, (200, 100, 150), ga)
+        self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
+
+        # Bottom bar
+        self.screen.fill((20, 20, 30), (0, bot_y, sw, BOTTOM_BAR_HEIGHT))
+        pygame.draw.line(self.screen, (40, 40, 55), (0, bot_y),
+                         (sw, bot_y))
 
         # Top bar buttons
         self._back_btn.draw(self.screen)
@@ -752,8 +765,8 @@ class ReplayPlaybackScreen(BaseScreen):
 
     def _draw_stats_overlay(self):
         """Draw the Score Screen overlay (full screen replacement)."""
-        mw = self._reader.map_width
-        total_h = TOP_BAR_HEIGHT + self._reader.map_height + BOTTOM_BAR_HEIGHT
+        mw = self.width
+        total_h = self.height
         self.screen.fill(MENU_BG, (0, 0, mw, total_h))
 
         # Header

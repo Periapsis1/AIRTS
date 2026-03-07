@@ -17,8 +17,10 @@ class Camera:
         self.world_w = world_w
         self.world_h = world_h
 
-        # Zoom limits
-        self.min_zoom = max(viewport_w / world_w, viewport_h / world_h)
+        # Zoom limits — ensure full map visible; allow < 1.0 when viewport > world
+        self.min_zoom = min(viewport_w / world_w, viewport_h / world_h)
+        if self.min_zoom > 1.0:
+            self.min_zoom = 1.0
         self.max_zoom = max_zoom
 
         # Start fully zoomed out (whole map visible)
@@ -53,6 +55,13 @@ class Camera:
         self.cy = wy + (self.viewport_h / 2.0 - screen_y) / self.zoom
         self._clamp()
 
+    def reset(self) -> None:
+        """Reset camera to default position (centered, fully zoomed out)."""
+        self.zoom = self.min_zoom if self.min_zoom < 1.0 else 1.0
+        self.cx = self.world_w / 2.0
+        self.cy = self.world_h / 2.0
+        self._clamp()
+
     # -- coordinate transforms ----------------------------------------------
 
     def screen_to_world(self, sx: float, sy: float) -> tuple[float, float]:
@@ -83,21 +92,25 @@ class Camera:
         """Extract the visible viewport from *world_surface*, scale it, and
         blit to *target_surface* at *dest*."""
         vp = self.get_world_viewport_rect()
-        # Clamp the source rect to the world surface bounds
-        vp = vp.clip(world_surface.get_rect())
-        if vp.w <= 0 or vp.h <= 0:
+        clipped = vp.clip(world_surface.get_rect())
+        if clipped.w <= 0 or clipped.h <= 0:
             return
-        sub = world_surface.subsurface(vp)
-        scaled = pygame.transform.scale(sub, (self.viewport_w, self.viewport_h))
-        target_surface.blit(scaled, dest)
+        sub = world_surface.subsurface(clipped)
+        scaled_w = int(clipped.w * self.zoom)
+        scaled_h = int(clipped.h * self.zoom)
+        if scaled_w <= 0 or scaled_h <= 0:
+            return
+        scaled = pygame.transform.scale(sub, (scaled_w, scaled_h))
+        offset_x = int((clipped.x - vp.x) * self.zoom)
+        offset_y = int((clipped.y - vp.y) * self.zoom)
+        target_surface.blit(scaled, (dest[0] + offset_x, dest[1] + offset_y))
 
     # -- internal -----------------------------------------------------------
 
     def _clamp(self) -> None:
-        """Keep the viewport within world bounds."""
-        half_w = self.viewport_w / (2.0 * self.zoom)
-        half_h = self.viewport_h / (2.0 * self.zoom)
-
-        # Clamp center so the viewport doesn't leave the world
-        self.cx = max(half_w, min(self.world_w - half_w, self.cx))
-        self.cy = max(half_h, min(self.world_h - half_h, self.cy))
+        """Allow panning so the world edge can reach the viewport center,
+        creating dead space beyond the map border."""
+        # cx=0 puts the left world edge at screen center;
+        # cx=world_w puts the right world edge at screen center.
+        self.cx = max(0, min(self.world_w, self.cx))
+        self.cy = max(0, min(self.world_h, self.cy))
