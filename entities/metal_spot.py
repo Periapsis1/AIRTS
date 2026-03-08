@@ -15,6 +15,7 @@ class MetalSpot(CircleEntity, Damageable):
         self.color = METAL_SPOT_COLOR
         self.owner: int | None = None
         self.capture_progress: float = 0.0  # -1.0 to 1.0 representing the capture progress for each team
+        self.no_decay: bool = False  # when True, neutral drift toward 0 is suppressed
 
     def update_progress(self, unit_difference: float, dt: float):
         # unit_difference is team 1 units - team 2 units (scouts count as 0.3)
@@ -23,7 +24,7 @@ class MetalSpot(CircleEntity, Damageable):
 
         if unit_difference != 0:
             self.capture_progress += unit_difference * METAL_SPOT_CAPTURE_RATE * dt
-        elif self.capture_progress != 0:
+        elif self.capture_progress != 0 and not self.no_decay:
             # Decay at 1% per second when no one is capturing
             decay = 0.01 * dt
             if self.capture_progress > 0:
