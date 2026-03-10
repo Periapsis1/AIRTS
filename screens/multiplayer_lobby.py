@@ -124,7 +124,7 @@ class MultiplayerLobbyScreen(BaseScreen):
                     self._join_ip_input.handle_event(event)
                     self._join_name_input.handle_event(event)
                     if self._join_connect_btn.handle_event(event):
-                        if not self._client_obj:
+                        if not self._client_obj or self._join_error:
                             self._start_client()
 
             # Poll connection status
@@ -157,9 +157,27 @@ class MultiplayerLobbyScreen(BaseScreen):
         self._host_obj.start()
         self._host_status = f"Hosting on {self._host_obj.local_ip}:{self._host_obj.port} — Waiting for player..."
 
+    @staticmethod
+    def _sanitize_ip(raw: str) -> str:
+        """Clean up common IP entry mistakes."""
+        # Strip port suffix if present (e.g. "192.168.0.1:7777")
+        ip = raw.split(":")[0].strip()
+        # Strip leading zeros from each octet (e.g. "192.168.00.206" -> "192.168.0.206")
+        parts = ip.split(".")
+        if len(parts) == 4:
+            try:
+                ip = ".".join(str(int(p)) for p in parts)
+            except ValueError:
+                pass  # not a dotted-quad IP, leave as-is
+        return ip
+
     def _start_client(self) -> None:
         from networking.client import GameClient
-        ip = self._join_ip_input.text.strip()
+        # Clean up any previous failed attempt
+        if self._client_obj:
+            self._client_obj.stop()
+            self._client_obj = None
+        ip = self._sanitize_ip(self._join_ip_input.text)
         if not ip:
             self._join_error = "Please enter a host IP address"
             return
