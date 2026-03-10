@@ -192,8 +192,6 @@ class Game:
 
         self.team_ai: dict[int, BaseAI] = team_ai if team_ai is not None else {2: WanderAI()}
         self.human_teams: set[int] = {1, 2} - set(self.team_ai.keys())
-        if self.human_teams == {1, 2}:
-            raise ValueError("Human-vs-Human is not supported; at least one team must have an AI.")
 
         self._iteration = 0
         self._winner = 0  # 0 = undecided, 1 or 2 = that team won

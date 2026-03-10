@@ -7,3 +7,5 @@ from screens.results import ResultsScreen
 from screens.replay_list import ReplayListScreen
 from screens.replay_playback import ReplayPlaybackScreen
 from screens.arena_screen import ArenaScreen
+from screens.multiplayer_lobby import MultiplayerLobbyScreen
+from screens.client_game import ClientGameScreen

@@ -62,6 +62,7 @@ class MainMenuScreen(BaseScreen):
         # Buttons — vertically stacked in center
         labels = [
             ("Create Lobby", "create_lobby"),
+            ("Multiplayer", "multiplayer_lobby"),
             ("AI Arena", "arena"),
             ("Replays", "replays"),
             ("Learn to Play", "guides"),
