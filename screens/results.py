@@ -2,6 +2,7 @@
 from __future__ import annotations
 import pygame
 from screens.base import BaseScreen, ScreenResult
+from systems import music
 from ui.theme import (
     MENU_BG, BTN_WIDTH, BTN_HEIGHT,
     GRAPH_LINE_COLORS, GRAPH_FILL_COLORS, SCORE_TEAM_COLORS,
@@ -319,6 +320,7 @@ class ResultsScreen(BaseScreen):
 
             self._draw()
             self.clock.tick(60)
+            music.update()
 
     def _draw(self):
         self.screen.fill(MENU_BG)

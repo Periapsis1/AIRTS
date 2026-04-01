@@ -40,6 +40,7 @@ class GameClient:
         self.map_height: int = 600
         self.obstacles: list[dict] = []
         self.enable_t2: bool = False
+        self.fog_of_war: bool = False
         self.player_team: dict[int, int] = {}
         self.player_names: dict[int, str] = {}
 
@@ -216,6 +217,7 @@ class GameClient:
                 self.map_width = msg.get("map_width", 800)
                 self.map_height = msg.get("map_height", 600)
                 self.enable_t2 = msg.get("enable_t2", False)
+                self.fog_of_war = msg.get("fog_of_war", False)
                 # Restore int keys from JSON string keys
                 raw_pt = msg.get("player_team", {})
                 self.player_team = {int(k): v for k, v in raw_pt.items()} if raw_pt else {}

@@ -1,3 +1,6 @@
 {
-  "display_mode": "windowed"
+  "display_mode": "windowed_fullscreen",
+  "color_mode": "player",
+  "selection_mode": "rectangle",
+  "movement_smoothing": true
 }

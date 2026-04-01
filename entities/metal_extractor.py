@@ -136,6 +136,9 @@ class MetalExtractor(Unit):
 
         if self.selected:
             pygame.draw.circle(surface, SELECTED_COLOR, (self.x, self.y), self.radius + 2, 1)
+            if self.upgrade_state == "watch_tower":
+                from config.settings import RANGE_COLOR
+                self._draw_fov_arc(surface, RANGE_COLOR)
 
         self.draw_health_bar(surface, self.x, self.y, self.radius + HEALTH_BAR_OFFSET)
 

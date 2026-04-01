@@ -105,6 +105,7 @@ class InternalServer:
         player_name: str,
         max_ticks: int = 0,
         enable_t2: bool = False,
+        fog_of_war: bool = False,
         save_replay: bool = True,
     ) -> None:
         """Spawn a background thread to run a game with the given parameters.
@@ -123,6 +124,7 @@ class InternalServer:
             "player_name": player_name,
             "max_ticks": max_ticks,
             "enable_t2": enable_t2,
+            "fog_of_war": fog_of_war,
             "save_replay": save_replay,
         }
         self._stop_requested.clear()
@@ -176,6 +178,7 @@ class InternalServer:
             is_multiplayer=True,
             selectable_teams=set(),  # no local selection on server thread
             enable_t2=p["enable_t2"],
+            fog_of_war=p["fog_of_war"],
             server_mode=True,
             save_replay=p["save_replay"],
             replay_config=p["replay_config"],
@@ -207,6 +210,7 @@ class InternalServer:
         self._host.send_game_start(
             game.entities, p["width"], p["height"],
             enable_t2=p["enable_t2"],
+            fog_of_war=p["fog_of_war"],
             player_team=dict(game.player_team),
             player_names=player_names,
         )

@@ -261,6 +261,7 @@ class GameHost:
         map_height: int,
         *,
         enable_t2: bool = False,
+        fog_of_war: bool = False,
         player_team: dict[int, int] | None = None,
         player_names: dict[int, str] | None = None,
     ) -> None:
@@ -276,6 +277,7 @@ class GameHost:
             "map_width": map_width,
             "map_height": map_height,
             "enable_t2": enable_t2,
+            "fog_of_war": fog_of_war,
         }
         if player_team is not None:
             msg["player_team"] = {str(k): v for k, v in player_team.items()}

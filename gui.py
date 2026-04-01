@@ -656,11 +656,10 @@ def _draw_extractor_actions(screen: pygame.Surface, r: pygame.Rect,
         team_t2 = t2_upgrades.get(me.team, set())
         for br, ut in _research_btn_rects(r):
             already_t2 = ut in team_t2
-            is_hov = br.collidepoint(mx, my) and not already_t2
+            is_hov = br.collidepoint(mx, my)
             if is_hov:
                 hovered_type = ut
-            bg = (GUI_BTN_NORMAL if already_t2
-                  else GUI_BTN_HOVER if is_hov
+            bg = (GUI_BTN_HOVER if is_hov and not already_t2
                   else GUI_BTN_NORMAL)
 
             pygame.draw.rect(screen, bg, br, border_radius=4)
@@ -670,7 +669,7 @@ def _draw_extractor_actions(screen: pygame.Surface, r: pygame.Rect,
             sym = st["symbol"]
             cx, cy = br.centerx, br.centery
             if already_t2:
-                # Grayed out
+                # Grayed out (researched or in-progress)
                 color = (60, 60, 70)
                 outline = (80, 80, 90)
             else:
@@ -857,9 +856,8 @@ def handle_hud_click(entities, mx: int, my: int,
                 if br.collidepoint(mx, my):
                     return {"action": "upgrade_extractor", "entity_id": me.entity_id, "path": path}
         elif me.upgrade_state == "choosing_research":
-            team_t2 = (t2_upgrades or {}).get(me.team, set())
             for br, ut in _research_btn_rects(action):
-                if br.collidepoint(mx, my) and ut not in team_t2:
+                if br.collidepoint(mx, my):
                     return {"action": "set_research_type", "entity_id": me.entity_id, "unit_type": ut}
 
     else:

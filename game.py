@@ -109,6 +109,7 @@ class Game:
         is_multiplayer: bool = False,
         selectable_teams: set[int] | None = None,
         enable_t2: bool = False,
+        fog_of_war: bool = False,
         server_mode: bool = False,
     ):
         """
@@ -172,6 +173,7 @@ class Game:
         self._save_replay = save_replay
         self._save_debug_summary = save_debug_summary
         self.enable_t2 = enable_t2
+        self._fog_of_war = fog_of_war
         self._step_timeout_ms = step_timeout_ms
         if not replay_output_dir:
             from core.paths import app_path
@@ -287,6 +289,8 @@ class Game:
 
         # T2 upgrade tracking: team → set of unit_type strings upgraded to T2
         self._t2_upgrades: dict[int, set[str]] = {t: set() for t in self.all_teams}
+        # T2 in-progress tracking: unit types currently being researched
+        self._t2_researching: dict[int, set[str]] = {t: set() for t in self.all_teams}
 
         self._apply_selectability()
         self._bind_and_start_ais()
@@ -331,6 +335,7 @@ class Game:
 
             # -- camera & world surface -------------------------------------------
             self._world_surface = pygame.Surface((width, height))
+            self._bg_surface, self._bg_tile = self._build_background(width, height)
             self._camera = Camera(self._game_area.w, self._game_area.h, width, height,
                                   max_zoom=CAMERA_MAX_ZOOM)
             self._mid_dragging = False
@@ -382,9 +387,18 @@ class Game:
         """Rebuild T2 upgrade sets from living Research Labs."""
         for t in self.all_teams:
             self._t2_upgrades[t] = set()
+            self._t2_researching[t] = set()
         for me in self.metal_extractors:
-            if me.alive and me.upgrade_state == "research_lab" and me.researched_unit_type:
-                self._t2_upgrades[me.team].add(me.researched_unit_type)
+            if me.alive and me.researched_unit_type:
+                if me.upgrade_state == "research_lab":
+                    self._t2_upgrades[me.team].add(me.researched_unit_type)
+                elif me.upgrade_state == "upgrading_lab":
+                    self._t2_researching[me.team].add(me.researched_unit_type)
+
+    def _get_t2_display(self) -> dict[int, set[str]]:
+        """Combined T2 upgrades + in-progress research for GUI display."""
+        return {t: self._t2_upgrades.get(t, set()) | self._t2_researching.get(t, set())
+                for t in self.all_teams}
 
     def _bind_and_start_ais(self):
         for pid, ai in self.player_ai.items():
@@ -768,7 +782,7 @@ class Game:
                     hud_result = gui.handle_hud_click(
                         self.entities, event.pos[0], event.pos[1],
                         self._screen_width, self._screen_height, self._hud_h,
-                        enable_t2=self.enable_t2, t2_upgrades=self._t2_upgrades,
+                        enable_t2=self.enable_t2, t2_upgrades=self._get_t2_display(),
                     )
                     if hud_result is not None:
                         self._handle_hud_action(hud_result)
@@ -906,8 +920,7 @@ class Game:
                     and entity.alive
                     and entity.upgrade_state == "choosing_research"
                     and entity.team == self.player_team.get(cmd.player_id)
-                    and self.enable_t2
-                    and unit_type not in self._t2_upgrades.get(entity.team, set())):
+                    and self.enable_t2):
                 entity.researched_unit_type = unit_type
                 entity.start_upgrade("lab")
 
@@ -1397,7 +1410,7 @@ class Game:
 
     def render(self):
         ws = self._world_surface
-        ws.fill((0, 0, 0))
+        ws.blit(self._bg_surface, (0, 0))
 
         if self._phase == "warp_in":
             self._render_warp_in()
@@ -1405,14 +1418,33 @@ class Game:
             self._render_explode()
         else:
             # Normal playing render
-            for entity in self.entities:
-                entity.draw(ws)
+            if self._fog_of_war and self._has_human:
+                los = self._collect_los_circles()
+                for entity in self.entities:
+                    if isinstance(entity, (RectEntity, CircleEntity, PolygonEntity, MetalSpot)):
+                        entity.draw(ws)
+                    elif isinstance(entity, MetalExtractor):
+                        if self._is_visible(entity.x, entity.y, los):
+                            entity.draw(ws)
+                        else:
+                            self._draw_entity_faded(entity, ws)
+                    else:
+                        if self._is_visible(entity.x, entity.y, los):
+                            entity.draw(ws)
+                self._los_cache = los
+            else:
+                for entity in self.entities:
+                    entity.draw(ws)
+                self._los_cache = None
             self._draw_fog()
 
         if self._phase != "warp_in":
+            _los = getattr(self, '_los_cache', None)
             # Charge previews: targeting beam + splash zone while artillery charges
             for unit in self.units:
                 if not unit.alive or unit._charge_pos is None or unit.weapon is None:
+                    continue
+                if _los is not None and not self._is_visible(unit.x, unit.y, _los):
                     continue
                 tx, ty = unit._charge_pos
                 wpn = unit.weapon
@@ -1435,34 +1467,15 @@ class Game:
                     ws.blit(_cr, (int(tx) - vis_r - 2, int(ty) - vis_r - 2))
 
             for se in self.splash_effects:
+                if _los is not None and not self._is_visible(se.x, se.y, _los):
+                    continue
                 se.draw(ws)
             for lf in self.laser_flashes:
+                if _los is not None and not self._is_visible(lf.x1, lf.y1, _los):
+                    continue
                 lf.draw(ws)
 
-        # AI / Human name labels above command centers (with bonus %)
-        for entity in self.entities:
-            if isinstance(entity, CommandCenter) and entity.alive:
-                ai = self.player_ai.get(entity.player_id)
-                name = ai.ai_name if ai else self._player_name
-                bonus_pct = entity.get_total_bonus_percent()
-                if bonus_pct > 0:
-                    name = f"{name} (+{bonus_pct}%)"
-                label_color = PLAYER_COLORS[(entity.player_id - 1) % len(PLAYER_COLORS)]
-                name_surf = self._label_font.render(name, True, label_color)
-                nx = int(entity.x) - name_surf.get_width() // 2
-                ny = int(entity.y) - 40
-                ws.blit(name_surf, (nx, ny))
-
-        # Extractor bonus labels
-        for entity in self.metal_extractors:
-            if entity.alive:
-                bonus = entity.get_spawn_bonus()
-                pct = round(bonus * 100)
-                label = f"+{pct}%"
-                label_surf = self._label_font.render(label, True, (255, 255, 255))
-                lx = int(entity.x) - label_surf.get_width() // 2
-                ly = int(entity.y) - int(entity.radius + HEALTH_BAR_OFFSET + 12)
-                ws.blit(label_surf, (lx, ly))
+        # (name labels and extractor bonus labels drawn in screen space after camera.apply)
 
         if self._dragging:
             sr = self._selection_radius()
@@ -1512,9 +1525,10 @@ class Game:
         fps_surf = self._fps_font.render(f"FPS: {fps_val:.0f}", True, (200, 200, 200))
         self.screen.blit(fps_surf, (4, 12))
 
-        # Game area: black dead-space background then camera projection
+        # Game area: tiled background (covers beyond-map dead space) then camera projection
+        from core.background import blit_screen_background
         ga = self._game_area
-        pygame.draw.rect(self.screen, (0, 0, 0), ga)
+        blit_screen_background(self.screen, ga, self._camera, self._bg_tile)
         self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
 
         # Metallic border around the world edge (rendered in screen space)
@@ -1524,10 +1538,49 @@ class Game:
             int(bx0) + ga.x, int(by0) + ga.y,
             int(bx1 - bx0), int(by1 - by0),
         )
-        # Clip border drawing to the game area
+        # Clip to game area for border + screen-space labels
         clip_save = self.screen.get_clip()
         self.screen.set_clip(ga)
         _draw_metallic_border(self.screen, border_rect, 3)
+
+        # Name labels + extractor bonus labels (screen space for crisp text)
+        _los = getattr(self, '_los_cache', None)
+        cam = self._camera
+        zoom_font_size = max(8, int(round(20 * cam.zoom)))
+        _zfs = getattr(self, '_zoom_label_font_size', 0)
+        if _zfs != zoom_font_size:
+            self._zoom_label_font = pygame.font.SysFont(None, zoom_font_size)
+            self._zoom_label_font_size = zoom_font_size
+        zfont = self._zoom_label_font
+
+        for entity in self.entities:
+            if isinstance(entity, CommandCenter) and entity.alive:
+                if _los is not None and not self._is_visible(entity.x, entity.y, _los):
+                    continue
+                ai = self.player_ai.get(entity.player_id)
+                name = ai.ai_name if ai else self._player_name
+                bonus_pct = entity.get_total_bonus_percent()
+                if bonus_pct > 0:
+                    name = f"{name} (+{bonus_pct}%)"
+                label_color = PLAYER_COLORS[(entity.player_id - 1) % len(PLAYER_COLORS)]
+                name_surf = zfont.render(name, True, label_color)
+                sx, sy = cam.world_to_screen(entity.x, entity.y - 40)
+                self.screen.blit(name_surf, (int(sx) + ga.x - name_surf.get_width() // 2,
+                                             int(sy) + ga.y))
+
+        for entity in self.metal_extractors:
+            if entity.alive:
+                if _los is not None and not self._is_visible(entity.x, entity.y, _los):
+                    continue
+                bonus = entity.get_spawn_bonus()
+                pct = round(bonus * 100)
+                label = f"+{pct}%"
+                label_surf = zfont.render(label, True, (255, 255, 255))
+                wy = entity.y - entity.radius - HEALTH_BAR_OFFSET - 12
+                sx, sy = cam.world_to_screen(entity.x, wy)
+                self.screen.blit(label_surf, (int(sx) + ga.x - label_surf.get_width() // 2,
+                                              int(sy) + ga.y))
+
         self.screen.set_clip(clip_save)
 
         # HUD area
@@ -1538,7 +1591,7 @@ class Game:
         if self._has_human:
             gui.draw_hud(self.screen, self.entities,
                          self._screen_width, self._screen_height, self._hud_h,
-                         enable_t2=self.enable_t2, t2_upgrades=self._t2_upgrades,
+                         enable_t2=self.enable_t2, t2_upgrades=self._get_t2_display(),
                          camera=self._camera, world_w=self.width, world_h=self.height)
 
         # Paused overlay (centered on game area) — only when escape menu is not open
@@ -1576,6 +1629,49 @@ class Game:
 
     # -- drawing helpers ----------------------------------------------------
 
+    @staticmethod
+    def _build_background(width: int, height: int) -> tuple[pygame.Surface, pygame.Surface]:
+        from core.background import build_background
+        return build_background(width, height)
+
+    def _collect_los_circles(self) -> list[tuple[int, int, int]]:
+        """Collect LOS circles from all human-team entities."""
+        circles: list[tuple[int, int, int]] = []
+        for entity in self.entities:
+            if not entity.alive:
+                continue
+            if not hasattr(entity, "line_of_sight") or not hasattr(entity, "team"):
+                continue
+            if entity.team not in self.human_teams:
+                continue
+            r = int(entity.line_of_sight)
+            if r > 0:
+                circles.append((int(entity.x), int(entity.y), r))
+        return circles
+
+    @staticmethod
+    def _is_visible(px: float, py: float,
+                    los_circles: list[tuple[int, int, int]]) -> bool:
+        """Check if a point is within any LOS circle."""
+        for cx, cy, r in los_circles:
+            dx = px - cx
+            dy = py - cy
+            if dx * dx + dy * dy <= r * r:
+                return True
+        return False
+
+    def _draw_entity_faded(self, entity, surface, alpha: int = 90):
+        """Draw an entity at reduced opacity via a temp surface."""
+        margin = 40
+        size = margin * 2
+        temp = pygame.Surface((size, size), pygame.SRCALPHA)
+        ox, oy = entity.x, entity.y
+        entity.x, entity.y = float(margin), float(margin)
+        entity.draw(temp)
+        entity.x, entity.y = ox, oy
+        temp.set_alpha(alpha)
+        surface.blit(temp, (int(ox - margin), int(oy - margin)))
+
     def _draw_fog(self):
         """Draw fog of war overlay — only when a human is playing.
 
@@ -1588,22 +1684,14 @@ class Game:
         if not self._is_multiplayer and len(self.human_teams) > 1:
             return
 
-        FOG_ALPHA = 200
+        # 70% bg dimmed to ~30% → alpha ≈ 146; classic mode keeps heavier fog
+        FOG_ALPHA = 146 if self._fog_of_war else 200
         self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
 
-        # Collect LOS sources for all human teams
-        los_circles: list[tuple[int, int, int]] = []
-        for entity in self.entities:
-            if not entity.alive:
-                continue
-            if not hasattr(entity, "line_of_sight") or not hasattr(entity, "team"):
-                continue
-            if entity.team not in self.human_teams:
-                continue
-            r = int(entity.line_of_sight)
-            if r <= 0:
-                continue
-            los_circles.append((int(entity.x), int(entity.y), r))
+        # Reuse cached LOS circles if available, otherwise collect fresh
+        los_circles = getattr(self, '_los_cache', None)
+        if los_circles is None:
+            los_circles = self._collect_los_circles()
 
         # Punch transparent holes
         for ex, ey, r in los_circles:
@@ -1613,15 +1701,24 @@ class Game:
             self._fog_surface.blit(cutout, (ex - r, ey - r),
                                    special_flags=pygame.BLEND_RGBA_SUB)
 
+        # Blur the fog edges for a softer look when fog_of_war is active
+        if self._fog_of_war:
+            w, h = self._fog_surface.get_size()
+            small = pygame.transform.smoothscale(self._fog_surface,
+                                                 (max(1, w // 4), max(1, h // 4)))
+            blurred = pygame.transform.smoothscale(small, (w, h))
+            self._fog_surface.blit(blurred, (0, 0))
+
         self._world_surface.blit(self._fog_surface, (0, 0))
 
         # Border at the fog edge — outline of the union (no venn diagram)
-        self._fog_border.fill((0, 0, 0))
-        for ex, ey, r in los_circles:
-            pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)
-        for ex, ey, r in los_circles:
-            pygame.draw.circle(self._fog_border, (0, 0, 0), (ex, ey), max(r - 1, 0))
-        self._world_surface.blit(self._fog_border, (0, 0))
+        if not self._fog_of_war:
+            self._fog_border.fill((0, 0, 0))
+            for ex, ey, r in los_circles:
+                pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)
+            for ex, ey, r in los_circles:
+                pygame.draw.circle(self._fog_border, (0, 0, 0), (ex, ey), max(r - 1, 0))
+            self._world_surface.blit(self._fog_border, (0, 0))
 
     # -- animation helpers --------------------------------------------------
 
@@ -1631,10 +1728,28 @@ class Game:
         t = min(self._anim_timer / 3.0, 1.0)
         scale = t * (2.0 - t)  # ease-out curve
 
-        # Draw all non-CC entities normally
-        for entity in self.entities:
-            if not isinstance(entity, CommandCenter):
-                entity.draw(ws)
+        # Draw all non-CC entities, applying fog visibility when enabled
+        if self._fog_of_war and self._has_human:
+            los = self._collect_los_circles()
+            self._los_cache = los
+            for entity in self.entities:
+                if isinstance(entity, CommandCenter):
+                    continue
+                if isinstance(entity, (RectEntity, CircleEntity, PolygonEntity, MetalSpot)):
+                    entity.draw(ws)
+                elif isinstance(entity, MetalExtractor):
+                    if self._is_visible(entity.x, entity.y, los):
+                        entity.draw(ws)
+                    else:
+                        self._draw_entity_faded(entity, ws)
+                else:
+                    if self._is_visible(entity.x, entity.y, los):
+                        entity.draw(ws)
+        else:
+            self._los_cache = None
+            for entity in self.entities:
+                if not isinstance(entity, CommandCenter):
+                    entity.draw(ws)
 
         # Draw CCs at scaled size
         for entity in self.entities:
@@ -1747,9 +1862,25 @@ class Game:
     def _render_explode(self):
         """Render explode phase: surviving entities normal, fragments fly out."""
         ws = self._world_surface
-        # Draw all surviving entities normally
-        for entity in self.entities:
-            entity.draw(ws)
+        # Draw all surviving entities (with fog visibility when enabled)
+        if self._fog_of_war and self._has_human:
+            los = self._collect_los_circles()
+            self._los_cache = los
+            for entity in self.entities:
+                if isinstance(entity, (RectEntity, CircleEntity, PolygonEntity, MetalSpot)):
+                    entity.draw(ws)
+                elif isinstance(entity, MetalExtractor):
+                    if self._is_visible(entity.x, entity.y, los):
+                        entity.draw(ws)
+                    else:
+                        self._draw_entity_faded(entity, ws)
+                else:
+                    if self._is_visible(entity.x, entity.y, los):
+                        entity.draw(ws)
+        else:
+            self._los_cache = None
+            for entity in self.entities:
+                entity.draw(ws)
 
         # Draw dying units that haven't exploded yet (frozen in place)
         for du in self._dying_units:
@@ -1896,8 +2027,10 @@ class Game:
             # Grab the mouse at game start
             self._set_mouse_grab(True)
 
+            from systems import music
             while self.running:
                 raw_dt = self.clock.tick(self.fps) / 1000.0
+                music.update()
                 real_dt = min(raw_dt, MAX_FRAME_DT)
 
                 self.handle_events()
@@ -2052,7 +2185,8 @@ class Game:
                     # Still broadcast current state so clients stay in sync
                     if post_step:
                         post_step(self._iteration, self.entities,
-                                  self.laser_flashes, self._winner)
+                                  self.laser_flashes, self._winner,
+                                  getattr(self, '_sound_events', []))
                     next_tick = time.perf_counter()
                     continue
 
@@ -2078,7 +2212,8 @@ class Game:
 
                 if post_step:
                     post_step(self._iteration, self.entities,
-                              self.laser_flashes, self._winner)
+                              self.laser_flashes, self._winner,
+                              getattr(self, '_sound_events', []))
 
                 # If phase transitioned to explode, the game is over
                 if self._phase == "explode":

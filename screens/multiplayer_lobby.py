@@ -144,8 +144,10 @@ class MultiplayerLobbyScreen(BaseScreen):
             self._join_status = f"Connected to {returning_client.host_name}. Waiting for host to start..."
 
     def run(self) -> ScreenResult:
+        from systems import music
         while True:
             dt = self.clock.tick(60) / 1000.0
+            music.update()
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -369,11 +371,19 @@ class MultiplayerLobbyScreen(BaseScreen):
         s = small.render(f"Obstacles: {obs}", True, _STATUS_COLOR)
         self.screen.blit(s, (cx - s.get_width() // 2, y_start + 26))
 
+        # Fog of War
+        if settings.get("fog_of_war"):
+            s = small.render("Fog of War: On", True, _STATUS_COLOR)
+            self.screen.blit(s, (cx - s.get_width() // 2, y_start + 48))
+            y_offset = 70
+        else:
+            y_offset = 48
+
         # Host info
         host_name = settings.get("host_name", "Host")
         host_team = settings.get("host_team", 1)
         s = small.render(f"Host: {host_name} (Team {host_team})", True, _STATUS_COLOR)
-        self.screen.blit(s, (cx - s.get_width() // 2, y_start + 48))
+        self.screen.blit(s, (cx - s.get_width() // 2, y_start + y_offset))
 
     def _draw(self) -> None:
         self.screen.fill(MENU_BG)

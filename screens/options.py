@@ -6,6 +6,7 @@ from ui.theme import MENU_BG, TITLE_COLOR, TITLE_FONT_SIZE, CONTENT_TEXT
 from ui.widgets import Slider, BackButton, ToggleGroup, _get_font
 import config.audio as audio
 import config.display as display_config
+from systems import music
 
 
 class OptionsScreen(BaseScreen):
@@ -27,10 +28,17 @@ class OptionsScreen(BaseScreen):
             step=5,
         )
 
+        self._music_slider = Slider(
+            sl_x, sl_y + 60, sl_w, "Music Volume",
+            min_val=0, max_val=100,
+            value=int(music.get_volume() * 100),
+            step=5,
+        )
+
         # Display mode toggle
         mode_idx = 0 if display_config.display_mode == "windowed_fullscreen" else 1
         self._display_toggle = ToggleGroup(
-            self.width // 2 - 145, self.height // 2 + 30,
+            self.width // 2 - 145, self.height // 2 + 90,
             [
                 ("windowed_fullscreen", "Borderless"),
                 ("windowed", "Windowed"),
@@ -43,7 +51,7 @@ class OptionsScreen(BaseScreen):
         # Color mode toggle
         color_idx = 0 if display_config.color_mode == "player" else 1
         self._color_toggle = ToggleGroup(
-            self.width // 2 - 145, self.height // 2 + 110,
+            self.width // 2 - 145, self.height // 2 + 170,
             [
                 ("player", "Player Colors"),
                 ("team", "Team Colors"),
@@ -56,7 +64,7 @@ class OptionsScreen(BaseScreen):
         # Selection mode toggle
         sel_idx = 0 if display_config.selection_mode == "rectangle" else 1
         self._selection_toggle = ToggleGroup(
-            self.width // 2 - 145, self.height // 2 + 190,
+            self.width // 2 - 145, self.height // 2 + 250,
             [
                 ("rectangle", "Rectangle"),
                 ("circle", "Circle"),
@@ -69,7 +77,7 @@ class OptionsScreen(BaseScreen):
         # Movement smoothing toggle
         ms_idx = 0 if display_config.movement_smoothing else 1
         self._smoothing_toggle = ToggleGroup(
-            self.width // 2 - 145, self.height // 2 + 270,
+            self.width // 2 - 145, self.height // 2 + 330,
             [
                 ("on", "Enabled"),
                 ("off", "Disabled"),
@@ -91,18 +99,22 @@ class OptionsScreen(BaseScreen):
         self._volume_slider.x = sl_x
         self._volume_slider.y = self.height // 2 - 60
         self._volume_slider.w = sl_w
+        self._music_slider.x = sl_x
+        self._music_slider.y = self.height // 2
+        self._music_slider.w = sl_w
         self._display_toggle.x = self.width // 2 - 145
-        self._display_toggle.y = self.height // 2 + 30
+        self._display_toggle.y = self.height // 2 + 90
         self._color_toggle.x = self.width // 2 - 145
-        self._color_toggle.y = self.height // 2 + 110
+        self._color_toggle.y = self.height // 2 + 170
         self._selection_toggle.x = self.width // 2 - 145
-        self._selection_toggle.y = self.height // 2 + 190
+        self._selection_toggle.y = self.height // 2 + 250
         self._smoothing_toggle.x = self.width // 2 - 145
-        self._smoothing_toggle.y = self.height // 2 + 270
+        self._smoothing_toggle.y = self.height // 2 + 330
 
     def run(self) -> ScreenResult:
         while True:
             self.clock.tick(60)
+            music.update()
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -115,6 +127,9 @@ class OptionsScreen(BaseScreen):
 
                 if self._volume_slider.handle_event(event):
                     audio.set_volume(self._volume_slider.value / 100.0)
+
+                if self._music_slider.handle_event(event):
+                    music.set_volume(self._music_slider.value / 100.0)
 
                 if self._display_toggle.handle_event(event):
                     self._apply_display_mode()
@@ -161,6 +176,7 @@ class OptionsScreen(BaseScreen):
         # Widgets
         self._back.draw(self.screen)
         self._volume_slider.draw(self.screen)
+        self._music_slider.draw(self.screen)
         self._display_toggle.draw(self.screen)
         self._color_toggle.draw(self.screen)
         self._selection_toggle.draw(self.screen)

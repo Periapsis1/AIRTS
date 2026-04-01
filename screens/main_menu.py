@@ -80,8 +80,10 @@ class MainMenuScreen(BaseScreen):
             self._buttons.append((btn, target))
 
     def run(self) -> ScreenResult:
+        from systems import music
         while True:
             dt = self.clock.tick(60) / 1000.0
+            music.update()
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:

@@ -324,46 +324,52 @@ class Unit(CircleEntity, Damageable):
         r = int(self.attack_range)
         if r <= 0:
             return
+        ix, iy = int(round(self.x)), int(round(self.y))
         half_fov = self.fov / 2
         # Full circle (or nearly): fall back to simple circle
         if self.fov >= math.tau - 0.01:
             temp = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
             pygame.draw.circle(temp, color, (r, r), r, 1)
-            surface.blit(temp, (int(self.x) - r, int(self.y) - r))
+            surface.blit(temp, (ix - r, iy - r))
             return
 
         # Build a polygon: center -> arc points -> center
-        cx, cy = self.x, self.y
         start = self.facing_angle - half_fov
         steps = max(int(math.degrees(self.fov) / 3), 8)
-        points = [(cx, cy)]
+        points = [(ix, iy)]
         for i in range(steps + 1):
             a = start + self.fov * i / steps
-            points.append((cx + r * math.cos(a), cy + r * math.sin(a)))
-        points.append((cx, cy))
+            points.append((int(round(ix + r * math.cos(a))),
+                           int(round(iy + r * math.sin(a)))))
+        points.append((ix, iy))
 
         temp_size = r * 2 + 4
         temp = pygame.Surface((temp_size, temp_size), pygame.SRCALPHA)
-        ox = temp_size // 2 - cx
-        oy = temp_size // 2 - cy
+        ox = temp_size // 2 - ix
+        oy = temp_size // 2 - iy
         shifted = [(px + ox, py + oy) for px, py in points]
         pygame.draw.lines(temp, color, False, shifted, 1)
-        surface.blit(temp, (cx - temp_size // 2, cy - temp_size // 2))
+        surface.blit(temp, (ix - temp_size // 2, iy - temp_size // 2))
 
     def draw(self, surface: pygame.Surface):
-        pygame.draw.circle(surface, self.color, (self.x, self.y), self.radius)
-        self._draw_symbol(surface)
+        from core.sprite_cache import get_unit_sprite
+        sprite = get_unit_sprite(self.unit_type, self.color, self.radius)
+        ix, iy = int(round(self.x)), int(round(self.y))
+        hw, hh = sprite.get_width() // 2, sprite.get_height() // 2
+        surface.blit(sprite, (ix - hw, iy - hh))
 
         if self.selected:
-            pygame.draw.circle(surface, SELECTED_COLOR, (self.x, self.y), self.radius + 2, 1)
+            pygame.draw.circle(surface, SELECTED_COLOR, (ix, iy), self.radius + 2, 1)
 
             if self.attack_target is not None and self.attack_target.alive:
-                _draw_command_line(surface, self.x, self.y,
-                                  self.attack_target.x, self.attack_target.y,
+                _draw_command_line(surface, ix, iy,
+                                  int(round(self.attack_target.x)),
+                                  int(round(self.attack_target.y)),
                                   _ATTACK_CMD_COLOR)
             elif self.target is not None:
-                _draw_command_line(surface, self.x, self.y,
-                                  self.target[0], self.target[1],
+                _draw_command_line(surface, ix, iy,
+                                  int(round(self.target[0])),
+                                  int(round(self.target[1])),
                                   _MOVE_CMD_COLOR)
 
         # Allied units: only show FOV arc when selected; enemies: always
@@ -376,7 +382,7 @@ class Unit(CircleEntity, Damageable):
         for ability in self.abilities:
             ability.draw(self, surface)
 
-        self.draw_health_bar(surface, self.x, self.y, self.radius + HEALTH_BAR_OFFSET)
+        self.draw_health_bar(surface, ix, iy, self.radius + HEALTH_BAR_OFFSET)
 
     # -- serialization --------------------------------------------------------
 

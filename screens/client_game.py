@@ -96,6 +96,7 @@ class ClientGameScreen(BaseScreen):
 
         # World surface and camera
         self._world_surface = pygame.Surface((mw, mh))
+        self._bg_surface, self._bg_tile = self._build_background(mw, mh)
         self._map_w = mw
         self._map_h = mh
         self._camera = Camera(self._game_area.w, self._game_area.h, mw, mh,
@@ -141,6 +142,7 @@ class ClientGameScreen(BaseScreen):
 
         # Enable T2 and upgrade tracking (from game_start message)
         self._enable_t2: bool = client.enable_t2
+        self._fog_of_war: bool = client.fog_of_war
         self._t2_upgrades: dict[int, set[str]] = {}
 
         # HUD build button rects (cached) — still used for basic click detection
@@ -237,10 +239,13 @@ class ClientGameScreen(BaseScreen):
             pygame.event.set_grab(False)
 
     def _run_loop(self) -> ScreenResult:
+        from systems import music
         while True:
             dt = self.clock.tick(60) / 1000.0
+            music.update()
             self._anim_timer += dt
-            self._extrap_dt += dt
+            if not self._paused:
+                self._extrap_dt += dt
 
             # Poll for new state from host
             frame = self._client.poll_state()
@@ -257,6 +262,8 @@ class ClientGameScreen(BaseScreen):
                     self._play_sound_events(frame.get("sounds", []))
                     # Recompute movement extrapolation state
                     self._update_extrapolation(self._entities)
+                    # Rebuild T2 upgrade display from entity state
+                    self._refresh_t2_display()
                 elif msg_type == "game_over":
                     self._winner = frame.get("winner", 0)
             else:
@@ -272,10 +279,7 @@ class ClientGameScreen(BaseScreen):
                 # Close escape menu if game ended naturally
                 if self._esc_menu_open:
                     self._esc_menu_open = False
-                    if self._is_local and self._paused:
-                        self._toggle_pause()
-                    else:
-                        pygame.event.set_grab(True)
+                    pygame.event.set_grab(True)
                 # Build fragments from losing CCs
                 losing_teams = self._all_teams - {self._winner} if self._winner > 0 else set()
                 for _lt in losing_teams:
@@ -297,13 +301,10 @@ class ClientGameScreen(BaseScreen):
                     self._client.stop()
                     return ScreenResult("quit")
 
-                # ESC toggles the escape menu
+                # ESC toggles the escape menu (without pausing)
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     self._esc_menu_open = not self._esc_menu_open
-                    if self._is_local:
-                        self._toggle_pause()
-                    else:
-                        pygame.event.set_grab(not self._esc_menu_open)
+                    pygame.event.set_grab(not self._esc_menu_open)
                     continue
 
                 # When escape menu is open, only handle menu button clicks
@@ -312,10 +313,7 @@ class ClientGameScreen(BaseScreen):
                         if btn.handle_event(event):
                             if action == "resume":
                                 self._esc_menu_open = False
-                                if self._is_local:
-                                    self._toggle_pause()
-                                else:
-                                    pygame.event.set_grab(True)
+                                pygame.event.set_grab(True)
                             elif action == "surrender":
                                 if self._winner == 0:
                                     other = self._all_teams - {self._my_team}
@@ -828,6 +826,42 @@ class ClientGameScreen(BaseScreen):
 
     # -- movement extrapolation ----------------------------------------------
 
+    @staticmethod
+    def _effective_speed(ent: dict) -> float:
+        """Compute effective unit speed accounting for ability modifiers."""
+        base = UNIT_TYPES.get(ent.get("ut", ""), {}).get("speed", 0)
+        if base <= 0:
+            return 0.0
+        mult = 1.0
+        for ab in ent.get("abs", []):
+            name = ab.get("n")
+            if name == "focus":
+                timer = ab.get("tm", 0.0)
+                if timer > 0:
+                    t = timer / 3.0
+                    mult *= 0.25 + 0.75 * (1.0 - t)
+            elif name == "electric_armor":
+                stacks = ab.get("s", 0)
+                mult *= 1.0 + 0.10 * stacks
+            elif name == "combat_stim" and ab.get("a"):
+                missing = max(0.0, ent.get("mhp", 0) - ent.get("hp", 0))
+                stacks = int(missing / 10.0)
+                mult *= 1.0 + 0.05 * stacks
+        return base * mult
+
+    def _refresh_t2_display(self) -> None:
+        """Rebuild T2 upgrade display set from raw entity dicts."""
+        t2: dict[int, set[str]] = {}
+        for ent in self._entities:
+            if ent.get("t") != "ME":
+                continue
+            us = ent.get("us", "base")
+            rut = ent.get("rut", "") or None
+            if rut and us in ("research_lab", "upgrading_lab"):
+                team = ent.get("tm", 0)
+                t2.setdefault(team, set()).add(rut)
+        self._t2_upgrades = t2
+
     def _update_extrapolation(self, entities: list[dict]) -> None:
         """Recompute velocity predictions from the latest server frame."""
         positions: dict[int, tuple[float, float]] = {}
@@ -852,7 +886,7 @@ class ClientGameScreen(BaseScreen):
                 dy = ty - ey
                 dist = math.hypot(dx, dy)
                 if dist > 0.5:
-                    speed = UNIT_TYPES.get(ent.get("ut", ""), {}).get("speed", 0)
+                    speed = self._effective_speed(ent)
                     velocities[eid] = (dx / dist * speed, dy / dist * speed)
                     continue
             velocities[eid] = (0.0, 0.0)
@@ -979,7 +1013,7 @@ class ClientGameScreen(BaseScreen):
 
     def _draw(self) -> None:
         ws = self._world_surface
-        ws.fill((0, 0, 0))
+        ws.blit(self._bg_surface, (0, 0))
 
         # Obstacles
         for obs in self._obstacles:
@@ -1002,17 +1036,39 @@ class ClientGameScreen(BaseScreen):
                           key=lambda e: order.get(e.get("t", ""), 4))
 
         is_warp_in = self._phase == "warp_in"
+
+        # Collect LOS circles for fog-of-war visibility filtering
+        if self._fog_of_war:
+            _los = self._collect_los_circles(entities)
+            self._los_cache = _los
+        else:
+            _los = None
+            self._los_cache = None
+
         for ent in entities:
             t = ent.get("t")
             if t == "MS":
                 self._draw_metal_spot(ent)
             elif t == "ME":
-                self._draw_metal_extractor(ent)
+                if _los is not None:
+                    ex, ey = ent.get("x", 0), ent.get("y", 0)
+                    if self._is_visible(ex, ey, _los):
+                        self._draw_metal_extractor(ent)
+                    else:
+                        self._draw_metal_extractor_faded(ent)
+                else:
+                    self._draw_metal_extractor(ent)
             elif t == "CC":
                 if not is_warp_in:
+                    if _los is not None and not self._is_visible(
+                            ent.get("x", 0), ent.get("y", 0), _los):
+                        continue
                     self._draw_command_center(ent)
             elif t == "U":
                 if not is_warp_in:
+                    if _los is not None and not self._is_visible(
+                            ent.get("x", 0), ent.get("y", 0), _los):
+                        continue
                     self._draw_unit(ent)
 
         # Warp-in animation overlays CCs with scale + glow
@@ -1026,21 +1082,28 @@ class ClientGameScreen(BaseScreen):
                 t = ent.get("t")
                 ex = ent.get("x", 0)
                 ey = ent.get("y", 0)
+                if _los is not None and not self._is_visible(ex, ey, _los):
+                    continue
                 r = CC_RADIUS + 2 if t == "CC" else ent.get("r", 5) + 2
-                pygame.draw.circle(ws, SELECTED_COLOR, (int(ex), int(ey)), int(r), 1)
+                pygame.draw.circle(ws, SELECTED_COLOR, (int(round(ex)), int(round(ey))), int(r), 1)
                 self._draw_fov_arc(ent)
 
         # Lasers
         for lf in self._lasers:
+            if _los is not None and len(lf) >= 2:
+                if not self._is_visible(lf[0], lf[1], _los):
+                    continue
             self._draw_laser(lf)
 
         # Charge beams (artillery charge preview)
         for ent in entities:
             chx = ent.get("chx")
             if chx is not None:
+                ex, ey = ent.get("x", 0), ent.get("y", 0)
+                if _los is not None and not self._is_visible(ex, ey, _los):
+                    continue
                 chy = ent.get("chy", 0)
                 chp = ent.get("chp", 0)
-                ex, ey = ent.get("x", 0), ent.get("y", 0)
                 orange = (255, 140, 0, int(100 + 100 * chp))
                 temp = pygame.Surface(ws.get_size(), pygame.SRCALPHA)
                 pygame.draw.line(temp, orange, (int(ex), int(ey)),
@@ -1055,6 +1118,8 @@ class ClientGameScreen(BaseScreen):
         # Splash effects (expanding red circles)
         for s in self._splashes:
             sx, sy = s.get("x", 0), s.get("y", 0)
+            if _los is not None and not self._is_visible(sx, sy, _los):
+                continue
             sr = s.get("r", 30)
             sp = s.get("p", 0)
             cur_r = int(sr * sp)
@@ -1065,18 +1130,8 @@ class ClientGameScreen(BaseScreen):
                                    (int(sx), int(sy)), cur_r, 2)
                 ws.blit(temp, (0, 0))
 
-        # ME spawn bonus labels (white, above extractor — matching game.py)
-        for ent in entities:
-            if ent.get("t") == "ME":
-                meb = ent.get("meb", 0)
-                if meb > 0:
-                    label = _get_font(14).render(f"+{meb}%", True, (255, 255, 255))
-                    lx = int(ent.get("x", 0)) - label.get_width() // 2
-                    ly = int(ent.get("y", 0)) - int(ent.get("r", 10)) - HEALTH_BAR_OFFSET - 12
-                    ws.blit(label, (lx, ly))
-
-        # Team labels
-        self._draw_team_labels(entities)
+        # (ME bonus labels and team labels drawn in screen space after camera.apply)
+        self._label_data = (entities, _los)
 
         # Drag selection visual
         if self._dragging:
@@ -1173,9 +1228,10 @@ class ClientGameScreen(BaseScreen):
             if self._reset_cam_btn:
                 self._reset_cam_btn.draw(self.screen)
 
-        # Game area: black background then camera projection
+        # Game area: tiled background (covers beyond-map dead space) then camera projection
+        from core.background import blit_screen_background
         ga = self._game_area
-        pygame.draw.rect(self.screen, (0, 0, 0), ga)
+        blit_screen_background(self.screen, ga, self._camera, self._bg_tile)
         self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
 
         # Metallic border around the world edge (rendered in screen space)
@@ -1188,6 +1244,29 @@ class ClientGameScreen(BaseScreen):
         clip_save = self.screen.get_clip()
         self.screen.set_clip(ga)
         _draw_metallic_border(self.screen, border_rect, 3)
+
+        # Screen-space labels (crisp text at any zoom)
+        if hasattr(self, '_label_data'):
+            entities_l, _los_l = self._label_data
+            cam = self._camera
+            me_font_size = max(8, int(round(14 * cam.zoom)))
+            me_font = _get_font(me_font_size)
+            # ME spawn bonus labels
+            for ent in entities_l:
+                if ent.get("t") == "ME":
+                    ex, ey = ent.get("x", 0), ent.get("y", 0)
+                    if _los_l is not None and not self._is_visible(ex, ey, _los_l):
+                        continue
+                    meb = ent.get("meb", 0)
+                    if meb > 0:
+                        label = me_font.render(f"+{meb}%", True, (255, 255, 255))
+                        wy = ey - ent.get("r", 10) - HEALTH_BAR_OFFSET - 12
+                        sx, sy = cam.world_to_screen(ex, wy)
+                        self.screen.blit(label, (int(sx) + ga.x - label.get_width() // 2,
+                                                 int(sy) + ga.y))
+            # Team name labels above CCs
+            self._draw_team_labels_screen(entities_l, _los_l)
+
         self.screen.set_clip(clip_save)
 
         # HUD area
@@ -1236,7 +1315,7 @@ class ClientGameScreen(BaseScreen):
 
         # Title above buttons
         font = _get_font(48)
-        title_surf = font.render("PAUSED", True, (220, 220, 240))
+        title_surf = font.render("MENU", True, (220, 220, 240))
         tx = self.width // 2 - title_surf.get_width() // 2
         first_btn_y = self._esc_menu_btns[0][1].rect.top
         ty = first_btn_y - title_surf.get_height() - 16
@@ -1301,6 +1380,12 @@ class ClientGameScreen(BaseScreen):
             return
 
         if t == "ME":
+            if ent.get("us") == "watch_tower":
+                from config.settings import WATCH_TOWER_LASER_RANGE
+                atk_r = int(WATCH_TOWER_LASER_RANGE)
+                temp = pygame.Surface((atk_r * 2, atk_r * 2), pygame.SRCALPHA)
+                pygame.draw.circle(temp, RANGE_COLOR, (atk_r, atk_r), atk_r, 1)
+                ws.blit(temp, (int(round(ex)) - atk_r, int(round(ey)) - atk_r))
             return
 
         weapon = stats.get("weapon")
@@ -1313,58 +1398,63 @@ class ClientGameScreen(BaseScreen):
         color = MEDIC_HEAL_COLOR if is_healer else RANGE_COLOR
         fa = ent.get("fa", 0.0)
 
+        ix, iy = int(round(ex)), int(round(ey))
         half_fov = fov / 2.0
         if fov >= math.tau - 0.01:
             temp = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
             pygame.draw.circle(temp, color, (r, r), r, 1)
-            ws.blit(temp, (int(ex) - r, int(ey) - r))
+            ws.blit(temp, (ix - r, iy - r))
             return
 
         start = fa - half_fov
         steps = max(int(math.degrees(fov) / 3), 8)
-        points = [(ex, ey)]
+        points = [(ix, iy)]
         for i in range(steps + 1):
             a = start + fov * i / steps
-            points.append((ex + r * math.cos(a), ey + r * math.sin(a)))
-        points.append((ex, ey))
+            points.append((int(round(ix + r * math.cos(a))),
+                           int(round(iy + r * math.sin(a)))))
+        points.append((ix, iy))
 
         temp_size = r * 2 + 4
         temp = pygame.Surface((temp_size, temp_size), pygame.SRCALPHA)
-        ox = temp_size // 2 - ex
-        oy = temp_size // 2 - ey
+        ox = temp_size // 2 - ix
+        oy = temp_size // 2 - iy
         shifted = [(px + ox, py + oy) for px, py in points]
         pygame.draw.lines(temp, color, False, shifted, 1)
-        ws.blit(temp, (ex - temp_size // 2, ey - temp_size // 2))
+        ws.blit(temp, (ix - temp_size // 2, iy - temp_size // 2))
 
     def _draw_unit(self, ent: dict) -> None:
+        from core.sprite_cache import get_unit_sprite
         ws = self._world_surface
         x, y = ent.get("x", 0), ent.get("y", 0)
         c = tuple(ent.get("c", [255, 255, 255]))
         r = ent.get("r", 5)
         hp = ent.get("hp", 100)
         ut = ent.get("ut", "soldier")
+        ix, iy = int(round(x)), int(round(y))
 
         # Command arrows for selected units
         eid = ent.get("id")
         if eid in self._selected_ids:
             if "atx" in ent and "aty" in ent:
-                self._draw_command_line(x, y, ent["atx"], ent["aty"], _ATTACK_CMD_COLOR)
+                self._draw_command_line(ix, iy,
+                                       int(round(ent["atx"])),
+                                       int(round(ent["aty"])),
+                                       _ATTACK_CMD_COLOR)
             elif "tx" in ent and "ty" in ent:
-                self._draw_command_line(x, y, ent["tx"], ent["ty"], _MOVE_CMD_COLOR)
+                self._draw_command_line(ix, iy,
+                                       int(round(ent["tx"])),
+                                       int(round(ent["ty"])),
+                                       _MOVE_CMD_COLOR)
 
-        pygame.draw.circle(ws, c, (x, y), r)
+        sprite = get_unit_sprite(ut, c, r)
+        hw, hh = sprite.get_width() // 2, sprite.get_height() // 2
+        ws.blit(sprite, (ix - hw, iy - hh))
 
         stats = UNIT_TYPES.get(ut, {})
-        symbol = stats.get("symbol")
-        if symbol:
-            scale = r / 16.0
-            translated = [(x + px * scale, y + py * scale) for px, py in symbol]
-            pygame.draw.polygon(ws, (0, 0, 0), translated)
-            pygame.draw.polygon(ws, c, translated, 1)
-
         max_hp = ent.get("mhp", stats.get("hp", 100))
         if hp < max_hp:
-            self._draw_health_bar(x, y, r + HEALTH_BAR_OFFSET, hp, max_hp)
+            self._draw_health_bar(ix, iy, r + HEALTH_BAR_OFFSET, hp, max_hp)
 
         # Ability indicators above unit
         _ABILITY_COLORS = {
@@ -1380,10 +1470,10 @@ class ClientGameScreen(BaseScreen):
                 size = 2 if ab_name == "electric_armor" else 3
                 spacing = 5 if ab_name == "electric_armor" else 6
                 y_off = r + 6
-                start_x = x - (stacks - 1) * spacing / 2
+                start_x = ix - (stacks - 1) * spacing / 2
                 for i in range(stacks):
-                    cx = start_x + i * spacing
-                    cy = y - y_off
+                    cx = int(round(start_x + i * spacing))
+                    cy = iy - y_off
                     pts = [
                         (cx, cy - size),
                         (cx + size, cy),
@@ -1393,9 +1483,9 @@ class ClientGameScreen(BaseScreen):
                     pygame.draw.polygon(ws, color, pts)
             # Combat stim: green chevron when active
             elif ab_name == "combat_stim" and ab.get("a", False):
-                cy = y - r - 6
+                cy = iy - r - 6
                 size = 3
-                pts = [(x - size, cy + size), (x, cy - size), (x + size, cy + size)]
+                pts = [(ix - size, cy + size), (ix, cy - size), (ix + size, cy + size)]
                 pygame.draw.lines(ws, (100, 255, 100), False, pts, 2)
 
     def _draw_command_center(self, ent: dict) -> None:
@@ -1531,13 +1621,13 @@ class ClientGameScreen(BaseScreen):
                          bar_w: float = HEALTH_BAR_WIDTH) -> None:
         ws = self._world_surface
         ratio = hp / max_hp if max_hp > 0 else 0
-        bx = cx - bar_w / 2
-        by = cy - offset_y
+        bx = int(round(cx - bar_w / 2))
+        by = int(round(cy - offset_y))
         pygame.draw.rect(ws, HEALTH_BAR_BG,
                          (bx, by, bar_w, HEALTH_BAR_HEIGHT))
         fg = HEALTH_BAR_FG if ratio > 0.35 else HEALTH_BAR_LOW
         pygame.draw.rect(ws, fg,
-                         (bx, by, bar_w * ratio, HEALTH_BAR_HEIGHT))
+                         (bx, by, int(bar_w * ratio), HEALTH_BAR_HEIGHT))
 
     def _draw_team_labels(self, entities: list[dict]) -> None:
         font = _get_font(20)
@@ -1555,8 +1645,12 @@ class ClientGameScreen(BaseScreen):
             opponent_name = self._client.opponent_name or self._client.host_name
             for t in self._all_teams - {self._my_team}:
                 names[t] = opponent_name
+        _los = getattr(self, '_los_cache', None)
         for ent in entities:
             if ent.get("t") != "CC":
+                continue
+            if _los is not None and not self._is_visible(
+                    ent.get("x", 0), ent.get("y", 0), _los):
                 continue
             tm = ent.get("tm", 1)
             name = names.get(tm, f"Team {tm}")
@@ -1570,12 +1664,48 @@ class ClientGameScreen(BaseScreen):
             ny = int(ent.get("y", 0)) - 40
             ws.blit(name_surf, (nx, ny))
 
-    def _draw_fog(self, entities: list[dict]) -> None:
-        """Draw fog of war — only show own team's vision."""
-        FOG_ALPHA = 200
-        self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
+    def _draw_team_labels_screen(self, entities: list[dict],
+                                  _los=None) -> None:
+        """Draw team name labels in screen space for crisp text at any zoom."""
+        font = _get_font(max(8, int(round(20 * self._camera.zoom))))
+        cam = self._camera
+        ga = self._game_area
+        names: dict[int, str] = {}
+        if self._player_names:
+            pt = self._client.player_team
+            for pid, pname in self._player_names.items():
+                tm = pt.get(pid, pid)
+                names[tm] = pname
+        if not names:
+            names[self._my_team] = self._client._player_name
+            opponent_name = self._client.opponent_name or self._client.host_name
+            for t in self._all_teams - {self._my_team}:
+                names[t] = opponent_name
+        for ent in entities:
+            if ent.get("t") != "CC":
+                continue
+            ex, ey = ent.get("x", 0), ent.get("y", 0)
+            if _los is not None and not self._is_visible(ex, ey, _los):
+                continue
+            tm = ent.get("tm", 1)
+            name = names.get(tm, f"Team {tm}")
+            bp = ent.get("bp", 0)
+            if bp > 0:
+                name = f"{name} (+{bp}%)"
+            team_color = TEAM_COLORS.get(tm, PLAYER_COLORS[0])
+            name_surf = font.render(name, True, team_color)
+            sx, sy = cam.world_to_screen(ex, ey - 40)
+            self.screen.blit(name_surf, (int(sx) + ga.x - name_surf.get_width() // 2,
+                                         int(sy) + ga.y))
 
-        los_circles: list[tuple[int, int, int]] = []
+    @staticmethod
+    def _build_background(width: int, height: int) -> tuple[pygame.Surface, pygame.Surface]:
+        from core.background import build_background
+        return build_background(width, height)
+
+    def _collect_los_circles(self, entities: list[dict]) -> list[tuple[int, int, int]]:
+        """Collect LOS circles from own-team entities."""
+        circles: list[tuple[int, int, int]] = []
         for ent in entities:
             t = ent.get("t")
             if t not in ("U", "CC", "ME"):
@@ -1585,9 +1715,44 @@ class ClientGameScreen(BaseScreen):
             ut = ent.get("ut", "soldier")
             stats = UNIT_TYPES.get(ut, {})
             los = int(stats.get("los", 100))
-            if los <= 0:
-                continue
-            los_circles.append((int(ent.get("x", 0)), int(ent.get("y", 0)), los))
+            if los > 0:
+                circles.append((int(ent.get("x", 0)), int(ent.get("y", 0)), los))
+        return circles
+
+    @staticmethod
+    def _is_visible(px: float, py: float,
+                    los_circles: list[tuple[int, int, int]]) -> bool:
+        """Check if a point is within any LOS circle."""
+        for cx, cy, r in los_circles:
+            dx = px - cx
+            dy = py - cy
+            if dx * dx + dy * dy <= r * r:
+                return True
+        return False
+
+    def _draw_metal_extractor_faded(self, ent: dict, alpha: int = 90) -> None:
+        """Draw a metal extractor at reduced opacity (seen through fog)."""
+        x, y = ent.get("x", 0), ent.get("y", 0)
+        margin = 40
+        size = margin * 2
+        temp = pygame.Surface((size, size), pygame.SRCALPHA)
+        saved_ws = self._world_surface
+        self._world_surface = temp
+        self._draw_metal_extractor(dict(ent, x=margin, y=margin))
+        self._world_surface = saved_ws
+        temp.set_alpha(alpha)
+        saved_ws.blit(temp, (int(x - margin), int(y - margin)))
+
+    def _draw_fog(self, entities: list[dict]) -> None:
+        """Draw fog of war — only show own team's vision."""
+        # 70% bg dimmed to ~30% → alpha ≈ 146; classic mode keeps heavier fog
+        FOG_ALPHA = 146 if self._fog_of_war else 200
+        self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
+
+        # Reuse cached LOS circles if available, otherwise collect fresh
+        los_circles = getattr(self, '_los_cache', None)
+        if los_circles is None:
+            los_circles = self._collect_los_circles(entities)
 
         for ex, ey, r in los_circles:
             size = r * 2
@@ -1596,12 +1761,22 @@ class ClientGameScreen(BaseScreen):
             self._fog_surface.blit(cutout, (ex - r, ey - r),
                                    special_flags=pygame.BLEND_RGBA_SUB)
 
+        # Blur the fog edges for a softer look when fog_of_war is active
+        if self._fog_of_war:
+            w, h = self._fog_surface.get_size()
+            small = pygame.transform.smoothscale(self._fog_surface,
+                                                 (max(1, w // 4), max(1, h // 4)))
+            blurred = pygame.transform.smoothscale(small, (w, h))
+            self._fog_surface.blit(blurred, (0, 0))
+
         ws = self._world_surface
         ws.blit(self._fog_surface, (0, 0))
 
-        self._fog_border.fill((0, 0, 0))
-        for ex, ey, r in los_circles:
-            pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)
-        for ex, ey, r in los_circles:
-            pygame.draw.circle(self._fog_border, (0, 0, 0), (ex, ey), max(r - 1, 0))
-        ws.blit(self._fog_border, (0, 0))
+        # Border at fog edge (skip when fog_of_war hides entities — blur is enough)
+        if not self._fog_of_war:
+            self._fog_border.fill((0, 0, 0))
+            for ex, ey, r in los_circles:
+                pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)
+            for ex, ey, r in los_circles:
+                pygame.draw.circle(self._fog_border, (0, 0, 0), (ex, ey), max(r - 1, 0))
+            ws.blit(self._fog_border, (0, 0))

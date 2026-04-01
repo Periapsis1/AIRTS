@@ -31,6 +31,9 @@ class App:
         pygame.display.set_caption("AIRTS")
         self._clock = pygame.time.Clock()
 
+        from systems import music
+        music.init()
+
         self._registry = AIRegistry()
         self._registry.discover()
         if self._registry.errors:
@@ -163,6 +166,7 @@ class App:
         metal_spots: int = data.get("metal_spots", 0)
         player_name: str = data.get("player_name", "Unnamed Player")
         enable_t2: bool = data.get("enable_t2", False)
+        fog_of_war: bool = data.get("fog_of_war", False)
         time_limit: int = data.get("time_limit", 0)  # minutes, 0 = no limit
         max_ticks = time_limit * 60 * 60 if time_limit > 0 else 0  # 60 ticks/sec
 
@@ -227,6 +231,7 @@ class App:
                 screen_width=screen_w,
                 screen_height=screen_h,
                 enable_t2=enable_t2,
+                fog_of_war=fog_of_war,
             )
 
             try:
@@ -275,6 +280,7 @@ class App:
                 player_name=player_name,
                 max_ticks=max_ticks,
                 enable_t2=enable_t2,
+                fog_of_war=fog_of_war,
             )
 
             client = GameClient("127.0.0.1", port=server.port, player_name=player_name)

@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 import pygame
 from screens.base import BaseScreen, ScreenResult
+from systems import music
 from ui.theme import (
     MENU_BG, CONTENT_TEXT, HEADING_FONT_SIZE, CONTENT_FONT_SIZE,
     BTN_WIDTH, BTN_HEIGHT, DD_HEIGHT, DD_FONT_SIZE,
@@ -178,6 +179,11 @@ class CreateLobbyScreen(BaseScreen):
             self._rx, ry + 296,
             "Enable T2 Units",
             checked=saved.get("enable_t2", False),
+        )
+        self._fog_of_war_cb = Checkbox(
+            self._rx, ry + 326,
+            "Fog of War",
+            checked=saved.get("fog_of_war", False),
         )
 
         # Bottom buttons
@@ -407,6 +413,7 @@ class CreateLobbyScreen(BaseScreen):
                 self._debug_summary_cb.handle_event(event)
                 self._headless_cb.handle_event(event)
                 self._t2_cb.handle_event(event)
+                self._fog_of_war_cb.handle_event(event)
 
                 if self._start_btn.handle_event(event):
                     self._persist_settings()
@@ -424,6 +431,7 @@ class CreateLobbyScreen(BaseScreen):
 
             self._draw()
             self.clock.tick(60)
+            music.update()
 
     # ── persistence ───────────────────────────────────────────────────────────
 
@@ -455,6 +463,7 @@ class CreateLobbyScreen(BaseScreen):
             "save_debug_summary": self._debug_summary_cb.checked,
             "headless": self._headless_cb.checked,
             "enable_t2": self._t2_cb.checked,
+            "fog_of_war": self._fog_of_war_cb.checked,
         })
 
     # ── result builder ────────────────────────────────────────────────────────
@@ -492,6 +501,7 @@ class CreateLobbyScreen(BaseScreen):
             "save_debug_summary": self._debug_summary_cb.checked,
             "headless":      self._headless_cb.checked,
             "enable_t2":     self._t2_cb.checked,
+            "fog_of_war":    self._fog_of_war_cb.checked,
             "server":        self._server,
         })
 
@@ -529,6 +539,7 @@ class CreateLobbyScreen(BaseScreen):
             "metal_spots":   self._sl_metal_spots.value,
             "time_limit":    self._sl_time_limit.value,
             "enable_t2":     self._t2_cb.checked,
+            "fog_of_war":    self._fog_of_war_cb.checked,
         }
 
         client.send_start_game(config)
@@ -615,6 +626,7 @@ class CreateLobbyScreen(BaseScreen):
         self._debug_summary_cb.draw(self.screen)
         self._headless_cb.draw(self.screen)
         self._t2_cb.draw(self.screen)
+        self._fog_of_war_cb.draw(self.screen)
 
         # ── Start button ──────────────────────────────────────────────────────
         self._start_btn.draw(self.screen)

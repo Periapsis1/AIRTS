@@ -104,6 +104,7 @@ class DedicatedServer:
         metal_spots: int = config.get("metal_spots", 0)
         time_limit: int = config.get("time_limit", 0)
         enable_t2: bool = config.get("enable_t2", self._enable_t2_default)
+        fog_of_war: bool = config.get("fog_of_war", False)
         max_ticks = time_limit * 60 * 60 if time_limit > 0 else self._max_ticks_default
 
         # Build player_ai and player_team from config
@@ -152,6 +153,7 @@ class DedicatedServer:
             is_multiplayer=True,
             selectable_teams=set(),
             enable_t2=enable_t2,
+            fog_of_war=fog_of_war,
             server_mode=True,
         )
         self._game = game
@@ -174,6 +176,7 @@ class DedicatedServer:
         host.send_game_start(
             game.entities, width, height,
             enable_t2=enable_t2,
+            fog_of_war=fog_of_war,
             player_team=dict(game.player_team),
             player_names=player_names,
         )

@@ -217,6 +217,7 @@ class ReplayPlaybackScreen(BaseScreen):
 
         # Camera & world surface for zoom/pan (viewport = game area)
         self._world_surface = pygame.Surface((mw, mh))
+        self._bg_surface, self._bg_tile = self._build_background(mw, mh)
         self._camera = Camera(self._game_area.w, self._game_area.h,
                               mw, mh, max_zoom=CAMERA_MAX_ZOOM)
         self._mid_dragging = False
@@ -376,8 +377,10 @@ class ReplayPlaybackScreen(BaseScreen):
             self._play_btn.icon = "play"
 
     def run(self) -> ScreenResult:
+        from systems import music
         while True:
             dt = self.clock.tick(60) / 1000.0
+            music.update()
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -556,8 +559,8 @@ class ReplayPlaybackScreen(BaseScreen):
         mh = self._reader.map_height
         ws = self._world_surface
 
-        # Black game area on world surface
-        ws.fill((0, 0, 0))
+        # Tiled space background
+        ws.blit(self._bg_surface, (0, 0))
 
         # Draw obstacles (static) — no gy offset on world surface
         for obs in self._reader.obstacles:
@@ -643,8 +646,9 @@ class ReplayPlaybackScreen(BaseScreen):
         pygame.draw.line(self.screen, (40, 40, 55), (0, TOP_BAR_HEIGHT - 1),
                          (sw, TOP_BAR_HEIGHT - 1))
 
-        # Game area: pink background then camera projection
-        pygame.draw.rect(self.screen, (200, 100, 150), ga)
+        # Game area: tiled background (covers beyond-map dead space) then camera projection
+        from core.background import blit_screen_background
+        blit_screen_background(self.screen, ga, self._camera, self._bg_tile)
         self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
 
         # Bottom bar
@@ -1112,8 +1116,14 @@ class ReplayPlaybackScreen(BaseScreen):
             ws.blit(temp2, (int(ex) - atk_r, int(ey) - atk_r))
             return
 
-        # ME: no weapon, skip
+        # ME: only watch tower has a range circle
         if t == "ME":
+            if ent.get("us") == "watch_tower":
+                from config.settings import WATCH_TOWER_LASER_RANGE
+                atk_r = int(WATCH_TOWER_LASER_RANGE)
+                temp = pygame.Surface((atk_r * 2, atk_r * 2), pygame.SRCALPHA)
+                pygame.draw.circle(temp, RANGE_COLOR, (atk_r, atk_r), atk_r, 1)
+                ws.blit(temp, (int(ex) - atk_r, int(ey) - atk_r))
             return
 
         # Unit: draw FOV arc
@@ -1150,6 +1160,11 @@ class ReplayPlaybackScreen(BaseScreen):
         shifted = [(px + ox, py + oy) for px, py in points]
         pygame.draw.lines(temp, color, False, shifted, 1)
         ws.blit(temp, (ex - temp_size // 2, ey - temp_size // 2))
+
+    @staticmethod
+    def _build_background(width: int, height: int) -> tuple[pygame.Surface, pygame.Surface]:
+        from core.background import build_background
+        return build_background(width, height)
 
     # -- fog of war ---------------------------------------------------------
 

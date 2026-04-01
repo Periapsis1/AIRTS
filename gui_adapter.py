@@ -105,6 +105,18 @@ def _make_proxy(d: dict, selected_ids: set[int]) -> _EntityProxy:
         p.is_fully_reinforced = d.get("ifr", False)
         _meb = d.get("meb", 0)
 
+        if p.upgrade_state == "watch_tower":
+            from config.settings import (WATCH_TOWER_LASER_DAMAGE,
+                                         WATCH_TOWER_LASER_RANGE,
+                                         WATCH_TOWER_LASER_COOLDOWN)
+            p.weapon = SimpleNamespace(
+                name="Laser",
+                damage=WATCH_TOWER_LASER_DAMAGE,
+                range=WATCH_TOWER_LASER_RANGE,
+                cooldown=WATCH_TOWER_LASER_COOLDOWN,
+                charge_time=0,
+            )
+
         def get_spawn_bonus(self=p, _b=_meb):
             return _b / 100.0
         p.get_spawn_bonus = get_spawn_bonus

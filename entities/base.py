@@ -81,8 +81,8 @@ class Damageable:
         if self.hp >= self.max_hp:
             return
         ratio = self.hp / self.max_hp
-        bx = cx - bar_w / 2
-        by = cy - offset_y
+        bx = int(round(cx - bar_w / 2))
+        by = int(round(cy - offset_y))
         pygame.draw.rect(surface, HEALTH_BAR_BG, (bx, by, bar_w, HEALTH_BAR_HEIGHT))
         fg = HEALTH_BAR_FG if ratio > 0.35 else HEALTH_BAR_LOW
-        pygame.draw.rect(surface, fg, (bx, by, bar_w * ratio, HEALTH_BAR_HEIGHT))
+        pygame.draw.rect(surface, fg, (bx, by, int(bar_w * ratio), HEALTH_BAR_HEIGHT))
