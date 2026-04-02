@@ -369,7 +369,8 @@ class App:
         }
 
         # Create game with NO AI — both teams are human
-        # selectable_teams={1} ensures host can only select/control team 1
+        # selectable_teams restricts host to only their own team's units
+        host_team = mp_player_team.get(1, 1)
         game = Game(
             width=width,
             height=height,
@@ -383,15 +384,22 @@ class App:
             screen_width=screen_w,
             screen_height=screen_h,
             is_multiplayer=True,
-            selectable_teams={1},
+            selectable_teams={host_team},
         )
 
         # Rebind the host's command queue to the game's actual queue
         host_obj._command_queue = game._command_queue
         host_obj._host_name = host_name
 
-        # Send game_start to client
-        host_obj.send_game_start(game.entities, width, height)
+        # Build player names for the game_start message
+        player_names = {1: host_name, 2: client_name}
+
+        # Send game_start to client with player_team so client knows its team
+        host_obj.send_game_start(
+            game.entities, width, height,
+            player_team=mp_player_team,
+            player_names=player_names,
+        )
 
         # Wrap the game's step to inject remote commands and broadcast state
         original_step = game.step

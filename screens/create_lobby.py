@@ -61,6 +61,8 @@ _PANEL_BORDER = (42, 42, 62)
 _HDR_COLOR    = (160, 160, 185)   # subdued column-header colour
 _DIVIDER_CLR  = (35, 35, 52)
 
+_ONLINE_COLOR = (100, 255, 140)  # green tint for connected players
+
 _TEAM_CHOICES = [(str(i), f"Team {i}") for i in range(1, 9)]
 
 # Vertical layout constants (relative to top of screen)
@@ -95,6 +97,7 @@ class _Slot:
     remove_btn: Button
     color_idx: int = 0
     name_input: TextInput | None = None  # only for human players
+    online_pid: int = 0  # server-assigned player_id for connected online players
 
 
 class CreateLobbyScreen(BaseScreen):
@@ -136,6 +139,17 @@ class CreateLobbyScreen(BaseScreen):
 
         self._slots: list[_Slot] = []
         self._load_slots(saved)
+
+        # In online mode, replace slots with online-appropriate layout
+        if self._online_client:
+            self._slots.clear()
+            local_pid = self._online_client.player_id
+            local_name = self._online_client._player_name
+            slot = self._make_slot(1, "human", 1, 0, name=local_name)
+            slot.online_pid = local_pid
+            self._slots.append(slot)
+            first_ai = self._ai_choices[0][0] if self._ai_choices else "human"
+            self._slots.append(self._make_slot(2, first_ai, 2, 1))
 
         # "+ Add Player" button
         self._add_btn = Button(self._label_x, 0, 150, 28, "+ Add Player",
@@ -315,10 +329,68 @@ class CreateLobbyScreen(BaseScreen):
     def _remove_slot(self, slot: _Slot):
         if len(self._slots) <= _MIN_SLOTS:
             return
+        if slot.online_pid:
+            return  # cannot remove connected online players
         self._slots.remove(slot)
         for i, s in enumerate(self._slots):
             s.pid = i + 1
         self._rebuild_slot_positions()
+
+    def _sync_online_slots(self):
+        """Add/remove slots as online players connect/disconnect."""
+        if not self._online_client:
+            return
+        lobby = self._online_client.lobby_status
+        if not lobby:
+            return
+
+        players = lobby.get("players", {})
+        connected: dict[int, str] = {}
+        for pid_str, info in players.items():
+            pid = int(pid_str) if isinstance(pid_str, str) else pid_str
+            connected[pid] = info.get("name", "Player")
+
+        local_pid = self._online_client.player_id
+        if local_pid not in connected:
+            connected[local_pid] = self._online_client._player_name
+
+        current_online = {s.online_pid for s in self._slots if s.online_pid}
+        changed = False
+
+        # Add new connected players as locked Human slots
+        for pid in sorted(connected.keys()):
+            if pid not in current_online:
+                cidx = self._next_free_color()
+                name = connected[pid]
+                # Insert after existing online slots, before AI slots
+                insert_idx = sum(1 for s in self._slots if s.online_pid > 0)
+                slot = self._make_slot(
+                    insert_idx + 1, "human", 2, insert_idx,
+                    color_idx=cidx, name=name,
+                )
+                slot.online_pid = pid
+                self._slots.insert(insert_idx, slot)
+                changed = True
+
+        # Remove disconnected players (never remove local player)
+        for slot in list(self._slots):
+            if (slot.online_pid
+                    and slot.online_pid != local_pid
+                    and slot.online_pid not in connected):
+                self._slots.remove(slot)
+                changed = True
+
+        # Keep names in sync
+        for slot in self._slots:
+            if slot.online_pid and slot.online_pid in connected:
+                name = connected[slot.online_pid]
+                if slot.name_input and slot.name_input.text != name:
+                    slot.name_input.text = name
+
+        if changed:
+            for i, s in enumerate(self._slots):
+                s.pid = i + 1
+            self._rebuild_slot_positions()
 
     # ── event loop ───────────────────────────────────────────────────────────
 
@@ -343,9 +415,11 @@ class CreateLobbyScreen(BaseScreen):
                         self._online_client = None
                     return ScreenResult("main_menu")
 
-                # Per-slot name inputs (human players only)
+                # Per-slot name inputs (human players only, skip online slots)
                 name_handled = False
                 for slot in self._slots:
+                    if slot.online_pid:
+                        continue  # online slot names are locked
                     if slot.ai_dd.value == "human" and slot.name_input:
                         if slot.name_input.handle_event(event):
                             name_handled = True
@@ -357,14 +431,16 @@ class CreateLobbyScreen(BaseScreen):
                 dd_changed = False
                 any_open = self._any_dd_open()
                 for slot in self._slots:
-                    if slot.ai_dd.handle_event(event):
-                        for s in self._slots:
-                            if s is not slot:
-                                s.ai_dd.open = False
-                                s.team_dd.open = False
-                        self._rebuild_slot_positions()
-                        dd_changed = True
-                        break
+                    # Skip AI dropdown for online slots (locked to Human)
+                    if not slot.online_pid:
+                        if slot.ai_dd.handle_event(event):
+                            for s in self._slots:
+                                if s is not slot:
+                                    s.ai_dd.open = False
+                                    s.team_dd.open = False
+                            self._rebuild_slot_positions()
+                            dd_changed = True
+                            break
                     if slot.team_dd.handle_event(event):
                         for s in self._slots:
                             if s is not slot:
@@ -422,12 +498,14 @@ class CreateLobbyScreen(BaseScreen):
                     else:
                         return self._build_result()
 
-            # Online mode: check if server started the game
-            if self._online_client is not None and self._online_client.game_started:
-                return ScreenResult("mp_client_game", data={
-                    "client": self._online_client,
-                    "from_online_lobby": True,
-                })
+            # Online mode: sync connected players and check game start
+            if self._online_client is not None:
+                self._sync_online_slots()
+                if self._online_client.game_started:
+                    return ScreenResult("mp_client_game", data={
+                        "client": self._online_client,
+                        "from_online_lobby": True,
+                    })
 
             self._draw()
             self.clock.tick(60)
@@ -511,22 +589,33 @@ class CreateLobbyScreen(BaseScreen):
         player_ai_ids: dict[int, str] = {}
         player_team:   dict[int, int] = {}
 
-        # In online mode, the human player gets the client's assigned player_id.
-        # Bot slots get sequential IDs after that.
         client = self._online_client
-        human_pid = client.player_id if client else 1
-        player_team[human_pid] = int(self._slots[0].team_dd.value) if self._slots else 1
 
-        next_pid = max(human_pid, 1) + 1
-        for i, slot in enumerate(self._slots):
-            if i == 0:
-                # First slot is the local human (already mapped above)
-                continue
-            pid = next_pid
+        # Step 1: Add all connected players (from online slots) as humans
+        # Each online slot has the real server-assigned player_id.
+        for slot in self._slots:
+            if slot.online_pid:
+                player_team[slot.online_pid] = int(slot.team_dd.value)
+
+        # Ensure local player is always included
+        if client and client.player_id not in player_team:
+            first_team = int(self._slots[0].team_dd.value) if self._slots else 1
+            player_team[client.player_id] = first_team
+
+        # Step 2: Add AI slots with non-conflicting IDs
+        used_pids = set(player_team.keys())
+        next_pid = max(used_pids | {0}) + 1
+        for slot in self._slots:
+            if slot.online_pid:
+                continue  # already handled above
+            if slot.ai_dd.value == "human":
+                continue  # extra human slots with no connected player — skip
+            while next_pid in used_pids:
+                next_pid += 1
+            player_team[next_pid] = int(slot.team_dd.value)
+            player_ai_ids[next_pid] = slot.ai_dd.value
+            used_pids.add(next_pid)
             next_pid += 1
-            player_team[pid] = int(slot.team_dd.value)
-            if slot.ai_dd.value != "human":
-                player_ai_ids[pid] = slot.ai_dd.value
 
         map_w, map_h = _MAP_SIZES[self._map_size.value]
 
@@ -574,6 +663,14 @@ class CreateLobbyScreen(BaseScreen):
         players_hdr = font.render("Players", True, CONTENT_TEXT)
         self.screen.blit(players_hdr, (self._lp_x + 14, _PANEL_HDR_Y))
 
+        # Connected player count (online mode)
+        if self._online_client:
+            n_online = sum(1 for s in self._slots if s.online_pid)
+            count_surf = tiny.render(f"{n_online} connected", True, _ONLINE_COLOR)
+            self.screen.blit(count_surf,
+                             (self._lp_x + 14 + players_hdr.get_width() + 10,
+                              _PANEL_HDR_Y + 4))
+
         # Column headers
         team_hdr = tiny.render("Team", True, _HDR_COLOR)
         self.screen.blit(team_hdr, (self._team_dd_x + 14, _COL_HDR_Y))
@@ -597,13 +694,20 @@ class CreateLobbyScreen(BaseScreen):
             self.screen.blit(lbl, (self._label_x + 16,
                                    y + (DD_HEIGHT - lbl.get_height()) // 2))
 
-            # Remove button (only when more than min slots)
-            if len(self._slots) > _MIN_SLOTS:
-                slot.remove_btn.draw(self.screen)
-
-            # Per-human name input (inline, same row after × button)
-            if slot.ai_dd.value == "human" and slot.name_input:
-                slot.name_input.draw(self.screen)
+            if slot.online_pid:
+                # Online player: show name label instead of AI dropdown
+                name = slot.name_input.text if slot.name_input else "Player"
+                name_surf = small.render(name, True, _ONLINE_COLOR)
+                self.screen.blit(name_surf,
+                                 (self._ai_dd_x + 4,
+                                  y + (DD_HEIGHT - name_surf.get_height()) // 2))
+            else:
+                # Regular slot: show remove button and name input
+                if len(self._slots) > _MIN_SLOTS:
+                    slot.remove_btn.draw(self.screen)
+                # Per-human name input (inline, same row after x button)
+                if slot.ai_dd.value == "human" and slot.name_input:
+                    slot.name_input.draw(self.screen)
 
 
         # Add player button (inline after last slot)
@@ -632,7 +736,11 @@ class CreateLobbyScreen(BaseScreen):
         self._start_btn.draw(self.screen)
 
         # ── overlays (drawn last for z-order) ─────────────────────────────────
-        all_dds = [dd for s in self._slots for dd in (s.ai_dd, s.team_dd)]
+        all_dds = []
+        for s in self._slots:
+            if not s.online_pid:
+                all_dds.append(s.ai_dd)  # skip AI dropdown for online slots
+            all_dds.append(s.team_dd)
         for dd in sorted(all_dds, key=lambda d: d.open):
             dd.draw(self.screen)
 
