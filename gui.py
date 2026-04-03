@@ -281,9 +281,11 @@ def _draw_minimap(screen: pygame.Surface, r: pygame.Rect,
             s = max(2, int(5 * scale))
             pts = [(mx, my - s), (mx - s, my + s), (mx + s, my + s)]
             color = PLAYER_COLORS[(getattr(e, "team", 1) - 1) % len(PLAYER_COLORS)]
+            if getattr(e, "ghost", False):
+                color = tuple(c // 3 for c in color)
             pygame.draw.polygon(screen, color, pts)
 
-    # Units (small circles)
+    # Units (small circles) — ghosts are buildings only, so units are never ghosts
     for e in entities:
         if _is_unit(e) and getattr(e, "alive", True):
             mx, my = w2m(e.x, e.y)
@@ -301,6 +303,8 @@ def _draw_minimap(screen: pygame.Surface, r: pygame.Rect,
                 pts.append((mx + int(s * math.cos(a)),
                             my + int(s * math.sin(a))))
             color = PLAYER_COLORS[(getattr(e, "player_id", 1) - 1) % len(PLAYER_COLORS)]
+            if getattr(e, "ghost", False):
+                color = tuple(c // 3 for c in color)
             pygame.draw.polygon(screen, color, pts)
 
     # Camera viewport rectangle

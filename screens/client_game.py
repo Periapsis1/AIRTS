@@ -792,7 +792,7 @@ class ClientGameScreen(BaseScreen):
             "winner": self._winner,
             "human_teams": {self._my_team},
             "stats": stats,
-            "replay_filepath": "",
+            "replay_filepath": None,
             "team_names": team_names,
             "player_names": dict(self._player_names),
             "player_team": dict(self._client.player_team) if self._client.player_team else {},
@@ -1047,10 +1047,13 @@ class ClientGameScreen(BaseScreen):
 
         for ent in entities:
             t = ent.get("t")
+            is_ghost = ent.get("ghost", False)
             if t == "MS":
                 self._draw_metal_spot(ent)
             elif t == "ME":
-                if _los is not None:
+                if is_ghost:
+                    self._draw_metal_extractor_faded(ent)
+                elif _los is not None:
                     ex, ey = ent.get("x", 0), ent.get("y", 0)
                     if self._is_visible(ex, ey, _los):
                         self._draw_metal_extractor(ent)
@@ -1060,10 +1063,13 @@ class ClientGameScreen(BaseScreen):
                     self._draw_metal_extractor(ent)
             elif t == "CC":
                 if not is_warp_in:
-                    if _los is not None and not self._is_visible(
+                    if is_ghost:
+                        self._draw_command_center_faded(ent)
+                    elif _los is not None and not self._is_visible(
                             ent.get("x", 0), ent.get("y", 0), _los):
-                        continue
-                    self._draw_command_center(ent)
+                        self._draw_command_center_faded(ent)
+                    else:
+                        self._draw_command_center(ent)
             elif t == "U":
                 if not is_warp_in:
                     if _los is not None and not self._is_visible(
@@ -1704,13 +1710,20 @@ class ClientGameScreen(BaseScreen):
         return build_background(width, height)
 
     def _collect_los_circles(self, entities: list[dict]) -> list[tuple[int, int, int]]:
-        """Collect LOS circles from own-team entities."""
+        """Collect LOS circles from own-team entities for the fog overlay.
+
+        Always computed client-side from the received entity positions
+        (including extrapolation) so the fog updates smoothly at 60 FPS
+        rather than at the server broadcast rate (~10 FPS).
+        """
         circles: list[tuple[int, int, int]] = []
         for ent in entities:
             t = ent.get("t")
             if t not in ("U", "CC", "ME"):
                 continue
             if ent.get("tm") != self._my_team:
+                continue
+            if ent.get("ghost", False):
                 continue
             ut = ent.get("ut", "soldier")
             stats = UNIT_TYPES.get(ut, {})
@@ -1739,6 +1752,19 @@ class ClientGameScreen(BaseScreen):
         saved_ws = self._world_surface
         self._world_surface = temp
         self._draw_metal_extractor(dict(ent, x=margin, y=margin))
+        self._world_surface = saved_ws
+        temp.set_alpha(alpha)
+        saved_ws.blit(temp, (int(x - margin), int(y - margin)))
+
+    def _draw_command_center_faded(self, ent: dict, alpha: int = 90) -> None:
+        """Draw a command center at reduced opacity (ghost / seen through fog)."""
+        x, y = ent.get("x", 0), ent.get("y", 0)
+        margin = 40
+        size = margin * 2
+        temp = pygame.Surface((size, size), pygame.SRCALPHA)
+        saved_ws = self._world_surface
+        self._world_surface = temp
+        self._draw_command_center(dict(ent, x=margin, y=margin))
         self._world_surface = saved_ws
         temp.set_alpha(alpha)
         saved_ws.blit(temp, (int(x - margin), int(y - margin)))

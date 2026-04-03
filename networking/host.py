@@ -22,6 +22,7 @@ from networking.protocol import send_message, recv_message, DEFAULT_PORT
 from systems.commands import GameCommand, CommandQueue
 from systems.replay import (
     _entity_visual, _laser_visual, _obstacle_visual, _splash_visual,
+    _ghost_visual, _metal_spot_visual_filtered,
     RECORD_INTERVAL,
 )
 
@@ -74,6 +75,7 @@ class GameHost:
         else:
             self._next_player_id = 2 if max_players == 1 else 1  # LAN: client=2; dedicated: start at 1
         self._first_player_id = self._next_player_id
+        self._freed_player_ids: list[int] = []  # reusable IDs from disconnected clients
 
         self._running = True
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -211,48 +213,122 @@ class GameHost:
         winner: int,
         splash_effects: list | None = None,
         sound_events: list[str] | None = None,
+        team_visibility: dict | None = None,
+        player_team: dict[int, int] | None = None,
+        metal_spots: list | None = None,
     ) -> None:
-        """Build a visual state frame and queue it for sending (every broadcast_interval)."""
+        """Build a visual state frame and queue it for sending (every broadcast_interval).
+
+        When *team_visibility* is provided (fog of war enabled), each client
+        receives only the entities visible to their team, plus ghost buildings
+        and server-computed LOS circles for the fog overlay.
+        """
         if sound_events:
             self._pending_sounds.extend(sound_events)
         if tick % self._broadcast_interval != 0:
             return
-        ent_visuals = []
-        for e in entities:
-            vd = _entity_visual(e)
-            if vd is not None:
-                ent_visuals.append(vd)
+
+        # Common data shared across all frames
         lf_list = [_laser_visual(lf) for lf in laser_flashes]
-        frame: dict[str, Any] = {
-            "msg": "state",
-            "tick": tick,
-            "entities": ent_visuals,
-            "lasers": lf_list,
-            "winner": winner,
-        }
-        if splash_effects:
-            frame["splashes"] = [_splash_visual(s) for s in splash_effects]
-        if self._pending_sounds:
-            frame["sounds"] = self._pending_sounds
+        splash_list = [_splash_visual(s) for s in splash_effects] if splash_effects else None
+        sounds = self._pending_sounds if self._pending_sounds else None
+        if sounds:
             self._pending_sounds = []
-        # Send to all connected clients
-        with self._clients_lock:
-            for c in self._clients.values():
-                if c.connected.is_set():
-                    # Drop old stale STATE frames — keep only the latest.
-                    # Preserve non-state messages (game_start, game_over, etc.)
-                    # so they are never silently discarded.
-                    preserved = []
-                    try:
-                        while True:
-                            old = c.outbound.get_nowait()
-                            if old.get("msg") != "state":
-                                preserved.append(old)
-                    except queue.Empty:
-                        pass
-                    for item in preserved:
-                        c.outbound.put(item)
-                    c.outbound.put(frame)
+
+        if team_visibility and player_team:
+            # -- Per-team filtered frames (fog of war) --
+            from entities.metal_spot import MetalSpot
+            team_frames: dict[int, dict] = {}
+
+            for team_id, vis in team_visibility.items():
+                # Build filtered entity visuals for this team
+                ent_visuals = []
+                seen_ms_ids: set[int] = set()
+
+                for e in entities:
+                    vd = _entity_visual(e)
+                    if vd is None:
+                        continue
+                    if e.entity_id in vis.visible_entity_ids:
+                        ent_visuals.append(vd)
+                        if isinstance(e, MetalSpot):
+                            seen_ms_ids.add(e.entity_id)
+
+                # Add MetalSpots not in LOS with stripped capture info
+                if metal_spots:
+                    for ms in metal_spots:
+                        if ms.entity_id not in seen_ms_ids:
+                            last_owner = vis.metal_spot_memory.get(ms.entity_id)
+                            ent_visuals.append(
+                                _metal_spot_visual_filtered(ms, last_owner)
+                            )
+
+                # Append ghost buildings (not currently visible)
+                for gid, ghost in vis.building_ghosts.items():
+                    if gid not in vis.visible_entity_ids:
+                        ent_visuals.append(_ghost_visual(ghost))
+
+                # Build the frame
+                frame: dict[str, Any] = {
+                    "msg": "state",
+                    "tick": tick,
+                    "entities": ent_visuals,
+                    "lasers": lf_list,
+                    "winner": winner,
+                }
+                if splash_list:
+                    frame["splashes"] = splash_list
+                if sounds:
+                    frame["sounds"] = sounds
+                team_frames[team_id] = frame
+
+            # Queue per-client based on their team
+            with self._clients_lock:
+                for c in self._clients.values():
+                    if not c.connected.is_set():
+                        continue
+                    c_team = player_team.get(c.player_id)
+                    frame = team_frames.get(c_team)
+                    if frame is None:
+                        continue
+                    self._queue_frame(c, frame)
+        else:
+            # -- Unfiltered broadcast (fog disabled) --
+            ent_visuals = []
+            for e in entities:
+                vd = _entity_visual(e)
+                if vd is not None:
+                    ent_visuals.append(vd)
+            frame = {
+                "msg": "state",
+                "tick": tick,
+                "entities": ent_visuals,
+                "lasers": lf_list,
+                "winner": winner,
+            }
+            if splash_list:
+                frame["splashes"] = splash_list
+            if sounds:
+                frame["sounds"] = sounds
+            with self._clients_lock:
+                for c in self._clients.values():
+                    if c.connected.is_set():
+                        self._queue_frame(c, frame)
+
+    @staticmethod
+    def _queue_frame(client: ClientConnection, frame: dict) -> None:
+        """Queue a state frame to a client, dropping stale STATE frames."""
+        preserved = []
+        try:
+            while True:
+                old = client.outbound.get_nowait()
+                if old.get("msg") != "state":
+                    preserved.append(old)
+        except queue.Empty:
+            pass
+        for item in preserved:
+            client.outbound.put(item)
+        client.outbound.put(frame)
 
     def send_game_start(
         self,
@@ -313,6 +389,7 @@ class GameHost:
         """
         if clear_clients:
             self._next_player_id = self._first_player_id
+            self._freed_player_ids.clear()
             with self._clients_lock:
                 self._clients.clear()
         else:
@@ -376,7 +453,7 @@ class GameHost:
         writer: asyncio.StreamWriter,
     ) -> None:
         """Handle a new client connection."""
-        # Determine player_id for this client
+        # Determine player_id for this client (reuse freed IDs first)
         with self._clients_lock:
             if len(self._clients) >= self._max_players:
                 # Full — reject
@@ -387,8 +464,11 @@ class GameHost:
                 writer.close()
                 await writer.wait_closed()
                 return
-            player_id = self._next_player_id
-            self._next_player_id += 1
+            if self._freed_player_ids:
+                player_id = self._freed_player_ids.pop(0)
+            else:
+                player_id = self._next_player_id
+                self._next_player_id += 1
             conn = ClientConnection(player_id=player_id, reader=reader, writer=writer)
             self._clients[player_id] = conn
 
@@ -413,11 +493,20 @@ class GameHost:
             await self._broadcast_lobby_status()
             self.broadcast_lobby_settings()
 
-            # Run send/recv concurrently
+            # Run send/recv concurrently — cancel the other when one exits
             recv_task = asyncio.ensure_future(self._recv_loop(reader, player_id))
             send_task = asyncio.ensure_future(self._send_loop(writer, conn.outbound))
 
-            await asyncio.gather(recv_task, send_task)
+            done, pending = await asyncio.wait(
+                [recv_task, send_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
             pass
@@ -428,6 +517,7 @@ class GameHost:
             conn.ready.clear()
             with self._clients_lock:
                 self._clients.pop(player_id, None)
+                self._freed_player_ids.append(player_id)
             writer.close()
             # Notify remaining clients about the disconnection
             try:
@@ -458,6 +548,15 @@ class GameHost:
                     pass
             elif msg_type == "start_game":
                 self._start_game_queue.put(msg.get("config", {}))
+            elif msg_type == "lobby_settings":
+                # Relay lobby settings to all OTHER clients (not back to sender)
+                settings = {k: v for k, v in msg.items() if k != "msg"}
+                self._lobby_settings = settings
+                relay_msg = {"msg": "lobby_settings", **settings}
+                with self._clients_lock:
+                    for pid, c in self._clients.items():
+                        if pid != player_id and c.connected.is_set():
+                            c.outbound.put(relay_msg)
 
     async def _send_loop(self, writer: asyncio.StreamWriter, outbound: queue.Queue) -> None:
         """Send queued state frames to a specific client."""

@@ -224,6 +224,9 @@ class InternalServer:
                 tick, entities, laser_flashes, winner,
                 splash_effects=game.splash_effects,
                 sound_events=sound_events,
+                team_visibility=game._team_vision if game._fog_of_war else None,
+                player_team=dict(game.player_team) if game._fog_of_war else None,
+                metal_spots=game.metal_spots if game._fog_of_war else None,
             )
 
         try:

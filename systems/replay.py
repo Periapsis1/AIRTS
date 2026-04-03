@@ -165,6 +165,45 @@ def _entity_visual(e: Entity) -> dict | None:
     return None
 
 
+def _ghost_visual(ghost) -> dict:
+    """Build a minimal visual dict for a ghost building.
+
+    *ghost* is a :class:`systems.visibility.GhostBuilding`.
+    """
+    t = "CC" if ghost.unit_type == "command_center" else "ME"
+    d: dict[str, Any] = {
+        "id": ghost.entity_id,
+        "t": t,
+        "x": _q1(ghost.x),
+        "y": _q1(ghost.y),
+        "c": _color_list(ghost.color),
+        "tm": ghost.team,
+        "r": ghost.radius,
+        "ut": ghost.unit_type,
+        "ghost": True,
+    }
+    if ghost.points is not None:
+        d["pts"] = [list(p) for p in ghost.points]
+    return d
+
+
+def _metal_spot_visual_filtered(ms, last_known_owner: int | None) -> dict:
+    """Build a MetalSpot visual with capture progress stripped (fogged).
+
+    Shows the spot at its position but substitutes the *last_known_owner*
+    and clears capture progress so the client cannot see live capture state.
+    """
+    return {
+        "id": ms.entity_id,
+        "t": _TYPE_CODE["MetalSpot"],
+        "x": _q1(ms.x),
+        "y": _q1(ms.y),
+        "r": ms.radius,
+        "ow": last_known_owner,
+        "cp": {},
+    }
+
+
 def _splash_visual(s: SplashEffect) -> dict:
     """Compact dict representation of a splash effect."""
     progress = 1.0 - (s.ttl / s._init_ttl) if s._init_ttl > 0 else 1.0

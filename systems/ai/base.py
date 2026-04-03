@@ -97,24 +97,51 @@ class BaseAI(ABC):
             key=lambda u: u.entity_id,
         )
 
+    @property
+    def _fog_visible_ids(self) -> set[int] | None:
+        """Visible enemy entity IDs for this team, or *None* when fog is off."""
+        if not self._game._fog_of_war:
+            return None
+        return self._game._visible_enemies_per_team.get(self._team, set())
+
     def get_enemy_units(self) -> list[Unit]:
+        vis = self._fog_visible_ids
         return sorted(
-            [u for u in self._units if u.alive and u.team != self._team],
+            [u for u in self._units if u.alive and u.team != self._team
+             and (vis is None or u.entity_id in vis)],
             key=lambda u: u.entity_id,
         )
 
     def get_enemy_ccs(self) -> list[CommandCenter]:
-        """Return living command centers belonging to other teams."""
+        """Return living command centers belonging to other teams (fog-filtered)."""
+        vis = self._fog_visible_ids
         return [e for e in self._entities
-                if isinstance(e, CommandCenter) and e.alive and e.team != self._team]
+                if isinstance(e, CommandCenter) and e.alive and e.team != self._team
+                and (vis is None or e.entity_id in vis)]
 
     def get_enemy_direction(self) -> tuple[float, float]:
-        """Unit vector from own CC toward average enemy CC position."""
+        """Unit vector from own CC toward average enemy CC position.
+
+        Uses visible enemy CCs; falls back to ghost CC positions when fog
+        hides all enemy CCs so the AI still has a rough heading.
+        """
         cc = self.get_cc()
         if cc is None:
             return (1.0, 0.0)
         enemy_ccs = self.get_enemy_ccs()
         if not enemy_ccs:
+            # Fall back to ghost building positions if fog hides all enemy CCs
+            if self._game._fog_of_war:
+                vis_state = self._game._team_vision.get(self._team)
+                if vis_state:
+                    ghost_ccs = [g for g in vis_state.building_ghosts.values()
+                                 if g.unit_type == "command_center"]
+                    if ghost_ccs:
+                        avg_x = sum(g.x for g in ghost_ccs) / len(ghost_ccs)
+                        avg_y = sum(g.y for g in ghost_ccs) / len(ghost_ccs)
+                        dx, dy = avg_x - cc.x, avg_y - cc.y
+                        dist = math.hypot(dx, dy) or 1.0
+                        return (dx / dist, dy / dist)
             return (1.0, 0.0)
         avg_x = sum(ec.x for ec in enemy_ccs) / len(enemy_ccs)
         avg_y = sum(ec.y for ec in enemy_ccs) / len(enemy_ccs)
@@ -159,8 +186,10 @@ class BaseAI(ABC):
         )
 
     def get_metal_extractors(self) -> list[MetalExtractor]:
+        vis = self._fog_visible_ids
         return sorted(
-            [e for e in self._entities if isinstance(e, MetalExtractor) and e.alive],
+            [e for e in self._entities if isinstance(e, MetalExtractor) and e.alive
+             and (e.team == self._team or vis is None or e.entity_id in vis)],
             key=lambda e: e.entity_id,
         )
 

@@ -140,9 +140,6 @@ class App:
                 returning_client=returning_client,
             ).run()
 
-        elif name == "mp_host_game":
-            return self._run_mp_host_game(data)
-
         elif name == "mp_client_game":
             return self._run_mp_client_game(data)
 
@@ -314,7 +311,7 @@ class App:
                 "winner": srv_result.get("winner", result.data.get("winner", 0)),
                 "human_teams": srv_result.get("human_teams", result.data.get("human_teams", set())),
                 "stats": srv_result.get("stats"),
-                "replay_filepath": srv_result.get("replay_filepath", ""),
+                "replay_filepath": srv_result.get("replay_filepath") or result.data.get("replay_filepath"),
                 "team_names": srv_result.get("team_names", result.data.get("team_names", {})),
                 "player_names": srv_result.get("player_names", result.data.get("player_names", {})),
                 "player_team": srv_result.get("player_team", result.data.get("player_team", {})),
@@ -340,108 +337,6 @@ class App:
             server.reset()
 
         return ScreenResult("results", data=merged)
-
-    def _run_mp_host_game(self, data: dict) -> ScreenResult:
-        """Run a multiplayer game as the authoritative host."""
-        from game import Game
-        from systems.map_generator import DefaultMapGenerator
-        from networking.host import GameHost
-
-        width = data.get("width", 800)
-        height = data.get("height", 600)
-        obs = data.get("obstacle_count", (4, 8))
-        host_name = data.get("host_name", "Host")
-        client_name = data.get("client_name", "Client")
-        host_obj: GameHost = data["host"]
-
-        screen_w = self._screen.get_width()
-        screen_h = self._screen.get_height()
-
-        # Build player_team from lobby data or default to 1v1
-        mp_player_team = data.get("player_team", {1: 1, 2: 2})
-
-        replay_config = {
-            "player_ai_ids": {},
-            "player_ai_names": {},
-            "player_team": mp_player_team,
-            "obstacle_count": list(obs),
-            "player_name": host_name,
-        }
-
-        # Create game with NO AI — both teams are human
-        # selectable_teams restricts host to only their own team's units
-        host_team = mp_player_team.get(1, 1)
-        game = Game(
-            width=width,
-            height=height,
-            map_generator=DefaultMapGenerator(obstacle_count=obs),
-            player_ai={},  # both teams human
-            player_team=mp_player_team,
-            screen=self._screen,
-            clock=self._clock,
-            replay_config=replay_config,
-            player_name=host_name,
-            screen_width=screen_w,
-            screen_height=screen_h,
-            is_multiplayer=True,
-            selectable_teams={host_team},
-        )
-
-        # Rebind the host's command queue to the game's actual queue
-        host_obj._command_queue = game._command_queue
-        host_obj._host_name = host_name
-
-        # Build player names for the game_start message
-        player_names = {1: host_name, 2: client_name}
-
-        # Send game_start to client with player_team so client knows its team
-        host_obj.send_game_start(
-            game.entities, width, height,
-            player_team=mp_player_team,
-            player_names=player_names,
-        )
-
-        # Wrap the game's step to inject remote commands and broadcast state
-        original_step = game.step
-
-        def networked_step(dt: float) -> None:
-            host_obj.inject_remote_commands()
-            original_step(dt)
-            host_obj.broadcast_state(
-                game._iteration, game.entities,
-                game.laser_flashes, game._winner,
-                splash_effects=game.splash_effects,
-            )
-
-        game.step = networked_step  # type: ignore[method-assign]
-
-        try:
-            result = game.run()
-        except Exception as exc:
-            host_obj.stop()
-            path = log_crash(exc, context="mp_host_game")
-            print(f"[AIRTS] MP host game crashed — log saved to {path}")
-            return ScreenResult("crash_notice",
-                                data={"log_path": path, "context": "mp_host_game"})
-
-        # Notify client of game over and return to lobby
-        host_obj.send_game_over(result.get("winner", 0))
-        import time
-        time.sleep(0.3)
-        host_obj.send_return_to_lobby()
-        time.sleep(0.2)
-        host_obj.reset()
-
-        return ScreenResult("results", data={
-            "winner": result.get("winner", 0),
-            "human_teams": result.get("human_teams", set()),
-            "stats": result.get("stats"),
-            "replay_filepath": result.get("replay_filepath"),
-            "team_names": {t: (host_name if pid == 1 else client_name)
-                           for pid, t in mp_player_team.items()},
-            "source_screen": "multiplayer_lobby",
-            "lobby_data": {"host": host_obj},
-        })
 
     def _run_mp_client_game(self, data: dict) -> ScreenResult:
         """Run a multiplayer game as the thin client."""

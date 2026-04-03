@@ -22,6 +22,10 @@ from systems.selection import (
 from systems.ai import BaseAI, WanderAI
 from systems.map_generator import BaseMapGenerator, DefaultMapGenerator
 from systems.capturing import capture_step
+from systems.visibility import (
+    collect_team_los, compute_team_visibility, get_visible_enemy_ids,
+    TeamVisionState,
+)
 from entities.metal_spot import MetalSpot
 from entities.metal_extractor import MetalExtractor
 from config import display as display_config
@@ -137,7 +141,6 @@ class Game:
             self.screen = pygame.Surface((1, 1))
             self._owns_pygame = False
             headless = True
-            save_replay = False
         elif screen is None:
             pygame.init()
             self.screen = pygame.display.set_mode((width, height))
@@ -174,6 +177,9 @@ class Game:
         self._save_debug_summary = save_debug_summary
         self.enable_t2 = enable_t2
         self._fog_of_war = fog_of_war
+        # Per-team vision state for server-side fog (populated in step())
+        self._team_vision: dict[int, TeamVisionState] = {}
+        self._visible_enemies_per_team: dict[int, set[int]] = {}
         self._step_timeout_ms = step_timeout_ms
         if not replay_output_dir:
             from core.paths import app_path
@@ -1019,6 +1025,33 @@ class Game:
             qf.moved_unit(u)
         self._stats.record_subsystem("tgt_qf_sync", (_perf() - _t_tgt) * 1000)
 
+        # -- Server-side fog of war: compute per-team visibility ----------------
+        _t_tgt = _perf()
+        if self._fog_of_war and self._iteration % 15 == 0:
+            new_vision: dict[int, TeamVisionState] = {}
+            new_vis_enemies: dict[int, set[int]] = {}
+            for team_id in self.all_teams:
+                los = collect_team_los(team_id, self.entities)
+                prev = self._team_vision.get(team_id)
+                vis = compute_team_visibility(
+                    team_id, los, self.entities, self.metal_spots,
+                    prev_state=prev,
+                )
+                new_vision[team_id] = vis
+                new_vis_enemies[team_id] = get_visible_enemy_ids(
+                    team_id, los, alive_units,
+                )
+            self._team_vision = new_vision
+            self._visible_enemies_per_team = new_vis_enemies
+
+            # Invalidate attack targets that left fog
+            for u in alive_units:
+                if u.attack_target is not None and u.attack_target.alive:
+                    vis_ids = self._visible_enemies_per_team.get(u.team, set())
+                    if u.attack_target.entity_id not in vis_ids:
+                        u.attack_target = None
+        self._stats.record_subsystem("tgt_visibility", (_perf() - _t_tgt) * 1000)
+
         _t_tgt = _perf()
         # Vectorized nearest-enemy and nearest-ally calculation every 15 ticks
         if self._iteration % 15 == 0 and alive_units:
@@ -1027,12 +1060,20 @@ class Game:
 
             for team_id in np.unique(teams):
                 team_mask = teams == team_id
-                enemy_mask = ~team_mask
-
                 team_indices = np.where(team_mask)[0]
-                enemy_indices = np.where(enemy_mask)[0]
-
                 team_pos = positions[team_mask]      # (N, 2)
+
+                # Build enemy mask — fog-filtered when enabled
+                if self._fog_of_war:
+                    vis_ids = self._visible_enemies_per_team.get(int(team_id), set())
+                    enemy_mask = np.array([
+                        (not tm) and alive_units[i].entity_id in vis_ids
+                        for i, tm in enumerate(team_mask)
+                    ], dtype=bool)
+                else:
+                    enemy_mask = ~team_mask
+
+                enemy_indices = np.where(enemy_mask)[0]
 
                 # Nearest enemy
                 if len(enemy_indices) > 0:
@@ -1044,6 +1085,10 @@ class Game:
                     enemy_units = [alive_units[j] for j in enemy_indices]
                     for i, ti in enumerate(team_indices):
                         alive_units[ti].nearest_enemy = enemy_units[nearest_enemy_idx[i]]
+                else:
+                    # No visible enemies — clear nearest_enemy
+                    for ti in team_indices:
+                        alive_units[ti].nearest_enemy = None
 
                 # Nearest ally (excluding self via inf on the diagonal)
                 n_team = len(team_indices)
@@ -1421,13 +1466,13 @@ class Game:
             if self._fog_of_war and self._has_human:
                 los = self._collect_los_circles()
                 for entity in self.entities:
-                    if isinstance(entity, (RectEntity, CircleEntity, PolygonEntity, MetalSpot)):
-                        entity.draw(ws)
-                    elif isinstance(entity, MetalExtractor):
+                    if isinstance(entity, (MetalExtractor, CommandCenter)):
                         if self._is_visible(entity.x, entity.y, los):
                             entity.draw(ws)
                         else:
                             self._draw_entity_faded(entity, ws)
+                    elif isinstance(entity, (RectEntity, CircleEntity, PolygonEntity, MetalSpot)):
+                        entity.draw(ws)
                     else:
                         if self._is_visible(entity.x, entity.y, los):
                             entity.draw(ws)
@@ -1735,13 +1780,13 @@ class Game:
             for entity in self.entities:
                 if isinstance(entity, CommandCenter):
                     continue
-                if isinstance(entity, (RectEntity, CircleEntity, PolygonEntity, MetalSpot)):
-                    entity.draw(ws)
-                elif isinstance(entity, MetalExtractor):
+                if isinstance(entity, MetalExtractor):
                     if self._is_visible(entity.x, entity.y, los):
                         entity.draw(ws)
                     else:
                         self._draw_entity_faded(entity, ws)
+                elif isinstance(entity, (RectEntity, CircleEntity, PolygonEntity, MetalSpot)):
+                    entity.draw(ws)
                 else:
                     if self._is_visible(entity.x, entity.y, los):
                         entity.draw(ws)
@@ -1867,13 +1912,13 @@ class Game:
             los = self._collect_los_circles()
             self._los_cache = los
             for entity in self.entities:
-                if isinstance(entity, (RectEntity, CircleEntity, PolygonEntity, MetalSpot)):
-                    entity.draw(ws)
-                elif isinstance(entity, MetalExtractor):
+                if isinstance(entity, (MetalExtractor, CommandCenter)):
                     if self._is_visible(entity.x, entity.y, los):
                         entity.draw(ws)
                     else:
                         self._draw_entity_faded(entity, ws)
+                elif isinstance(entity, (RectEntity, CircleEntity, PolygonEntity, MetalSpot)):
+                    entity.draw(ws)
                 else:
                     if self._is_visible(entity.x, entity.y, los):
                         entity.draw(ws)
@@ -2079,7 +2124,7 @@ class Game:
                 output_dir=self._replay_output_dir,
             )
         else:
-            replay_path = ""
+            replay_path = None
 
         # Build per-player name: AI name for AI players, player_name for humans
         player_names: dict[int, str] = {
@@ -2227,6 +2272,14 @@ class Game:
 
         # Build result dict (same as run())
         stats_data = self._stats.finalize(self._winner, self.entities)
+        if self._replay_recorder is not None:
+            replay_path = self._replay_recorder.save(
+                self._winner, self.human_teams, stats=stats_data,
+                output_dir=self._replay_output_dir,
+            )
+        else:
+            replay_path = None
+
         player_names: dict[int, str] = {
             pid: (self.player_ai[pid].ai_name if pid in self.player_ai
                   else self._player_name)
@@ -2245,7 +2298,7 @@ class Game:
             "winner": self._winner,
             "human_teams": self.human_teams,
             "stats": stats_data,
-            "replay_filepath": "",
+            "replay_filepath": replay_path,
             "team_names": team_names,
             "player_names": player_names,
             "player_team": dict(self.player_team),

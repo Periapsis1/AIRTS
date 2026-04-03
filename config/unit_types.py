@@ -57,13 +57,13 @@ UNIT_TYPES = {
     "soldier": {
         "hp": 100, "speed": 40, "radius": 5,
         "symbol": None, "can_attack": True,
-        "fov": 90, "turn_rate": 180, "los": 100,
+        "fov": 90, "turn_rate": 90, "los": 90,
         "weapon": {"name": "Laser", "damage": 10, "range": 50, "cooldown": 1.5},
     },
     "medic": {
         "hp": 50, "speed": 40, "radius": 5,
         "symbol": MEDIC_SYMBOL, "can_attack": True,
-        "fov": 30, "turn_rate": 180, "los": 80,
+        "fov": 30, "turn_rate": 90, "los": 80,
         "weapon": {
             "name": "HealLaser", "damage": -1, "range": 50, "cooldown": 0.3,
             "hits_only_friendly": True,
@@ -72,42 +72,44 @@ UNIT_TYPES = {
     "tank": {
         "hp": 250, "speed": 20, "radius": 7,
         "symbol": TANK_SYMBOL, "can_attack": True,
-        "fov": 150, "turn_rate": 180, "los": 100,
+        "fov": 150, "turn_rate": 50, "los": 60,
         "weapon": {"name": "Laser", "damage": 8, "range": 45, "cooldown": 2.0},
     },
     "sniper": {
         "hp": 50, "speed": 30, "radius": 5,
         "symbol": SNIPER_SYMBOL, "can_attack": True,
-        "fov": 45, "turn_rate": 180, "los": 200,
+        "fov": 45, "turn_rate": 90, "los": 125,
         "weapon": {"name": "Heavy Laser", "damage": 35, "range": 140, "cooldown": 6.0,
                    "laser_width": 3, "sound": "laser"},
     },
     "machine_gunner": {
         "hp": 70, "speed": 40, "radius": 5,
         "symbol": MACHINE_GUNNER_SYMBOL, "can_attack": True,
-        "fov": 180, "turn_rate": 180, "los": 100,
-        "weapon": {"name": "Laser", "damage": 1, "range": 50, "cooldown": 0.1},
+        "fov": 180, "turn_rate": 25, "los": 90,
+        "weapon": {"name": "Laser", "damage": 4, "range": 50, "cooldown": 0.4, "laser_flash_duration": 0.1},
     },
     "scout": {
         "hp": 15, "speed": 90, "radius": 4,
         "symbol": SCOUT_SYMBOL, "can_attack": True,
-        "fov": 180, "turn_rate": 180, "los": 150,
+        "fov": 40, "turn_rate": 120, "los": 120,
         "spawn_count": 3,
-        "weapon": {"name": "Laser", "damage": 4, "range": 40, "cooldown": 0.5},
+        "weapon": {"name": "Laser", "damage": 3, "range": 40, "cooldown": 0.5,
+                   "laser_flash_duration": 0.1},
     },
     "shockwave": {
         "hp": 70, "speed": 30, "radius": 5,
         "symbol": SHOCKWAVE_SYMBOL, "can_attack": True,
-        "fov": 360, "turn_rate": 180, "los": 100,
+        "fov": 360, "turn_rate": 180, "los": 80,
         "weapon": {
-            "name": "ChainLaser", "damage": 7, "range": 60, "cooldown": 3.0,
-            "chain_range": 70.0, "chain_delay": 0.2,
+            "name": "ChainLaser", "damage": 8, "range": 60, "cooldown": 3.5,
+            "chain_range": 60.0, "chain_delay": 0.15,
+            "laser_flash_duration": 0.5,
         },
     },
     "artillery": {
         "hp": 50, "speed": 20, "radius": 7,
         "symbol": ARTILLERY_SYMBOL, "can_attack": True,
-        "fov": 15, "turn_rate": 10, "los": 100,
+        "fov": 15, "turn_rate": 10, "los": 150,
         "weapon": {
             "name": "ArtilleryCannon", "damage": 50, "range": 160, "cooldown": 6.0,
             "splash_radius": 40, "splash_damage_max": 40, "splash_damage_min": 1,
@@ -123,6 +125,7 @@ UNIT_TYPES = {
         "symbol": None, "can_attack": True,
         "fov": 360, "turn_rate": 180, "los": 200,
         "is_building": True,
+        "weapon": {"name": "Laser", "damage": 15, "range": 80, "cooldown": 1.5},
     },
     "metal_extractor": {
         "hp": 150, "speed": 0, "radius": 5,
@@ -136,14 +139,14 @@ UNIT_TYPES = {
     "soldier_t2": {
         "hp": 125, "speed": 40, "radius": 6,
         "symbol": None, "can_attack": True,
-        "fov": 90, "turn_rate": 180, "los": 100,
+        "fov": 90, "turn_rate": 90, "los": 100,
         "weapon": {"name": "Laser", "damage": 12, "range": 60, "cooldown": 1.5},
         "is_t2": True,
     },
     "medic_t2": {
         "hp": 75, "speed": 60, "radius": 6,
         "symbol": MEDIC_SYMBOL, "can_attack": True,
-        "fov": 30, "turn_rate": 180, "los": 80,
+        "fov": 30, "turn_rate": 90, "los": 90,
         "weapon": {
             "name": "HealLaser", "damage": -1, "range": 70, "cooldown": 0.2,
             "hits_only_friendly": True,
@@ -153,14 +156,14 @@ UNIT_TYPES = {
     "tank_t2": {
         "hp": 350, "speed": 20, "radius": 9,
         "symbol": TANK_SYMBOL, "can_attack": True,
-        "fov": 150, "turn_rate": 180, "los": 100,
+        "fov": 150, "turn_rate": 50, "los": 80,
         "weapon": {"name": "Laser", "damage": 10, "range": 50, "cooldown": 2.0},
         "is_t2": True,
     },
     "sniper_t2": {
         "hp": 65, "speed": 35, "radius": 6,
         "symbol": SNIPER_SYMBOL, "can_attack": True,
-        "fov": 45, "turn_rate": 180, "los": 200,
+        "fov": 45, "turn_rate": 90, "los": 135,
         "weapon": {"name": "Heavy Laser", "damage": 45, "range": 150, "cooldown": 5.0,
                    "laser_width": 3, "sound": "laser"},
         "is_t2": True,
@@ -168,16 +171,17 @@ UNIT_TYPES = {
     "machine_gunner_t2": {
         "hp": 80, "speed": 30, "radius": 6,
         "symbol": MACHINE_GUNNER_SYMBOL, "can_attack": True,
-        "fov": 180, "turn_rate": 180, "los": 100,
-        "weapon": {"name": "Laser", "damage": 3, "range": 75, "cooldown": 0.1},
+        "fov": 180, "turn_rate": 25, "los": 100,
+        "weapon": {"name": "Laser", "damage": 12, "range": 75, "cooldown": 0.4, "laser_flash_duration": 0.1},
         "is_t2": True,
     },
     "scout_t2": {
         "hp": 12, "speed": 110, "radius": 4,
         "symbol": SCOUT_SYMBOL, "can_attack": True,
-        "fov": 180, "turn_rate": 180, "los": 150,
-        "spawn_count": 6,
-        "weapon": {"name": "Laser", "damage": 5, "range": 50, "cooldown": 0.3},
+        "fov": 30, "turn_rate": 150, "los": 120,
+        "spawn_count": 5,
+        "weapon": {"name": "Laser", "damage": 5, "range": 50, "cooldown": 0.5,
+                   "laser_flash_duration": 0.1},
         "is_t2": True,
     },
     "shockwave_t2": {
@@ -193,7 +197,7 @@ UNIT_TYPES = {
     "artillery_t2": {
         "hp": 120, "speed": 15, "radius": 9,
         "symbol": ARTILLERY_SYMBOL, "can_attack": True,
-        "fov": 15, "turn_rate": 25, "los": 150,
+        "fov": 15, "turn_rate": 25, "los": 180,
         "weapon": {
             "name": "ArtilleryCannon", "damage": 70, "range": 180, "cooldown": 6.0,
             "splash_radius": 75, "splash_damage_max": 70, "splash_damage_min": 1,

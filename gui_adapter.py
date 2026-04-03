@@ -46,6 +46,7 @@ def _make_proxy(d: dict, selected_ids: set[int]) -> _EntityProxy:
         is_building=(t in ("CC", "ME")),
         speed=UNIT_TYPES.get(ut, {}).get("speed", 0),
         alive=True,
+        ghost=d.get("ghost", False),
         facing_angle=d.get("fa", 0.0),
         is_t2=d.get("t2", False),
         abilities=[],  # populated below from "abs" field

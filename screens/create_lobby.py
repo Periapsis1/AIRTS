@@ -208,6 +208,10 @@ class CreateLobbyScreen(BaseScreen):
         )
         self._back = BackButton()
 
+        # Lobby config sync state (online mode)
+        self._last_lobby_config: dict | None = None
+        self._last_received_config: dict | None = None
+
         self._rebuild_slot_positions()
 
     # ── slot helpers ─────────────────────────────────────────────────────────
@@ -498,9 +502,11 @@ class CreateLobbyScreen(BaseScreen):
                     else:
                         return self._build_result()
 
-            # Online mode: sync connected players and check game start
+            # Online mode: sync connected players, settings, and check game start
             if self._online_client is not None:
                 self._sync_online_slots()
+                self._maybe_apply_received_config()
+                self._maybe_broadcast_config()
                 if self._online_client.game_started:
                     return ScreenResult("mp_client_game", data={
                         "client": self._online_client,
@@ -510,6 +516,105 @@ class CreateLobbyScreen(BaseScreen):
             self._draw()
             self.clock.tick(60)
             music.update()
+
+    # ── lobby config sync (online mode) ─────────────────────────────────────
+
+    def _gather_lobby_config(self) -> dict:
+        """Serialize current lobby state for network broadcast."""
+        ai_slots = []
+        player_teams: dict[str, int] = {}
+        for slot in self._slots:
+            if slot.online_pid:
+                player_teams[str(slot.online_pid)] = int(slot.team_dd.value)
+            else:
+                ai_slots.append({
+                    "ai_id": slot.ai_dd.value,
+                    "team": int(slot.team_dd.value),
+                })
+        return {
+            "map_size": self._map_size.value,
+            "obstacles": self._sl_obstacles.value,
+            "metal_spots": self._sl_metal_spots.value,
+            "time_limit": self._sl_time_limit.value,
+            "enable_t2": self._t2_cb.checked,
+            "fog_of_war": self._fog_of_war_cb.checked,
+            "ai_slots": ai_slots,
+            "player_teams": player_teams,
+        }
+
+    def _apply_lobby_config(self, config: dict) -> None:
+        """Apply received lobby configuration from another client."""
+        # Map size
+        map_key = config.get("map_size")
+        if map_key:
+            for i, (v, _) in enumerate(_MAP_PRESETS):
+                if v == map_key:
+                    self._map_size.selected_index = i
+                    break
+
+        # Sliders
+        if "obstacles" in config:
+            self._sl_obstacles.value = int(config["obstacles"])
+        if "metal_spots" in config:
+            self._sl_metal_spots.value = int(config["metal_spots"])
+        if "time_limit" in config:
+            self._sl_time_limit.value = int(config["time_limit"])
+
+        # Checkboxes
+        if "enable_t2" in config:
+            self._t2_cb.checked = bool(config["enable_t2"])
+        if "fog_of_war" in config:
+            self._fog_of_war_cb.checked = bool(config["fog_of_war"])
+
+        # AI slots — rebuild non-online slots from received data
+        ai_slots = config.get("ai_slots")
+        if ai_slots is not None:
+            # Remove existing non-online slots
+            self._slots = [s for s in self._slots if s.online_pid]
+            # Add received AI slots
+            for entry in ai_slots:
+                idx = len(self._slots)
+                cidx = self._next_free_color()
+                ai_id = entry.get("ai_id", "human")
+                team = int(entry.get("team", 2))
+                slot = self._make_slot(idx + 1, ai_id, team, idx, color_idx=cidx)
+                self._slots.append(slot)
+            for i, s in enumerate(self._slots):
+                s.pid = i + 1
+            self._rebuild_slot_positions()
+
+        # Player team assignments (for online slots)
+        player_teams = config.get("player_teams", {})
+        for slot in self._slots:
+            if slot.online_pid:
+                pt_key = str(slot.online_pid)
+                if pt_key in player_teams:
+                    team_val = str(int(player_teams[pt_key]))
+                    for i, (v, _) in enumerate(_TEAM_CHOICES):
+                        if v == team_val:
+                            slot.team_dd.selected_index = i
+                            break
+
+    def _maybe_broadcast_config(self) -> None:
+        """If online and config changed since last broadcast, send to server."""
+        if not self._online_client or not self._online_client.connected:
+            return
+        config = self._gather_lobby_config()
+        if config != self._last_lobby_config:
+            self._last_lobby_config = config
+            self._online_client.send_lobby_settings(config)
+
+    def _maybe_apply_received_config(self) -> None:
+        """If new lobby settings received from server, apply to UI."""
+        if not self._online_client:
+            return
+        settings = self._online_client.lobby_settings
+        if settings is None or settings == self._last_received_config:
+            return
+        self._last_received_config = settings
+        self._apply_lobby_config(settings)
+        # Update our local tracking so we don't re-broadcast what we just received
+        self._last_lobby_config = self._gather_lobby_config()
 
     # ── persistence ───────────────────────────────────────────────────────────
 

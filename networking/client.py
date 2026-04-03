@@ -123,6 +123,10 @@ class GameClient:
         """Send a start_game request to the server with game configuration."""
         self._outbound_messages.put({"msg": "start_game", "config": config})
 
+    def send_lobby_settings(self, settings: dict) -> None:
+        """Send lobby settings to the server for relay to all clients."""
+        self._outbound_messages.put({"msg": "lobby_settings", **settings})
+
     def send_command(self, cmd: GameCommand) -> None:
         """Queue a command to send to the host."""
         self._outbound_commands.put(cmd.serialize())
