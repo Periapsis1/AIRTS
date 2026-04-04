@@ -41,6 +41,7 @@ _DISCONNECT_COLOR = (255, 100, 100)
 # Command arrow colours/sizes (matching replay_playback.py)
 _MOVE_CMD_COLOR = (0, 140, 40)
 _ATTACK_CMD_COLOR = (180, 30, 30)
+_FIGHT_CMD_COLOR = (180, 50, 180)
 _ARROW_SIZE = 6
 
 # HUD constants (matching gui.py style)
@@ -128,6 +129,8 @@ class ClientGameScreen(BaseScreen):
         self._rdragging = False
         self._rpath: list[tuple[float, float]] = []
         self._PATH_MIN_DIST = 2.5
+        self._fight_mode = False  # F-key: next right-click sends fight command
+        self._attack_mode = False  # A-key: next right-click sends attack command
 
         # Selection surface for circle draw
         self._selection_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
@@ -390,6 +393,28 @@ class ClientGameScreen(BaseScreen):
                                 tick=self._tick,
                                 data={"unit_ids": stop_ids},
                             ))
+                    elif event.key == pygame.K_f:
+                        self._fight_mode = True
+                    elif event.key == pygame.K_a:
+                        self._attack_mode = True
+                    elif event.key == pygame.K_h:
+                        # Toggle hold fire on selected units
+                        sel_units = [
+                            ent for ent in self._entities
+                            if ent.get("id") in self._selected_ids and ent.get("t") == "U"
+                        ]
+                        if sel_units:
+                            any_not_held = any(not ent.get("hf") for ent in sel_units)
+                            new_mode = "hold_fire" if any_not_held else "free_fire"
+                            self._client.send_command(GameCommand(
+                                type="set_fire_mode",
+                                player_id=self._my_team,
+                                tick=self._tick,
+                                data={
+                                    "unit_ids": [e["id"] for e in sel_units],
+                                    "mode": new_mode,
+                                },
+                            ))
 
                 # Header bar interactions (local controls)
                 if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
@@ -487,6 +512,8 @@ class ClientGameScreen(BaseScreen):
                         self._rpath.append((wx, wy))
                     self._send_move_commands()
                     self._rpath = []
+                    self._fight_mode = False
+                    self._attack_mode = False
 
             # Edge panning (use screen edges, not game area edges)
             mx, my = pygame.mouse.get_pos()
@@ -659,8 +686,25 @@ class ClientGameScreen(BaseScreen):
 
     # -- commands -----------------------------------------------------------
 
+    def _entity_at_world_pos(self, wx: float, wy: float) -> dict | None:
+        """Find the closest entity (unit/building) at a world position."""
+        best = None
+        best_dist = float("inf")
+        for ent in self._entities:
+            t = ent.get("t")
+            if t not in ("U", "CC", "ME"):
+                continue
+            ex, ey = ent.get("x", 0), ent.get("y", 0)
+            r = ent.get("r", 5)
+            d = math.hypot(ex - wx, ey - wy)
+            if d <= r + 5 and d < best_dist:
+                best_dist = d
+                best = ent
+        return best
+
     def _send_move_commands(self) -> None:
         """Send move commands for selected units to the drawn path."""
+        shift_held = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
         selected = [
             ent for ent in self._entities
             if ent.get("id") in self._selected_ids and ent.get("t") == "U"
@@ -680,6 +724,60 @@ class ClientGameScreen(BaseScreen):
                             data={"position": list(rally)},
                         ))
             return
+
+        # Attack mode: check for entity under cursor
+        if self._attack_mode and len(self._rpath) == 1:
+            target_ent = self._entity_at_world_pos(*self._rpath[0])
+            if target_ent is not None:
+                target_id = target_ent.get("id")
+                target_team = target_ent.get("tm")
+                if target_team != self._my_team:
+                    # Enemy: send attack-unit command per unit
+                    for ent in selected:
+                        cmd_data = {"unit_id": ent["id"], "target_id": target_id}
+                        if shift_held:
+                            cmd_data["queue"] = True
+                        self._client.send_command(GameCommand(
+                            type="attack",
+                            player_id=self._my_team,
+                            tick=self._tick,
+                            data=cmd_data,
+                        ))
+                    return
+                else:
+                    # Ally: medics get attack (heal priority), others get attack-move
+                    medic_ids = []
+                    other_ids = []
+                    for ent in selected:
+                        ut = ent.get("ut", "")
+                        stats = UNIT_TYPES.get(ut, {})
+                        weapon = stats.get("weapon", {})
+                        if weapon.get("hits_only_friendly"):
+                            medic_ids.append(ent["id"])
+                        else:
+                            other_ids.append(ent["id"])
+                    for mid in medic_ids:
+                        cmd_data = {"unit_id": mid, "target_id": target_id}
+                        if shift_held:
+                            cmd_data["queue"] = True
+                        self._client.send_command(GameCommand(
+                            type="attack",
+                            player_id=self._my_team,
+                            tick=self._tick,
+                            data=cmd_data,
+                        ))
+                    if other_ids:
+                        px, py = self._rpath[0]
+                        cmd_data = {"unit_ids": other_ids, "targets": [(px, py)] * len(other_ids)}
+                        if shift_held:
+                            cmd_data["queue"] = True
+                        self._client.send_command(GameCommand(
+                            type="attack_move",
+                            player_id=self._my_team,
+                            tick=self._tick,
+                            data=cmd_data,
+                        ))
+                    return
 
         # Single point: all units go to same location
         if len(self._rpath) == 1:
@@ -708,11 +806,20 @@ class ClientGameScreen(BaseScreen):
                     assigned.add(best_idx)
 
         if unit_ids:
+            if self._attack_mode:
+                cmd_type = "attack_move"
+            elif self._fight_mode:
+                cmd_type = "fight"
+            else:
+                cmd_type = "move"
+            cmd_data = {"unit_ids": unit_ids, "targets": targets}
+            if shift_held:
+                cmd_data["queue"] = True
             self._client.send_command(GameCommand(
-                type="move",
+                type=cmd_type,
                 player_id=self._my_team,
                 tick=self._tick,
-                data={"unit_ids": unit_ids, "targets": targets},
+                data=cmd_data,
             ))
 
     def _resample_path(self, n: int) -> list[tuple[float, float]]:
@@ -1168,7 +1275,12 @@ class ClientGameScreen(BaseScreen):
 
         # Right-click path with unit-count dots
         if self._rdragging and len(self._rpath) > 1:
-            path_color = (0, 200, 60)
+            if self._attack_mode:
+                path_color = (200, 80, 80)
+            elif self._fight_mode:
+                path_color = (200, 80, 200)
+            else:
+                path_color = (0, 200, 60)
             for i in range(1, len(self._rpath)):
                 ax, ay = self._rpath[i - 1]
                 bx, by = self._rpath[i]
@@ -1401,7 +1513,12 @@ class ClientGameScreen(BaseScreen):
         if r <= 0:
             return
         is_healer = weapon.get("hits_only_friendly", False)
-        color = MEDIC_HEAL_COLOR if is_healer else RANGE_COLOR
+        if ent.get("hf"):
+            color = (120, 120, 120)  # grey for hold fire
+        elif is_healer:
+            color = MEDIC_HEAL_COLOR
+        else:
+            color = RANGE_COLOR
         fa = ent.get("fa", 0.0)
 
         ix, iy = int(round(ex)), int(round(ey))
@@ -1448,10 +1565,41 @@ class ClientGameScreen(BaseScreen):
                                        int(round(ent["aty"])),
                                        _ATTACK_CMD_COLOR)
             elif "tx" in ent and "ty" in ent:
+                if ent.get("am"):
+                    color = _ATTACK_CMD_COLOR
+                elif ent.get("fm"):
+                    color = _FIGHT_CMD_COLOR
+                else:
+                    color = _MOVE_CMD_COLOR
                 self._draw_command_line(ix, iy,
                                        int(round(ent["tx"])),
                                        int(round(ent["ty"])),
-                                       _MOVE_CMD_COLOR)
+                                       color)
+
+            # Draw queued command waypoints
+            if "cq" in ent:
+                if "atx" in ent:
+                    px, py = int(round(ent["atx"])), int(round(ent["aty"]))
+                elif "tx" in ent:
+                    px, py = int(round(ent["tx"])), int(round(ent["ty"]))
+                else:
+                    px, py = ix, iy
+                for qcmd in ent["cq"]:
+                    qx_val = qcmd.get("x")
+                    qy_val = qcmd.get("y")
+                    if qx_val is None or qy_val is None:
+                        continue
+                    qx, qy = int(round(qx_val)), int(round(qy_val))
+                    qt = qcmd.get("t", "move")
+                    if qt == "attack_move" or qt == "attack":
+                        qcolor = _ATTACK_CMD_COLOR
+                    elif qt == "fight":
+                        qcolor = _FIGHT_CMD_COLOR
+                    else:
+                        qcolor = _MOVE_CMD_COLOR
+                    self._draw_command_line(px, py, qx, qy, qcolor)
+                    pygame.draw.circle(self._world_surface, qcolor, (qx, qy), 3, 1)
+                    px, py = qx, qy
 
         sprite = get_unit_sprite(ut, c, r)
         hw, hh = sprite.get_width() // 2, sprite.get_height() // 2
@@ -1493,6 +1641,14 @@ class ClientGameScreen(BaseScreen):
                 size = 3
                 pts = [(ix - size, cy + size), (ix, cy - size), (ix + size, cy + size)]
                 pygame.draw.lines(ws, (100, 255, 100), False, pts, 2)
+
+        # Hold fire indicator: small red X above unit
+        if ent.get("hf"):
+            hf_s = 3
+            hf_y = iy - r - 4
+            hf_c = (200, 60, 60)
+            pygame.draw.line(ws, hf_c, (ix - hf_s, hf_y - hf_s), (ix + hf_s, hf_y + hf_s), 1)
+            pygame.draw.line(ws, hf_c, (ix - hf_s, hf_y + hf_s), (ix + hf_s, hf_y - hf_s), 1)
 
     def _draw_command_center(self, ent: dict) -> None:
         ws = self._world_surface

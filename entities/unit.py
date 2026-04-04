@@ -21,6 +21,7 @@ FREE_FIRE = "free_fire"
 # Command line colors
 _MOVE_CMD_COLOR = (0, 140, 40)     # dark green for move commands
 _ATTACK_CMD_COLOR = (180, 30, 30)  # dark red for attack commands
+_FIGHT_CMD_COLOR = (180, 50, 180)  # pinkish purple for fight commands
 _ARROW_SIZE = 6
 
 
@@ -108,12 +109,16 @@ class Unit(CircleEntity, Damageable):
         # -- command state ---------------------------------------------------
         self.target: tuple[float, float] | None = None
         self._stop_dist: float = 0.0
+        self.fight_move: bool = False  # fight command: pause movement when enemy in range
+        self.attack_move: bool = False  # attack-move: like fight but red arrow + artillery ground fire
+        self.attack_ground_pos: tuple[float, float] | None = None  # artillery ground target
 
         self._follow_entity: Entity | None = None
         self._follow_dist: float = 0.0
 
         self.attack_target: Entity | None = None
         self.fire_mode: str = FREE_FIRE
+        self.command_queue: list[dict] = []  # queued commands (shift+click)
 
         self.selectable: bool = False
         self._facing_target: Entity | None = None   # entity ref, set by combat system
@@ -155,6 +160,37 @@ class Unit(CircleEntity, Damageable):
         self.target = (x, y)
         self._stop_dist = stop_dist
         self._follow_entity = None
+        self.fight_move = False
+        self.attack_move = False
+        self.attack_ground_pos = None
+
+    def fight(self, x: float, y: float):
+        """Move toward (x, y) but stop whenever an enemy is within weapon range."""
+        self.target = (x, y)
+        self._stop_dist = 0.0
+        self._follow_entity = None
+        self.fight_move = True
+        self.attack_move = False
+        self.attack_ground_pos = None
+
+    def attack_move_to(self, x: float, y: float):
+        """Move toward (x, y), stopping to fight enemies in range. Red arrow."""
+        self.target = (x, y)
+        self._stop_dist = 0.0
+        self._follow_entity = None
+        self.fight_move = True  # reuse fight pause logic
+        self.attack_move = True
+
+    def attack_unit_cmd(self, target: Entity):
+        """Follow and focus-fire a specific target."""
+        self.attack_target = target
+        self._follow_entity = target
+        self._follow_dist = self.attack_range * 0.9
+        self.target = None
+        self.fight_move = False
+        self.attack_move = False
+        self.attack_ground_pos = None
+        self.fire_mode = TARGET_FIRE
 
     def follow(self, target: Entity, distance: float):
         self._follow_entity = target
@@ -167,6 +203,43 @@ class Unit(CircleEntity, Damageable):
     def stop(self):
         self.target = None
         self._follow_entity = None
+        self.fight_move = False
+        self.attack_move = False
+        self.attack_ground_pos = None
+        self.command_queue.clear()
+
+    def has_active_command(self) -> bool:
+        """Return True if the unit is currently executing a command."""
+        if self.target is not None:
+            return True
+        if self._follow_entity is not None:
+            return True
+        if self.attack_target is not None and self.attack_target.alive:
+            return True
+        return False
+
+    def _dequeue_next(self) -> None:
+        """Pop and execute the next queued command."""
+        while self.command_queue:
+            cmd = self.command_queue.pop(0)
+            cmd_type = cmd.get("type")
+            if cmd_type == "move":
+                self.move(cmd["x"], cmd["y"])
+                return
+            elif cmd_type == "fight":
+                self.fight(cmd["x"], cmd["y"])
+                return
+            elif cmd_type == "attack_move":
+                self.attack_move_to(cmd["x"], cmd["y"])
+                if self.weapon and self.weapon.charge_time > 0:
+                    self.attack_ground_pos = (cmd["x"], cmd["y"])
+                return
+            elif cmd_type == "attack":
+                ref = cmd.get("_target_ref")
+                if ref is not None and ref.alive:
+                    self.attack_unit_cmd(ref)
+                    return
+                # Target dead — skip to next
 
     # -- selection ----------------------------------------------------------
 
@@ -187,6 +260,10 @@ class Unit(CircleEntity, Damageable):
 
         if self.attack_target is not None and not self.attack_target.alive:
             self.attack_target = None
+
+        # Dequeue next command if idle
+        if not self.has_active_command() and self.command_queue:
+            self._dequeue_next()
 
         if not self.is_building:
             # Facing is now batched in game.py via batch_facing_update()
@@ -237,6 +314,12 @@ class Unit(CircleEntity, Damageable):
             return  # locked in place while charging
         if self.target is None:
             return
+
+        # Fight command: pause movement while an enemy is within weapon range
+        if self.fight_move and self.nearest_enemy is not None and self.nearest_enemy.alive:
+            d_sq = (self.nearest_enemy.x - self.x) ** 2 + (self.nearest_enemy.y - self.y) ** 2
+            if d_sq <= self.attack_range_sq:
+                return
 
         dx = self.target[0] - self.x
         dy = self.target[1] - self.y
@@ -367,10 +450,48 @@ class Unit(CircleEntity, Damageable):
                                   int(round(self.attack_target.y)),
                                   _ATTACK_CMD_COLOR)
             elif self.target is not None:
+                if self.attack_move:
+                    color = _ATTACK_CMD_COLOR
+                elif self.fight_move:
+                    color = _FIGHT_CMD_COLOR
+                else:
+                    color = _MOVE_CMD_COLOR
                 _draw_command_line(surface, ix, iy,
                                   int(round(self.target[0])),
                                   int(round(self.target[1])),
-                                  _MOVE_CMD_COLOR)
+                                  color)
+
+            # Draw queued command waypoints
+            if self.command_queue:
+                # Chain from current command endpoint
+                if self.attack_target is not None and self.attack_target.alive:
+                    px, py = int(round(self.attack_target.x)), int(round(self.attack_target.y))
+                elif self.target is not None:
+                    px, py = int(round(self.target[0])), int(round(self.target[1]))
+                else:
+                    px, py = ix, iy
+                for qcmd in self.command_queue:
+                    qtype = qcmd.get("type", "move")
+                    if qtype == "attack":
+                        ref = qcmd.get("_target_ref")
+                        if ref is not None and ref.alive:
+                            qx, qy = int(round(ref.x)), int(round(ref.y))
+                        else:
+                            continue
+                        qcolor = _ATTACK_CMD_COLOR
+                    else:
+                        if "x" not in qcmd:
+                            continue
+                        qx, qy = int(round(qcmd["x"])), int(round(qcmd["y"]))
+                        if qtype == "attack_move":
+                            qcolor = _ATTACK_CMD_COLOR
+                        elif qtype == "fight":
+                            qcolor = _FIGHT_CMD_COLOR
+                        else:
+                            qcolor = _MOVE_CMD_COLOR
+                    _draw_command_line(surface, px, py, qx, qy, qcolor)
+                    pygame.draw.circle(surface, qcolor, (qx, qy), 3, 1)
+                    px, py = qx, qy
 
         # Allied units: only show FOV arc when selected; enemies: always
         if not self.selectable or self.selected:
@@ -399,6 +520,9 @@ class Unit(CircleEntity, Damageable):
             "is_building": self.is_building,
             "target": list(self.target) if self.target else None,
             "_stop_dist": self._stop_dist,
+            "fight_move": self.fight_move,
+            "attack_move": self.attack_move,
+            "attack_ground_pos": list(self.attack_ground_pos) if self.attack_ground_pos else None,
             "fire_mode": self.fire_mode,
             "selectable": self.selectable,
             "_bounds": list(self._bounds),
@@ -409,6 +533,10 @@ class Unit(CircleEntity, Damageable):
             "_charge_pos": list(self._charge_pos) if self._charge_pos else None,
             "_charge_timer": self._charge_timer,
             "is_t2": self.is_t2,
+            "command_queue": [
+                {k: v for k, v in entry.items() if k != "_target_ref"}
+                for entry in self.command_queue
+            ],
         })
         return d
 
@@ -427,6 +555,10 @@ class Unit(CircleEntity, Damageable):
         u.laser_cooldown = data["laser_cooldown"]
         u.target = tuple(data["target"]) if data["target"] else None
         u._stop_dist = data["_stop_dist"]
+        u.fight_move = data.get("fight_move", False)
+        u.attack_move = data.get("attack_move", False)
+        agp = data.get("attack_ground_pos")
+        u.attack_ground_pos = tuple(agp) if agp else None
         u.fire_mode = data["fire_mode"]
         u.selectable = data["selectable"]
         u._bounds = tuple(data["_bounds"])
@@ -441,6 +573,7 @@ class Unit(CircleEntity, Damageable):
         u._charge_pos = tuple(cp) if cp else None
         u._charge_timer = data.get("_charge_timer", 0.0)
         u.is_t2 = data.get("is_t2", False)
+        u.command_queue = data.get("command_queue", [])
         # cross-references resolved later by Game.load_state()
         u._follow_entity = None
         u.attack_target = None

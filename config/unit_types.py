@@ -66,7 +66,7 @@ UNIT_TYPES = {
         "fov": 30, "turn_rate": 90, "los": 80,
         "weapon": {
             "name": "HealLaser", "damage": -1, "range": 50, "cooldown": 0.3,
-            "hits_only_friendly": True,
+            "hits_only_friendly": True, "laser_flash_duration": 0.2,
         },
     },
     "tank": {
@@ -149,7 +149,7 @@ UNIT_TYPES = {
         "fov": 30, "turn_rate": 90, "los": 90,
         "weapon": {
             "name": "HealLaser", "damage": -1, "range": 70, "cooldown": 0.2,
-            "hits_only_friendly": True,
+            "hits_only_friendly": True, "laser_flash_duration": 0.2,
         },
         "is_t2": True,
     },

@@ -201,6 +201,21 @@ def combat_step(
                     sound_events.append(wpn.sound)
             continue  # skip normal combat logic while charging or just fired
 
+        # -- Artillery ground-attack: fire at a specific world position ----------
+        # While attack_ground_pos is set, skip normal combat entirely so the
+        # artillery doesn't fire at other targets while waiting to rotate.
+        if wpn.charge_time > 0 and getattr(a, 'attack_ground_pos', None) is not None:
+            if a._charge_pos is None and a.laser_cooldown <= 0:
+                gx, gy = a.attack_ground_pos
+                dx_g = gx - ax
+                dy_g = gy - ay
+                if (dx_g * dx_g + dy_g * dy_g <= a_range_sq
+                        and (full_fov or _in_fov(a, gx, gy, a_facing_x, a_facing_y))):
+                    a._charge_pos = a.attack_ground_pos
+                    a._charge_timer = wpn.charge_time
+                    a.attack_ground_pos = None  # consume; single-shot ground attack
+            continue  # always skip normal combat while ground attack is pending
+
         # -- Normal combat logic ----------------------------------------------
         best_target = None
 
@@ -230,6 +245,16 @@ def combat_step(
                     if dsq < best_hurt_dsq:
                         best_hurt_dsq = dsq
                         best_hurt = u
+                # Prefer manually assigned attack_target (heal priority) if valid
+                preferred_heal = a.attack_target
+                if (preferred_heal is not None and preferred_heal.alive
+                        and hasattr(preferred_heal, 'team') and preferred_heal.team == a.team
+                        and preferred_heal.hp < preferred_heal.max_hp):
+                    dx_p, dy_p = preferred_heal.x - ax, preferred_heal.y - ay
+                    if (dx_p * dx_p + dy_p * dy_p <= a_range_sq
+                            and (full_fov or _in_fov(a, preferred_heal.x, preferred_heal.y, a_facing_x, a_facing_y))
+                            and _has_los(ax, ay, preferred_heal.x, preferred_heal.y, circle_obs, rect_obs)):
+                        best_hurt = preferred_heal
                 if (best_hurt is not None
                         and (full_fov or _in_fov(a, best_hurt.x, best_hurt.y, a_facing_x, a_facing_y))
                         and _has_los(ax, ay, best_hurt.x, best_hurt.y, circle_obs, rect_obs)):
@@ -370,10 +395,14 @@ def combat_step(
                     ))
         else:
             if wpn.hits_only_friendly:
-                # Healer: use the rotation candidate collected during the single
-                # LOS-range query above (populated when off cooldown).
-                if rot_target is not None:
+                # Healer: prefer attack_target (heal priority), fall back to rotation candidate
+                if (a.attack_target is not None and a.attack_target.alive
+                        and hasattr(a.attack_target, 'team') and a.attack_target.team == a.team):
+                    a._facing_target = a.attack_target
+                elif rot_target is not None:
                     a._facing_target = rot_target
+            elif a.attack_target is not None and a.attack_target.alive:
+                a._facing_target = a.attack_target
             elif a.nearest_enemy is not None:
                 a._facing_target = a.nearest_enemy
 

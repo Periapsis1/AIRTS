@@ -9,7 +9,7 @@ import pygame
 import pygame.sndarray
 
 from entities.base import Entity
-from entities.unit import Unit
+from entities.unit import Unit, HOLD_FIRE, TARGET_FIRE, FREE_FIRE
 from entities.command_center import CommandCenter
 from entities.laser import LaserFlash, SplashEffect
 from systems.combat import combat_step, PendingChain
@@ -875,24 +875,70 @@ class Game:
         id_map: dict[int, Entity] = {e.entity_id: e for e in self.entities}
         data = cmd.data
 
+        queue_mode = data.get("queue", False)
+
         if cmd.type == "move":
             for uid, (tx, ty) in zip(data["unit_ids"], data["targets"]):
                 unit = id_map.get(uid)
                 if isinstance(unit, Unit) and unit.alive and unit.player_id == cmd.player_id:
-                    unit.move(tx, ty)
+                    if queue_mode and (unit.has_active_command() or unit.command_queue):
+                        unit.command_queue.append({"type": "move", "x": tx, "y": ty})
+                    else:
+                        unit.command_queue.clear()
+                        unit.move(tx, ty)
+
+        elif cmd.type == "fight":
+            for uid, (tx, ty) in zip(data["unit_ids"], data["targets"]):
+                unit = id_map.get(uid)
+                if isinstance(unit, Unit) and unit.alive and unit.player_id == cmd.player_id:
+                    if queue_mode and (unit.has_active_command() or unit.command_queue):
+                        unit.command_queue.append({"type": "fight", "x": tx, "y": ty})
+                    else:
+                        unit.command_queue.clear()
+                        unit.fight(tx, ty)
+
+        elif cmd.type == "attack_move":
+            for uid, (tx, ty) in zip(data["unit_ids"], data["targets"]):
+                unit = id_map.get(uid)
+                if isinstance(unit, Unit) and unit.alive and unit.player_id == cmd.player_id:
+                    if queue_mode and (unit.has_active_command() or unit.command_queue):
+                        unit.command_queue.append({"type": "attack_move", "x": tx, "y": ty})
+                    else:
+                        unit.command_queue.clear()
+                        unit.attack_move_to(tx, ty)
+                        if unit.weapon and unit.weapon.charge_time > 0:
+                            unit.attack_ground_pos = (tx, ty)
 
         elif cmd.type == "attack":
             unit = id_map.get(data["unit_id"])
             target = id_map.get(data["target_id"])
             if (isinstance(unit, Unit) and unit.alive and unit.player_id == cmd.player_id
                     and target is not None and target.alive):
-                unit.attack_target = target
+                if queue_mode and (unit.has_active_command() or unit.command_queue):
+                    unit.command_queue.append({
+                        "type": "attack", "target_id": target.entity_id,
+                        "_target_ref": target,
+                    })
+                else:
+                    unit.command_queue.clear()
+                    unit.attack_unit_cmd(target)
+                    if unit.fire_mode == HOLD_FIRE:
+                        unit.fire_mode = TARGET_FIRE
 
         elif cmd.type == "stop":
             for uid in data["unit_ids"]:
                 unit = id_map.get(uid)
                 if isinstance(unit, Unit) and unit.alive and unit.player_id == cmd.player_id:
                     unit.stop()
+
+        elif cmd.type == "set_fire_mode":
+            mode = data.get("mode", FREE_FIRE)
+            if mode not in (HOLD_FIRE, TARGET_FIRE, FREE_FIRE):
+                mode = FREE_FIRE
+            for uid in data["unit_ids"]:
+                unit = id_map.get(uid)
+                if isinstance(unit, Unit) and unit.alive and unit.player_id == cmd.player_id:
+                    unit.fire_mode = mode
 
         elif cmd.type == "set_rally":
             pos = tuple(data["position"])
@@ -1044,12 +1090,20 @@ class Game:
             self._team_vision = new_vision
             self._visible_enemies_per_team = new_vis_enemies
 
-            # Invalidate attack targets that left fog
+            # Invalidate attack targets and follow targets that left fog
             for u in alive_units:
                 if u.attack_target is not None and u.attack_target.alive:
+                    # Don't invalidate allied targets (e.g. medic heal priority)
+                    if hasattr(u.attack_target, 'team') and u.attack_target.team == u.team:
+                        continue
                     vis_ids = self._visible_enemies_per_team.get(u.team, set())
                     if u.attack_target.entity_id not in vis_ids:
                         u.attack_target = None
+                        # Also clear follow if it was tracking the same target
+                        if (u._follow_entity is not None
+                                and hasattr(u._follow_entity, 'team')
+                                and u._follow_entity.team != u.team):
+                            u._follow_entity = None
         self._stats.record_subsystem("tgt_visibility", (_perf() - _t_tgt) * 1000)
 
         _t_tgt = _perf()
@@ -1400,6 +1454,12 @@ class Game:
                 aid = ed.get("attack_target_id")
                 if aid is not None and aid in id_map:
                     entity.attack_target = id_map[aid]
+                # Resolve _target_ref in queued commands
+                for qcmd in entity.command_queue:
+                    if qcmd.get("type") == "attack":
+                        tid = qcmd.get("target_id")
+                        if tid is not None and tid in id_map:
+                            qcmd["_target_ref"] = id_map[tid]
                 # CC-specific cross-references
                 if isinstance(entity, CommandCenter):
                     me_ids = ed.get("metal_extractor_ids", [])

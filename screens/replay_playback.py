@@ -38,6 +38,7 @@ _SPEEDS = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
 # Command line colors for selected unit action indicators
 _MOVE_CMD_COLOR = (0, 140, 40)     # dark green for move commands
 _ATTACK_CMD_COLOR = (180, 30, 30)  # dark red for attack commands
+_FIGHT_CMD_COLOR = (180, 50, 180)  # pinkish purple for fight commands
 _ARROW_SIZE = 6                     # arrowhead half-length
 
 # Fields that get linearly interpolated between frames
@@ -1134,7 +1135,12 @@ class ReplayPlaybackScreen(BaseScreen):
         if r <= 0:
             return
         is_healer = weapon.get("hits_only_friendly", False)
-        color = MEDIC_HEAL_COLOR if is_healer else RANGE_COLOR
+        if ent.get("hf"):
+            color = (120, 120, 120)  # grey for hold fire
+        elif is_healer:
+            color = MEDIC_HEAL_COLOR
+        else:
+            color = RANGE_COLOR
         fa = ent.get("fa", 0.0)
 
         half_fov = fov / 2.0
@@ -1273,7 +1279,37 @@ class ReplayPlaybackScreen(BaseScreen):
             elif "tx" in ent and "ty" in ent:
                 tx = ent["tx"]
                 ty = ent["ty"]
-                self._draw_command_line(x, y, tx, ty, _MOVE_CMD_COLOR)
+                if ent.get("am"):
+                    color = _ATTACK_CMD_COLOR
+                elif ent.get("fm"):
+                    color = _FIGHT_CMD_COLOR
+                else:
+                    color = _MOVE_CMD_COLOR
+                self._draw_command_line(x, y, tx, ty, color)
+
+            # Draw queued command waypoints
+            if "cq" in ent:
+                if "atx" in ent:
+                    px, py = ent["atx"], ent["aty"]
+                elif "tx" in ent:
+                    px, py = ent["tx"], ent["ty"]
+                else:
+                    px, py = x, y
+                for qcmd in ent["cq"]:
+                    qx_val = qcmd.get("x")
+                    qy_val = qcmd.get("y")
+                    if qx_val is None or qy_val is None:
+                        continue
+                    qt = qcmd.get("t", "move")
+                    if qt in ("attack_move", "attack"):
+                        qcolor = _ATTACK_CMD_COLOR
+                    elif qt == "fight":
+                        qcolor = _FIGHT_CMD_COLOR
+                    else:
+                        qcolor = _MOVE_CMD_COLOR
+                    self._draw_command_line(px, py, qx_val, qy_val, qcolor)
+                    pygame.draw.circle(ws, qcolor, (int(round(qx_val)), int(round(qy_val))), 3, 1)
+                    px, py = qx_val, qy_val
 
         pygame.draw.circle(ws, c, (x, y), r)
 

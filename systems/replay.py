@@ -120,6 +120,8 @@ def _entity_visual(e: Entity) -> dict | None:
             # Non-building units
             d["fa"] = _q2(e.facing_angle)
             d["t2"] = e.is_t2
+            if e.fire_mode == "hold_fire":
+                d["hf"] = True
             # Charge beam
             cp = getattr(e, "_charge_pos", None)
             if cp is not None:
@@ -144,9 +146,29 @@ def _entity_visual(e: Entity) -> dict | None:
         if e.target is not None:
             d["tx"] = _q1(e.target[0])
             d["ty"] = _q1(e.target[1])
+            if e.attack_move:
+                d["am"] = True
+            elif e.fight_move:
+                d["fm"] = True
         if e.attack_target is not None and e.attack_target.alive:
             d["atx"] = _q1(e.attack_target.x)
             d["aty"] = _q1(e.attack_target.y)
+        # Command queue waypoints (for selected units)
+        if e.command_queue:
+            q_list = []
+            for qcmd in e.command_queue:
+                qd = {"t": qcmd.get("type", "move")}
+                if qcmd["type"] in ("move", "fight", "attack_move"):
+                    qd["x"] = _q1(qcmd["x"])
+                    qd["y"] = _q1(qcmd["y"])
+                elif qcmd["type"] == "attack":
+                    ref = qcmd.get("_target_ref")
+                    if ref is not None and ref.alive:
+                        qd["x"] = _q1(ref.x)
+                        qd["y"] = _q1(ref.y)
+                q_list.append(qd)
+            if q_list:
+                d["cq"] = q_list
         # Selection flag — set externally by broadcast before calling
         if getattr(e, "selected", False):
             d["sel"] = True

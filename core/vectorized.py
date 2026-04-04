@@ -45,15 +45,34 @@ def batch_facing_update(units, dt_scaled: float) -> None:
     tr_list: list[float] = []
 
     for i, u in enumerate(units):
+        # Hold-fire units freeze their facing angle
+        if u.fire_mode == "hold_fire":
+            continue
+        # Artillery ground-attack: rotate toward ground target position
+        agp = getattr(u, 'attack_ground_pos', None)
+        if agp is not None:
+            batch_idx.append(i)
+            ux_list.append(u.x)
+            uy_list.append(u.y)
+            tx_list.append(agp[0])
+            ty_list.append(agp[1])
+            fa_list.append(u.facing_angle)
+            tr_list.append(u.turn_rate)
+            continue
         if u.weapon is not None and u.weapon.hits_only_friendly:
-            # Use _facing_target, set each tick by combat_step to the nearest
-            # wounded ally within LOS range.  nearest_ally is geometrically
-            # closest regardless of HP — useless when that ally is healthy.
-            t = getattr(u, '_facing_target', None)
+            # Prefer attack_target (heal priority), fall back to _facing_target
+            t = u.attack_target
+            if t is not None and getattr(t, 'alive', False) and hasattr(t, 'team') and t.team == u.team:
+                pass  # use attack_target
+            else:
+                t = getattr(u, '_facing_target', None)
             if t is None or not getattr(t, 'alive', False) or t.hp >= t.max_hp:
                 continue
         else:
-            t = u.nearest_enemy
+            # Prefer attack_target, fall back to nearest_enemy
+            t = u.attack_target
+            if t is None or not getattr(t, 'alive', False):
+                t = u.nearest_enemy
             if t is None or not getattr(t, 'alive', False):
                 continue
         batch_idx.append(i)
