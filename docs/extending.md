@@ -268,7 +268,7 @@ Key values in `config/settings.py` you can tweak:
 | `METAL_EXTRACTOR_SPAWN_BONUS` | 0.08 | Economic value of extractors (8% per extractor) |
 | `REACTIVE_ARMOR_INTERVAL` | 5.0 | How fast tanks regenerate armor charges |
 | `ELECTRIC_ARMOR_INTERVAL` | 1.0 | How fast T2 tanks gain electric stacks |
-| `T2_UPGRADE_DURATION` | 60.0 | Construction time for Watch Tower / Research Lab |
+| `T2_UPGRADE_DURATION` | 60.0 | Construction time for Outpost / Research Lab |
 | `UNIT_PUSH_FORCE` | 200.0 | How strongly units push apart |
 | `OBSTACLE_PUSH_FORCE` | 300.0 | How strongly obstacles repel units |
 

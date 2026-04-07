@@ -82,13 +82,24 @@ class AIRegistry:
                     and getattr(obj, "ai_id", "")):
                 self._registry[obj.ai_id] = obj
 
-    def get_choices(self) -> list[tuple[str, str]]:
-        """Return (ai_id, ai_name) pairs sorted by name."""
+    def get_choices(self, include_deprecated: bool = False) -> list[tuple[str, str]]:
+        """Return (ai_id, ai_name) pairs sorted by name.
+
+        Deprecated AIs are excluded by default; pass ``include_deprecated=True``
+        to get every registered AI (e.g. for the lobby's "Show Outdated AIs"
+        toggle).
+        """
         return sorted(
             [(cls.ai_id, cls.ai_name or cls.ai_id)
-             for cls in self._registry.values()],
+             for cls in self._registry.values()
+             if include_deprecated or not getattr(cls, "deprecated", False)],
             key=lambda t: t[1],
         )
+
+    def get_deprecated_ids(self) -> set[str]:
+        """Return the set of ai_ids that are marked deprecated."""
+        return {cls.ai_id for cls in self._registry.values()
+                if getattr(cls, "deprecated", False)}
 
     def create(self, ai_id: str) -> BaseAI:
         """Instantiate an AI by its id."""

@@ -105,12 +105,30 @@ class CreateLobbyScreen(BaseScreen):
 
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock,
                  ai_choices: list[tuple[str, str]],
-                 server=None, online_client=None):
+                 server=None, online_client=None,
+                 deprecated_ai_ids: set[str] | None = None):
         super().__init__(screen, clock)
-        self._ai_choices = ai_choices
         self._server = server  # InternalServer, reused across games
         self._online_client = online_client  # GameClient for online play
-        self._full_choices: list[tuple[str, str]] = [_HUMAN_CHOICE] + list(ai_choices)
+
+        # ai_choices contains every AI (deprecated included). We keep two
+        # views: the full list (used when "Show Outdated AIs" is on) and the
+        # active list (deprecated filtered out). Each slot's dropdown gets a
+        # per-slot list that always retains its currently-selected ai_id, so
+        # turning the toggle off can never silently invalidate a saved slot.
+        self._deprecated_ai_ids: set[str] = set(deprecated_ai_ids or set())
+        self._all_ai_choices: list[tuple[str, str]] = list(ai_choices)
+        self._active_ai_choices: list[tuple[str, str]] = [
+            (aid, name) for aid, name in self._all_ai_choices
+            if aid not in self._deprecated_ai_ids
+        ]
+        # Backwards-compat alias used by existing helpers (_load_slots,
+        # _add_slot, online sync). Default-pick should never be a deprecated
+        # AI, so point at the active list.
+        self._ai_choices = self._active_ai_choices
+        self._full_choices: list[tuple[str, str]] = (
+            [_HUMAN_CHOICE] + list(self._active_ai_choices)
+        )
 
         # ── two-column layout ────────────────────────────────────────────────
         mid = self.width // 2
@@ -136,6 +154,10 @@ class CreateLobbyScreen(BaseScreen):
 
         # ── widgets ─────────────────────────────────────────────────────────
         saved = _load_settings()
+
+        # "Show Outdated AIs" toggle — when off, deprecated AIs are hidden
+        # from dropdowns (except for any slot that already has one selected).
+        self._show_outdated: bool = bool(saved.get("show_outdated_ais", False))
 
         self._slots: list[_Slot] = []
         self._load_slots(saved)
@@ -199,12 +221,22 @@ class CreateLobbyScreen(BaseScreen):
             "Fog of War",
             checked=saved.get("fog_of_war", False),
         )
+        self._show_outdated_cb = Checkbox(
+            self._rx, ry + 356,
+            "Show Outdated AIs",
+            checked=self._show_outdated,
+        )
 
-        # Bottom buttons
+        # Bottom buttons (centered as a pair)
         cx = self.width // 2
         btn_y = self.height - 58
+        btn_gap = 12
+        self._back_btn = Button(
+            cx - BTN_WIDTH - btn_gap // 2, btn_y,
+            BTN_WIDTH, BTN_HEIGHT, "Back to Lobby",
+        )
         self._start_btn = Button(
-            cx - BTN_WIDTH // 2, btn_y, BTN_WIDTH, BTN_HEIGHT, "Start Game",
+            cx + btn_gap // 2, btn_y, BTN_WIDTH, BTN_HEIGHT, "Start Game",
         )
         self._back = BackButton()
 
@@ -226,15 +258,44 @@ class CreateLobbyScreen(BaseScreen):
                 return i
         return default
 
+    def _dropdown_choices_for(self, current_value: str | None) -> list[tuple[str, str]]:
+        """Choice list for a single AI dropdown.
+
+        Always begins with [Human] + active (non-deprecated) AIs. If the
+        "Show Outdated AIs" toggle is on, all deprecated AIs are appended.
+        Otherwise we still append just the slot's *current* deprecated value
+        so an existing selection cannot silently disappear.
+        """
+        choices: list[tuple[str, str]] = [_HUMAN_CHOICE] + list(self._active_ai_choices)
+        if self._show_outdated:
+            for aid, name in self._all_ai_choices:
+                if aid in self._deprecated_ai_ids:
+                    choices.append((aid, name))
+        elif current_value and current_value in self._deprecated_ai_ids:
+            for aid, name in self._all_ai_choices:
+                if aid == current_value:
+                    choices.append((aid, name))
+                    break
+        return choices
+
+    def _refresh_ai_dropdowns(self):
+        """Rebuild every slot's AI dropdown choices after toggling outdated."""
+        for slot in self._slots:
+            current = slot.ai_dd.value
+            new_choices = self._dropdown_choices_for(current)
+            slot.ai_dd.choices = new_choices
+            slot.ai_dd.selected_index = self._find_ai_index(current, new_choices, 0)
+
     def _slot_y(self, idx: int) -> int:
         return _SLOT_Y_START + idx * _SLOT_ROW_H
 
     def _make_slot(self, pid: int, ai_id: str, team_id: int, idx: int,
                    color_idx: int = -1, name: str = "") -> _Slot:
         y = self._slot_y(idx)
-        ai_idx = self._find_ai_index(ai_id, self._full_choices, 0)
+        choices = self._dropdown_choices_for(ai_id)
+        ai_idx = self._find_ai_index(ai_id, choices, 0)
         team_idx = max(0, team_id - 1)
-        ai_dd = Dropdown(self._ai_dd_x, y, _AI_DD_W, self._full_choices, ai_idx)
+        ai_dd = Dropdown(self._ai_dd_x, y, _AI_DD_W, choices, ai_idx)
         team_dd = Dropdown(self._team_dd_x, y, _TEAM_DD_W, _TEAM_CHOICES, team_idx)
         remove_btn = Button(
             self._remove_x,
@@ -410,7 +471,7 @@ class CreateLobbyScreen(BaseScreen):
                     if self._online_client is not None:
                         self._online_client.stop()
                     return ScreenResult("quit")
-                if self._back.handle_event(event):
+                if self._back.handle_event(event) or self._back_btn.handle_event(event):
                     if self._server is not None:
                         self._server.stop()
                         self._server = None
@@ -494,6 +555,9 @@ class CreateLobbyScreen(BaseScreen):
                 self._headless_cb.handle_event(event)
                 self._t2_cb.handle_event(event)
                 self._fog_of_war_cb.handle_event(event)
+                if self._show_outdated_cb.handle_event(event):
+                    self._show_outdated = self._show_outdated_cb.checked
+                    self._refresh_ai_dropdowns()
 
                 if self._start_btn.handle_event(event):
                     self._persist_settings()
@@ -647,6 +711,7 @@ class CreateLobbyScreen(BaseScreen):
             "headless": self._headless_cb.checked,
             "enable_t2": self._t2_cb.checked,
             "fog_of_war": self._fog_of_war_cb.checked,
+            "show_outdated_ais": self._show_outdated_cb.checked,
         })
 
     # ── result builder ────────────────────────────────────────────────────────
@@ -836,8 +901,10 @@ class CreateLobbyScreen(BaseScreen):
         self._headless_cb.draw(self.screen)
         self._t2_cb.draw(self.screen)
         self._fog_of_war_cb.draw(self.screen)
+        self._show_outdated_cb.draw(self.screen)
 
         # ── Start button ──────────────────────────────────────────────────────
+        self._back_btn.draw(self.screen)
         self._start_btn.draw(self.screen)
 
         # ── overlays (drawn last for z-order) ─────────────────────────────────

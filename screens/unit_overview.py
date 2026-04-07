@@ -20,6 +20,8 @@ from config.settings import (
     REACTIVE_ARMOR_INTERVAL, REACTIVE_ARMOR_MAX_STACKS, REACTIVE_ARMOR_REDUCTION,
     ELECTRIC_ARMOR_INTERVAL, ELECTRIC_ARMOR_MAX_STACKS, ELECTRIC_ARMOR_REDUCTION,
     ELECTRIC_ARMOR_REGEN_PER_STACK, ELECTRIC_ARMOR_SPEED_BONUS,
+    OVERCLOCK_RANGE, OVERCLOCK_REGEN, OVERCLOCK_BONUS,
+    OVERCLOCK_REGEN_T2, OVERCLOCK_BONUS_T2,
 )
 from core.helpers import hexagon_points
 
@@ -52,6 +54,12 @@ _PASSIVES: dict[str, list[dict[str, str]]] = {
          "desc": "Laser chains to nearby enemies within 70px after a 0.2s delay."},
     ],
     "artillery": [],
+    "engineer": [
+        {"name": "Overclock",
+         "desc": (f"Allied metal extractors within {OVERCLOCK_RANGE:.0f}px gain "
+                  f"+{OVERCLOCK_REGEN:.0f} HP/s regeneration and an extra "
+                  f"+{OVERCLOCK_BONUS * 100:.0f}% spawn boost.")},
+    ],
     "command_center": [
         {"name": "Unit Production",
          "desc": (f"Spawns a unit every {CC_SPAWN_INTERVAL:.0f}s. "
@@ -99,6 +107,12 @@ _PASSIVES: dict[str, list[dict[str, str]]] = {
          "desc": "Laser chains to nearby enemies within 50px after a 0.15s delay."},
     ],
     "artillery_t2": [],
+    "engineer_t2": [
+        {"name": "Overclock",
+         "desc": (f"Allied metal extractors within {OVERCLOCK_RANGE:.0f}px gain "
+                  f"+{OVERCLOCK_REGEN_T2:.0f} HP/s regeneration and an extra "
+                  f"+{OVERCLOCK_BONUS_T2 * 100:.0f}% spawn boost.")},
+    ],
 }
 
 # Stat diff colors

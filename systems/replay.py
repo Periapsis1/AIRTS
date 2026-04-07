@@ -16,7 +16,7 @@ from entities.unit import Unit
 from entities.metal_spot import MetalSpot
 from entities.laser import LaserFlash, SplashEffect
 from entities.shapes import RectEntity, CircleEntity
-from config.settings import CC_SPAWN_INTERVAL, WATCH_TOWER_UPGRADE_DURATION, RESEARCH_LAB_UPGRADE_DURATION
+from config.settings import CC_SPAWN_INTERVAL, OUTPOST_UPGRADE_DURATION, RESEARCH_LAB_UPGRADE_DURATION
 
 # How many game ticks between recorded frames (60 FPS game / 6 = ~10 FPS replay)
 RECORD_INTERVAL = 6
@@ -101,19 +101,25 @@ def _entity_visual(e: Entity) -> dict | None:
             d["us"] = e.upgrade_state
             # Upgrade progress (0.0–1.0, 0 when not upgrading)
             if e.upgrade_state.startswith("upgrading"):
-                _dur = WATCH_TOWER_UPGRADE_DURATION if e.upgrade_state == "upgrading_tower" else RESEARCH_LAB_UPGRADE_DURATION
+                _dur = OUTPOST_UPGRADE_DURATION if e.upgrade_state == "upgrading_outpost" else RESEARCH_LAB_UPGRADE_DURATION
                 d["utt"] = _q2(1.0 - e.upgrade_timer / _dur) if _dur > 0 else 1.0
             else:
                 d["utt"] = 0.0
             d["rut"] = e.researched_unit_type or ""
             d["ifr"] = e.is_fully_reinforced
-            # Reinforce plating stacks (0-4)
+            # Reinforce plating stacks (0-4) and progress to next stack (0-1)
             _rstacks = 0
+            _rstep = 0.0
             for ab in getattr(e, "abilities", []):
                 if hasattr(ab, "stacks"):
                     _rstacks = ab.stacks
+                    interval = getattr(ab, "stack_interval", 0.0)
+                    if interval > 0:
+                        _rstep = max(0.0, min(1.0,
+                                              getattr(ab, "stack_timer", 0.0) / interval))
                     break
             d["rst"] = _rstacks
+            d["rsp"] = _q2(_rstep)
             bonus = e.get_spawn_bonus()
             d["meb"] = int(bonus * 100)
         else:

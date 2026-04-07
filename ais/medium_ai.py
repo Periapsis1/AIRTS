@@ -8,6 +8,7 @@ from entities.unit import Unit
 class MediumAI(BaseAI):
     ai_id = "medium"
     ai_name = "Medium AI"
+    deprecated = True
 
     # Desired combat comp ratio: tank:sniper:medic = 1:1:2
     _COMP_CYCLE = ["tank", "sniper", "medic", "medic"]

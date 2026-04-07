@@ -11,6 +11,10 @@ from core.paths import app_path as _app_path
 class TeamStats:
     """Running counters and time-series arrays for one team."""
 
+    # Number of recent samples to smooth instantaneous APM over.
+    # 6 samples * SAMPLE_INTERVAL(100) / 60tps ≈ 10s window.
+    APM_INST_WINDOW = 6
+
     def __init__(self):
         # Running counters (updated every tick by systems)
         self.damage_dealt: float = 0.0
@@ -31,7 +35,12 @@ class TeamStats:
         self.ts_healing_done: list[float] = []
         self.ts_metal_spots: list[int] = []    # legacy: extractor count
         self.ts_build_pct: list[float] = []    # actual build % bonus
-        self.ts_apm: list[float] = []
+        self.ts_apm: list[float] = []          # cumulative rolling-average APM
+        self.ts_apm_inst: list[float] = []     # smoothed instantaneous APM
+
+        # Internal APM tracking
+        self._actions_at_last_sample: int = 0
+        self._action_deltas: list[int] = []  # rolling window of per-sample deltas
 
 
 class GameStats:
@@ -150,9 +159,22 @@ class GameStats:
             ts.ts_healing_done.append(ts.healing_done)
             ts.ts_metal_spots.append(ts.metal_spots_captured)
 
-            # APM
+            # APM — cumulative rolling average
             apm = ts.actions / elapsed_minutes
             ts.ts_apm.append(round(apm, 1))
+
+            # APM — smoothed instantaneous (actions per minute over the trailing window).
+            # We always divide by the *full* window length so early samples ramp up
+            # from zero instead of spiking (1 action / 1.67s ≠ 36 APM at t=0).
+            delta = ts.actions - ts._actions_at_last_sample
+            ts._actions_at_last_sample = ts.actions
+            ts._action_deltas.append(delta)
+            if len(ts._action_deltas) > TeamStats.APM_INST_WINDOW:
+                ts._action_deltas.pop(0)
+            window_actions = sum(ts._action_deltas)
+            full_window_minutes = (TeamStats.APM_INST_WINDOW * self.SAMPLE_INTERVAL) / 3600.0
+            inst_apm = window_actions / full_window_minutes if full_window_minutes > 0 else 0.0
+            ts.ts_apm_inst.append(round(inst_apm, 1))
 
     # -- score calculation ----------------------------------------------------
 
@@ -210,6 +232,7 @@ class GameStats:
                 "healing_done": [round(v, 1) for v in ts.ts_healing_done],
                 "metal_spots": ts.ts_build_pct,
                 "apm": ts.ts_apm,
+                "apm_inst": ts.ts_apm_inst,
             }
 
             score = self.compute_score(team_id, entities, winner)

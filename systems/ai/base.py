@@ -26,10 +26,15 @@ class BaseAI(ABC):
     Subclasses should set ``ai_id`` (unique slug) and ``ai_name``
     (human-readable) as class attributes so the AI registry can
     discover and display them.
+
+    Set ``deprecated = True`` on AIs that are kept around for backwards
+    compatibility (e.g. saved replays, lobby settings) but should be
+    hidden from default UI lists.
     """
 
     ai_id: str = ""
     ai_name: str = ""
+    deprecated: bool = False
 
     def __init__(self):
         self._player_id: int = 0
@@ -205,11 +210,10 @@ class BaseAI(ABC):
                 return e
         return None
 
-    # -- action tracking ----------------------------------------------------
-
-    def _record_action(self):
-        if self._stats is not None:
-            self._stats.record_action(self._team)
+    # -- unit control -------------------------------------------------------
+    # Action counting (APM) is centralized in Game._apply_command, so any
+    # command that flows through the queue is counted once regardless of
+    # whether it came from this AI, a local human, or a network client.
 
     def move_unit(self, unit, x: float, y: float):
         tick = self._game._iteration if self._game else 0
@@ -219,7 +223,6 @@ class BaseAI(ABC):
             tick=tick,
             data={"unit_ids": [unit.entity_id], "targets": [(x, y)]},
         ))
-        self._record_action()
 
     def attack_unit(self, unit, target):
         tick = self._game._iteration if self._game else 0
@@ -229,7 +232,6 @@ class BaseAI(ABC):
             tick=tick,
             data={"unit_id": unit.entity_id, "target_id": target.entity_id},
         ))
-        self._record_action()
 
     def stop(self, unit_ids: list[int]):
         tick = self._game._iteration if self._game else 0
@@ -239,7 +241,6 @@ class BaseAI(ABC):
             tick=tick,
             data={"unit_ids": unit_ids},
         ))
-        self._record_action()
 
     def set_rally(self, cc_id: int, pos: tuple[float, float]):
         tick = self._game._iteration if self._game else 0
@@ -249,7 +250,6 @@ class BaseAI(ABC):
             tick=tick,
             data={"position": list(pos)},
         ))
-        self._record_action()
 
     # -- build control ------------------------------------------------------
 
@@ -265,4 +265,3 @@ class BaseAI(ABC):
                 tick=tick,
                 data={"unit_type": unit_type},
             ))
-            self._record_action()

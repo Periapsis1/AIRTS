@@ -51,6 +51,11 @@ ARTILLERY_SYMBOL = (
     (-4.755, -3.881),
 )
 
+# Diagonal stripe — a 45° straight edge running from upper-left to lower-right.
+ENGINEER_SYMBOL = (
+    (-12, -8), (-8, -12), (12, 8), (8, 12),
+)
+
 # -- type registry -----------------------------------------------------------
 
 UNIT_TYPES = {
@@ -119,6 +124,13 @@ UNIT_TYPES = {
             "laser_width": 6,
             "laser_flash_duration": 2.5,
         }
+    },
+    "engineer": {
+        "hp": 50, "speed": 40, "radius": 5,
+        "symbol": ENGINEER_SYMBOL, "can_attack": True,
+        "fov": 360, "turn_rate": 90, "los": 90,
+        "weapon": {"name": "Laser", "damage": 3, "range": 70, "cooldown": 1.0,
+                   "laser_flash_duration": 0.1},
     },
     "command_center": {
         "hp": 1000, "speed": 0, "radius": 10,
@@ -209,6 +221,14 @@ UNIT_TYPES = {
         },
         "is_t2": True,
     },
+    "engineer_t2": {
+        "hp": 75, "speed": 50, "radius": 6,
+        "symbol": ENGINEER_SYMBOL, "can_attack": True,
+        "fov": 90, "turn_rate": 90, "los": 110,
+        "weapon": {"name": "Laser", "damage": 5, "range": 60, "cooldown": 1.0,
+                   "laser_flash_duration": 0.1},
+        "is_t2": True,
+    },
 }
 
 
@@ -229,6 +249,7 @@ T2_NAMES: dict[str, str] = {
     "scout": "Drone Swarm",
     "shockwave": "Disruptor",
     "artillery": "Mortar",
+    "engineer": "Mechanic",
 }
 
 

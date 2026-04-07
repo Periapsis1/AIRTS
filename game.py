@@ -54,7 +54,7 @@ except ImportError:
     _HAS_CYTHON = False
 
 import os
-from ui.widgets import Slider, Button
+from ui.widgets import Slider, Button, draw_countdown_overlay
 import gui
 
 _DBLCLICK_MS = 400
@@ -402,9 +402,12 @@ class Game:
                     self._t2_researching[me.team].add(me.researched_unit_type)
 
     def _get_t2_display(self) -> dict[int, set[str]]:
-        """Combined T2 upgrades + in-progress research for GUI display."""
-        return {t: self._t2_upgrades.get(t, set()) | self._t2_researching.get(t, set())
-                for t in self.all_teams}
+        """T2 unit types whose research has FINISHED (CC can spawn them)."""
+        return {t: set(self._t2_upgrades.get(t, set())) for t in self.all_teams}
+
+    def _get_t2_researching(self) -> dict[int, set[str]]:
+        """T2 unit types currently being researched (in-progress, not yet usable)."""
+        return {t: set(self._t2_researching.get(t, set())) for t in self.all_teams}
 
     def _bind_and_start_ais(self):
         for pid, ai in self.player_ai.items():
@@ -440,6 +443,11 @@ class Game:
             for e in self.units if e.is_building and e.alive
         )
         Unit._steer_obstacles = self._static_steer + bldg
+        # Engineer overclock aura needs the live extractor list each tick.
+        from systems.abilities import Overclock
+        Overclock.all_metal_extractors = tuple(
+            me for me in self.metal_extractors if me.alive
+        )
 
     # -- selection helpers --------------------------------------------------
 
@@ -512,7 +520,6 @@ class Game:
                         tick=self._iteration,
                         data={"position": list(rally)},
                     ))
-                    self._stats.record_action(entity.team)
 
     def _assign_path_goals(self):
         selected = [e for e in self.entities if isinstance(e, Unit) and e.selected]
@@ -521,8 +528,6 @@ class Game:
                 px, py = self._rpath[0]
                 by_player: dict[int, list[int]] = {}
                 for u in selected:
-                    if u.player_id in self.human_players:
-                        self._stats.record_action(u.team)
                     by_player.setdefault(u.player_id, []).append(u.entity_id)
                 for pid, uids in by_player.items():
                     self._command_queue.enqueue(GameCommand(
@@ -552,8 +557,6 @@ class Game:
                 u = selected[best_idx]
                 assignments.append((u.player_id, u.entity_id, (gx, gy)))
                 assigned.add(best_idx)
-                if u.player_id in self.human_players:
-                    self._stats.record_action(u.team)
 
         by_player: dict[int, tuple[list[int], list[tuple[float, float]]]] = {}
         for pid, eid, tgt in assignments:
@@ -788,7 +791,9 @@ class Game:
                     hud_result = gui.handle_hud_click(
                         self.entities, event.pos[0], event.pos[1],
                         self._screen_width, self._screen_height, self._hud_h,
-                        enable_t2=self.enable_t2, t2_upgrades=self._get_t2_display(),
+                        enable_t2=self.enable_t2,
+                        t2_upgrades=self._get_t2_display(),
+                        t2_researching=self._get_t2_researching(),
                     )
                     if hud_result is not None:
                         self._handle_hud_action(hud_result)
@@ -870,10 +875,26 @@ class Game:
 
     # -- command application ------------------------------------------------
 
+    # Command types that count as a player/AI "action" for APM tracking.
+    # Excludes meta commands like pause/speed/surrender.
+    _ACTION_COMMANDS: frozenset[str] = frozenset({
+        "move", "fight", "attack_move", "attack",
+        "stop", "set_fire_mode",
+        "set_rally", "set_spawn_type",
+        "upgrade_extractor", "set_research_type",
+    })
+
     def _apply_command(self, cmd: GameCommand) -> None:
         """Resolve entity IDs in *cmd* and execute the mutation."""
         id_map: dict[int, Entity] = {e.entity_id: e for e in self.entities}
         data = cmd.data
+
+        # Count this command as one action for APM (regardless of source:
+        # local input, AI, or networked client).
+        if cmd.type in self._ACTION_COMMANDS:
+            team = self.player_team.get(cmd.player_id)
+            if team is not None and team in self._stats.teams:
+                self._stats.record_action(team)
 
         queue_mode = data.get("queue", False)
 
@@ -953,15 +974,15 @@ class Game:
 
         elif cmd.type == "upgrade_extractor":
             entity = id_map.get(data["entity_id"])
-            path = data["path"]  # "watch_tower" or "research_lab"
+            path = data["path"]  # "outpost" or "research_lab"
             if (isinstance(entity, MetalExtractor)
                     and entity.alive
                     and entity.upgrade_state == "base"
                     and entity.is_fully_reinforced
                     and entity.team == self.player_team.get(cmd.player_id)
                     and self.enable_t2):
-                if path == "watch_tower":
-                    entity.start_upgrade("tower")
+                if path == "outpost":
+                    entity.start_upgrade("outpost")
                 elif path == "research_lab":
                     entity.upgrade_state = "choosing_research"
 
@@ -1696,8 +1717,14 @@ class Game:
         if self._has_human:
             gui.draw_hud(self.screen, self.entities,
                          self._screen_width, self._screen_height, self._hud_h,
-                         enable_t2=self.enable_t2, t2_upgrades=self._get_t2_display(),
+                         enable_t2=self.enable_t2,
+                         t2_upgrades=self._get_t2_display(),
+                         t2_researching=self._get_t2_researching(),
                          camera=self._camera, world_w=self.width, world_h=self.height)
+
+        # Game-start countdown (3, 2, 1) overlay during warp-in
+        if self._phase == "warp_in":
+            draw_countdown_overlay(self.screen, ga, self._anim_timer)
 
         # Paused overlay (centered on game area) — only when escape menu is not open
         if self._paused and not self._esc_menu_open:

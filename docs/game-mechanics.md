@@ -147,7 +147,7 @@ A captured metal extractor can be upgraded (when T2 is enabled) into one of two 
 
 | Structure        | Effect                                                   |
 |------------------|----------------------------------------------------------|
-| **Watch Tower**  | Fires a defensive laser (65 px range, 15 dmg, 2 s CD); heals nearby friendlies at 1 HP/s; +20% spawn bonus |
+| **Outpost**      | Fires a defensive laser (75 px range, 15 dmg, 2 s CD); heals self at 1 HP/s; extended line of sight; +20% spawn bonus |
 | **Research Lab** | Enables T2 unit spawns from the CC; +20% spawn bonus; +100 CC max HP |
 
 Upgrades take 60 seconds to complete during which the extractor provides no spawn bonus.

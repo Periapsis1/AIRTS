@@ -5,6 +5,7 @@ import pygame
 from screens.base import BaseScreen, ScreenResult
 from screens.results import (_draw_3d_bar, _ease_out_cubic,
                               _compress_build_order, _build_order_label,
+                              _lighten_color,
                               _PLAYER_COLORS as _RES_PLAYER_COLORS,
                               _BAR_HEIGHT, _BAR_PAD_X, _BAR_GAP, _ANIM_MS)
 from systems.replay import ReplayReader, normalize_cp
@@ -245,6 +246,10 @@ class ReplayPlaybackScreen(BaseScreen):
         self._stat_mode = 0
         self._stat_dropdown_idx = 0
 
+        # APM tab: show all teams by default; user can hide AI to make
+        # the player line readable when AI APM is much larger.
+        self._apm_hide_ai: bool = False
+
         # Score Screen overlay widgets
         if has_stats:
             tab_w = min(90, (sw - 40) // len(_STAT_TABS) - 2)
@@ -266,6 +271,12 @@ class ReplayPlaybackScreen(BaseScreen):
             self._stat_debug_btn = Button(btn_start_x + btn_w + gap,
                                           sh - 45, btn_w, 30,
                                           "Debug", enabled=has_subsystem)
+            # APM "Show/Hide AI" toggle — drawn on the APM tab, right of tabs.
+            self._apm_ai_btn = Button(
+                sw - 130, 80, 110, 28,
+                "Show AI" if self._apm_hide_ai else "Hide AI",
+                font_size=14,
+            )
             self._update_stat_graph()
 
         # Arrow buttons for single-stat mode
@@ -286,6 +297,7 @@ class ReplayPlaybackScreen(BaseScreen):
             return  # build order tab doesn't use graph
 
         teams_data = self._stats_data.get("teams", {})
+        human_teams: set[int] = set(self._reader.human_teams)
 
         if key == "step_ms":
             # step_ms is global, not per-team
@@ -296,6 +308,10 @@ class ReplayPlaybackScreen(BaseScreen):
             series: list[tuple[list[float], tuple, str]] = []
             for team_key in sorted(teams_data.keys(), key=lambda k: int(k)):
                 tid = int(team_key)
+                # On the APM tab, optionally hide AI teams so the player APM
+                # is readable (AI APM can be in the tens of thousands).
+                if key == "apm" and self._apm_hide_ai and tid not in human_teams:
+                    continue
                 data = teams_data[team_key].get(key, [])
                 # Convert metal spots to build % bonus
                 if key == "metal_spots":
@@ -304,7 +320,15 @@ class ReplayPlaybackScreen(BaseScreen):
                 color_idx = tid - 1
                 color = GRAPH_LINE_COLORS[color_idx % len(GRAPH_LINE_COLORS)]
                 label = self._team_names.get(tid, f"Team {tid}")
-                series.append((data, color, label))
+
+                if key == "apm":
+                    # Plot rolling-average and instantaneous APM as two lines.
+                    inst_data = teams_data[team_key].get("apm_inst", [])
+                    series.append((data, color, f"{label} avg"))
+                    series.append((inst_data, _lighten_color(color, 0.5),
+                                   f"{label} now"))
+                else:
+                    series.append((data, color, label))
 
         timestamps = self._stats_data.get("timestamps", [])
         x_labels = []
@@ -319,12 +343,19 @@ class ReplayPlaybackScreen(BaseScreen):
         self._stat_graph.y_suffix = "%" if key == "metal_spots" else ""
         self._stat_graph.value_format = "{:.2f}" if key == "step_ms" else None
         self._stat_graph.y_tick_step = 8.0 if key == "metal_spots" else None
-        self._stat_graph.y_integer_ticks = key in ("army_count", "units_killed")
+        self._stat_graph.y_integer_ticks = key in (
+            "army_count", "units_killed", "apm", "damage_dealt", "healing_done"
+        )
+        # CC health is hard-capped at CC_HP, so anchor the y-axis there.
+        self._stat_graph.y_max_fixed = float(CC_HP) if key == "cc_health" else None
 
         self._stat_graph.set_series(series, x_labels, timestamps=timestamps)
 
     def _is_build_tab(self) -> bool:
         return self._stats_data is not None and self._stat_tabs.value == "build_order"
+
+    def _is_apm_tab(self) -> bool:
+        return self._stats_data is not None and self._stat_tabs.value == "apm"
 
     def _capture_current_snapshot(self):
         """Store the reader's current entity state as a lookup dict."""
@@ -402,6 +433,13 @@ class ReplayPlaybackScreen(BaseScreen):
                         })
                     if self._stat_tabs.handle_event(event):
                         self._build_scroll = 0
+                        self._update_stat_graph()
+                        continue
+                    if self._is_apm_tab() and self._apm_ai_btn.handle_event(event):
+                        self._apm_hide_ai = not self._apm_hide_ai
+                        self._apm_ai_btn.label = (
+                            "Show AI" if self._apm_hide_ai else "Hide AI"
+                        )
                         self._update_stat_graph()
                         continue
                     if self._is_build_tab():
@@ -925,6 +963,8 @@ class ReplayPlaybackScreen(BaseScreen):
             self._draw_build_order_tab()
         else:
             self._stat_graph.draw(self.screen)
+            if self._is_apm_tab():
+                self._apm_ai_btn.draw(self.screen)
 
         self._stat_close_btn.draw(self.screen)
         self._stat_debug_btn.draw(self.screen)
@@ -1117,11 +1157,11 @@ class ReplayPlaybackScreen(BaseScreen):
             ws.blit(temp2, (int(ex) - atk_r, int(ey) - atk_r))
             return
 
-        # ME: only watch tower has a range circle
+        # ME: only Outpost has a range circle
         if t == "ME":
-            if ent.get("us") == "watch_tower":
-                from config.settings import WATCH_TOWER_LASER_RANGE
-                atk_r = int(WATCH_TOWER_LASER_RANGE)
+            if ent.get("us") == "outpost":
+                from config.settings import OUTPOST_LASER_RANGE
+                atk_r = int(OUTPOST_LASER_RANGE)
                 temp = pygame.Surface((atk_r * 2, atk_r * 2), pygame.SRCALPHA)
                 pygame.draw.circle(temp, RANGE_COLOR, (atk_r, atk_r), atk_r, 1)
                 ws.blit(temp, (int(ex) - atk_r, int(ey) - atk_r))

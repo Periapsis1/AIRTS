@@ -60,14 +60,19 @@ class App:
             return MainMenuScreen(self._screen, self._clock).run()
 
         elif name == "create_lobby":
-            choices = self._registry.get_choices()
+            # Lobby gets every AI plus the set of deprecated ids so the
+            # "Show Outdated AIs" toggle can hide/show them locally without
+            # round-tripping through the registry.
+            choices = self._registry.get_choices(include_deprecated=True)
             if not choices:
                 choices = [("wander", "Wander AI")]
+            deprecated_ids = self._registry.get_deprecated_ids()
             server = data.get("server") if data else None
             online_client = data.get("online_client") if data else None
             return CreateLobbyScreen(self._screen, self._clock, choices,
                                      server=server,
-                                     online_client=online_client).run()
+                                     online_client=online_client,
+                                     deprecated_ai_ids=deprecated_ids).run()
 
         elif name == "game":
             return self._run_game(data)

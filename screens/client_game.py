@@ -29,7 +29,7 @@ from config.settings import (
 from core.camera import Camera
 from config import audio
 from config.unit_types import UNIT_TYPES, get_spawnable_types
-from ui.widgets import _get_font, Slider, Button
+from ui.widgets import _get_font, Slider, Button, draw_countdown_overlay
 import gui
 from gui_adapter import wrap_entities
 from systems.replay import normalize_cp
@@ -146,7 +146,8 @@ class ClientGameScreen(BaseScreen):
         # Enable T2 and upgrade tracking (from game_start message)
         self._enable_t2: bool = client.enable_t2
         self._fog_of_war: bool = client.fog_of_war
-        self._t2_upgrades: dict[int, set[str]] = {}
+        self._t2_upgrades: dict[int, set[str]] = {}        # completed unlocks
+        self._t2_researching: dict[int, set[str]] = {}     # in-progress only
 
         # HUD build button rects (cached) — still used for basic click detection
         self._build_btns = self._compute_build_btn_rects()
@@ -646,6 +647,7 @@ class ClientGameScreen(BaseScreen):
             self.width, self.height, self._hud_h,
             enable_t2=self._enable_t2,
             t2_upgrades=self._t2_upgrades,
+            t2_researching=self._t2_researching,
         )
         if result is None:
             return
@@ -957,17 +959,28 @@ class ClientGameScreen(BaseScreen):
         return base * mult
 
     def _refresh_t2_display(self) -> None:
-        """Rebuild T2 upgrade display set from raw entity dicts."""
-        t2: dict[int, set[str]] = {}
+        """Rebuild T2 upgrade display sets from raw entity dicts.
+
+        Completed research goes into ``_t2_upgrades`` (CC can spawn the unit);
+        in-progress research labs go into ``_t2_researching`` so the ME
+        research grid greys out the unit but the CC UI still treats it as T1.
+        """
+        t2_done: dict[int, set[str]] = {}
+        t2_wip: dict[int, set[str]] = {}
         for ent in self._entities:
             if ent.get("t") != "ME":
                 continue
             us = ent.get("us", "base")
             rut = ent.get("rut", "") or None
-            if rut and us in ("research_lab", "upgrading_lab"):
-                team = ent.get("tm", 0)
-                t2.setdefault(team, set()).add(rut)
-        self._t2_upgrades = t2
+            if not rut:
+                continue
+            team = ent.get("tm", 0)
+            if us == "research_lab":
+                t2_done.setdefault(team, set()).add(rut)
+            elif us == "upgrading_lab":
+                t2_wip.setdefault(team, set()).add(rut)
+        self._t2_upgrades = t2_done
+        self._t2_researching = t2_wip
 
     def _update_extrapolation(self, entities: list[dict]) -> None:
         """Recompute velocity predictions from the latest server frame."""
@@ -1394,6 +1407,10 @@ class ClientGameScreen(BaseScreen):
                          (self.width, self._hud_rect.top))
         self._draw_hud()
 
+        # Game-start countdown (3, 2, 1) overlay during warp-in
+        if self._phase == "warp_in":
+            draw_countdown_overlay(self.screen, self._game_area, self._anim_timer)
+
         # Winner overlay
         if self._winner:
             big_font = pygame.font.SysFont(None, 64)
@@ -1452,6 +1469,7 @@ class ClientGameScreen(BaseScreen):
             self.width, self.height, self._hud_h,
             enable_t2=self._enable_t2,
             t2_upgrades=self._t2_upgrades,
+            t2_researching=self._t2_researching,
             camera=self._camera,
             world_w=self._map_w,
             world_h=self._map_h,
@@ -1498,9 +1516,9 @@ class ClientGameScreen(BaseScreen):
             return
 
         if t == "ME":
-            if ent.get("us") == "watch_tower":
-                from config.settings import WATCH_TOWER_LASER_RANGE
-                atk_r = int(WATCH_TOWER_LASER_RANGE)
+            if ent.get("us") == "outpost":
+                from config.settings import OUTPOST_LASER_RANGE
+                atk_r = int(OUTPOST_LASER_RANGE)
                 temp = pygame.Surface((atk_r * 2, atk_r * 2), pygame.SRCALPHA)
                 pygame.draw.circle(temp, RANGE_COLOR, (atk_r, atk_r), atk_r, 1)
                 ws.blit(temp, (int(round(ex)) - atk_r, int(round(ey)) - atk_r))

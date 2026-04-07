@@ -12,7 +12,11 @@ from config.settings import (
     PLAYER_COLORS, TEAM1_SELECTED_COLOR,
     HEALTH_BAR_FG, HEALTH_BAR_LOW, HEALTH_BAR_BG,
     CC_SPAWN_INTERVAL,
-    WATCH_TOWER_UPGRADE_DURATION, RESEARCH_LAB_UPGRADE_DURATION,
+    OUTPOST_UPGRADE_DURATION, RESEARCH_LAB_UPGRADE_DURATION,
+    OUTPOST_HP_BONUS, OUTPOST_LASER_DAMAGE, OUTPOST_LASER_RANGE,
+    OUTPOST_LASER_COOLDOWN, OUTPOST_HEAL_PER_SEC, OUTPOST_LOS,
+    RESEARCH_LAB_HP_BONUS, T2_SPAWN_BONUS,
+    REINFORCE_MAX_STACKS, REINFORCE_STACK_INTERVAL,
 )
 from config.unit_types import UNIT_TYPES, get_spawnable_types, get_t2_name
 from core.helpers import hexagon_points
@@ -80,6 +84,19 @@ def _is_me(e) -> bool:
     return getattr(e, '_is_metal_extractor', False) or getattr(e, 'unit_type', '') == 'metal_extractor'
 
 
+def _reinforce_ability(me):
+    """Return the Reinforce ability instance/proxy on a metal extractor, or None."""
+    for ab in getattr(me, "abilities", []) or []:
+        if getattr(ab, "name", "") == "reinforce":
+            return ab
+    return None
+
+
+def _reinforce_stacks(me) -> int:
+    ab = _reinforce_ability(me)
+    return int(getattr(ab, "stacks", 0)) if ab is not None else 0
+
+
 def get_selected_cc(entities):
     for e in entities:
         if _is_cc(e) and getattr(e, 'selected', False):
@@ -141,8 +158,8 @@ _UPGRADE_BTN_GAP = 6
 
 
 def _upgrade_btn_rects(ar: pygame.Rect) -> list[tuple[pygame.Rect, str, str]]:
-    """Button rects for Watch Tower / Research Lab upgrade options."""
-    options = [("watch_tower", "Watch Tower"), ("research_lab", "Research Lab")]
+    """Button rects for Outpost / Research Lab upgrade options."""
+    options = [("outpost", "Outpost"), ("research_lab", "Research Lab")]
     pad, hdr = 8, 22
     out: list[tuple[pygame.Rect, str, str]] = []
     for i, (path, label) in enumerate(options):
@@ -172,9 +189,15 @@ def _research_btn_rects(ar: pygame.Rect) -> list[tuple[pygame.Rect, str]]:
 def draw_hud(screen: pygame.Surface, entities,
              width: int, height: int, hud_h: int,
              enable_t2: bool = False, t2_upgrades: dict | None = None,
+             t2_researching: dict | None = None,
              camera=None, world_w: int = 0, world_h: int = 0,
              obstacles=None):
-    """Draw the full HUD bar at the bottom of the screen."""
+    """Draw the full HUD bar at the bottom of the screen.
+
+    ``t2_upgrades`` are *completed* T2 unlocks (CC can spawn them).
+    ``t2_researching`` are still being researched and must NOT be treated as
+    unlocked by the CC UI — they only matter for the ME research-grid greying.
+    """
     minimap, display, portrait, action = _hud_sections(width, height, hud_h)
     selected = _get_selected(entities)
     cc = get_selected_cc(entities)
@@ -183,7 +206,10 @@ def draw_hud(screen: pygame.Surface, entities,
                   obstacles=obstacles)
     _draw_display(screen, display, selected, t2_upgrades=t2_upgrades)
     _draw_portrait(screen, portrait, selected)
-    _draw_actions(screen, action, selected, cc, enable_t2=enable_t2, t2_upgrades=t2_upgrades)
+    _draw_actions(screen, action, selected, cc,
+                  enable_t2=enable_t2,
+                  t2_upgrades=t2_upgrades,
+                  t2_researching=t2_researching)
 
     # vertical dividers
     for r in (minimap, display, portrait):
@@ -347,7 +373,7 @@ def _draw_single_info(screen: pygame.Surface, r: pygame.Rect, unit,
     y = r.top
 
     # name
-    if _is_me(unit) and getattr(unit, 'upgrade_state', 'base') in ("watch_tower", "research_lab"):
+    if _is_me(unit) and getattr(unit, 'upgrade_state', 'base') in ("outpost", "research_lab"):
         name = unit.upgrade_state.replace("_", " ").title()
     elif getattr(unit, "is_t2", False):
         name = get_t2_name(unit.unit_type)
@@ -396,8 +422,10 @@ def _draw_single_info(screen: pygame.Surface, r: pygame.Rect, unit,
         elif unit.upgrade_state == "research_lab" and unit.researched_unit_type:
             rows.append(("Research", get_t2_name(unit.researched_unit_type)))
 
-    # Abilities
+    # Abilities (Reinforce on metal extractors gets its own progress bar below)
     for ab in unit.abilities:
+        if _is_me(unit) and getattr(ab, "name", "") == "reinforce":
+            continue
         ab_name = ab.name.replace("_", " ").title()
         if hasattr(ab, "stacks") and hasattr(ab, "max_stacks"):
             if ab.active:
@@ -423,6 +451,44 @@ def _draw_single_info(screen: pygame.Surface, r: pygame.Rect, unit,
         screen.blit(ls, (sx, sy))
         screen.blit(vs, (sx + ls.get_width(), sy))
         last_row_y = sy + 16
+
+    # Reinforce plating progress bar (metal extractors)
+    if _is_me(unit):
+        ab = _reinforce_ability(unit)
+        if ab is not None:
+            stacks = int(getattr(ab, "stacks", 0))
+            max_stacks = int(getattr(ab, "max_stacks", REINFORCE_MAX_STACKS))
+            stack_timer = float(getattr(ab, "stack_timer", 0.0))
+            stack_interval = float(getattr(ab, "stack_interval",
+                                           REINFORCE_STACK_INTERVAL))
+            full = stacks >= max_stacks
+            if full:
+                progress = 1.0
+            else:
+                step = (stack_timer / stack_interval) if stack_interval > 0 else 0.0
+                progress = (stacks + step) / max_stacks
+
+            label_y = last_row_y + 4
+            bar_w = min(r.width, 150)
+            bar_h = 8
+            if label_y + 16 + bar_h <= r.bottom:
+                label_text = ("Plating: Reinforced" if full
+                              else f"Plating: {stacks}/{max_stacks}")
+                lt = sf.render(label_text, True, _STAT_LABEL)
+                screen.blit(lt, (r.left, label_y))
+                bar_y = label_y + lt.get_height() + 2
+                pygame.draw.rect(screen, (40, 40, 50),
+                                 (r.left, bar_y, bar_w, bar_h))
+                fill_w = int(bar_w * progress)
+                bar_color = (100, 255, 140) if full else (200, 200, 60)
+                pygame.draw.rect(screen, bar_color,
+                                 (r.left, bar_y, fill_w, bar_h))
+                # Sub-tick marks at each stack boundary
+                for i in range(1, max_stacks):
+                    tx = r.left + int(bar_w * i / max_stacks)
+                    pygame.draw.line(screen, (20, 20, 28),
+                                     (tx, bar_y), (tx, bar_y + bar_h - 1))
+                last_row_y = bar_y + bar_h
 
     # CC spawn progress bar (below stat rows)
     if _is_cc(unit):
@@ -541,7 +607,7 @@ def _draw_portrait(screen: pygame.Surface, r: pygame.Rect,
         pygame.draw.circle(screen, TEAM1_SELECTED_COLOR, (cx, cy), rad, 1)
 
     # name below portrait
-    if _is_me(unit) and getattr(unit, 'upgrade_state', 'base') in ("watch_tower", "research_lab"):
+    if _is_me(unit) and getattr(unit, 'upgrade_state', 'base') in ("outpost", "research_lab"):
         pname = unit.upgrade_state.replace("_", " ").title()
     elif getattr(unit, "is_t2", False):
         pname = get_t2_name(unit.unit_type)
@@ -557,7 +623,8 @@ def _draw_portrait(screen: pygame.Surface, r: pygame.Rect,
 
 def _draw_actions(screen: pygame.Surface, r: pygame.Rect,
                   selected: list, cc=None,
-                  enable_t2: bool = False, t2_upgrades: dict | None = None):
+                  enable_t2: bool = False, t2_upgrades: dict | None = None,
+                  t2_researching: dict | None = None):
     pygame.draw.rect(screen, _SECTION_BG, r)
     if not selected:
         return
@@ -606,7 +673,9 @@ def _draw_actions(screen: pygame.Surface, r: pygame.Rect,
 
     elif enable_t2 and len(selected) == 1 and _is_me(selected[0]):
         me = selected[0]
-        _draw_extractor_actions(screen, r, me, t2_upgrades or {})
+        _draw_extractor_actions(screen, r, me,
+                                t2_upgrades or {},
+                                t2_researching or {})
 
     else:
         # Action buttons for army units / extractors
@@ -631,25 +700,52 @@ def _draw_actions(screen: pygame.Surface, r: pygame.Rect,
 
 
 def _draw_extractor_actions(screen: pygame.Surface, r: pygame.Rect,
-                            me, t2_upgrades: dict):
-    """Draw upgrade/research actions for a selected metal extractor."""
+                            me, t2_upgrades: dict, t2_researching: dict | None = None):
+    """Draw upgrade/research actions for a selected metal extractor.
+
+    ``t2_upgrades`` are completed unlocks; ``t2_researching`` are in-progress
+    research. Both are used to grey out unit types in the research grid so the
+    player can't kick off duplicate research, but only ``t2_upgrades`` should
+    influence the CC build buttons.
+    """
+    if t2_researching is None:
+        t2_researching = {}
     tf = _font(18)
     sf = _font(14)
     mx, my = pygame.mouse.get_pos()
 
-    if me.upgrade_state == "base" and me.is_fully_reinforced:
-        # Show Watch Tower / Research Lab upgrade buttons
+    if me.upgrade_state == "base":
+        # Always show Outpost / Research Lab upgrade buttons; grey out until
+        # the extractor is fully reinforced so the player can see what's
+        # available before they have the platings to commit.
+        disabled = not me.is_fully_reinforced
         ts = tf.render("Upgrade", True, _TITLE_COLOR)
         screen.blit(ts, (r.left + 8, r.top + 6))
 
+        hovered_upgrade: str | None = None
         for br, path, label in _upgrade_btn_rects(r):
             is_hov = br.collidepoint(mx, my)
-            bg = GUI_BTN_HOVER if is_hov else GUI_BTN_NORMAL
+            if is_hov:
+                hovered_upgrade = path
+            if disabled:
+                bg = (38, 38, 48)
+                border = (60, 60, 75)
+                text_color = (110, 110, 125)
+            else:
+                bg = GUI_BTN_HOVER if is_hov else GUI_BTN_NORMAL
+                border = GUI_BORDER
+                text_color = GUI_TEXT_COLOR
             pygame.draw.rect(screen, bg, br, border_radius=4)
-            pygame.draw.rect(screen, GUI_BORDER, br, 1, border_radius=4)
-            lt = sf.render(label, True, GUI_TEXT_COLOR)
+            pygame.draw.rect(screen, border, br, 1, border_radius=4)
+            lt = sf.render(label, True, text_color)
             screen.blit(lt, (br.centerx - lt.get_width() // 2,
                              br.centery - lt.get_height() // 2))
+
+        if hovered_upgrade is not None:
+            stacks = _reinforce_stacks(me)
+            need = REINFORCE_MAX_STACKS - stacks
+            _draw_upgrade_tooltip(screen, hovered_upgrade, r,
+                                  disabled=disabled, missing_stacks=need)
 
     elif me.upgrade_state == "choosing_research":
         # Show unit type grid for research selection
@@ -657,7 +753,8 @@ def _draw_extractor_actions(screen: pygame.Surface, r: pygame.Rect,
         screen.blit(ts, (r.left + 8, r.top + 6))
         hovered_type: str | None = None
 
-        team_t2 = t2_upgrades.get(me.team, set())
+        team_t2 = (t2_upgrades.get(me.team, set())
+                   | t2_researching.get(me.team, set()))
         for br, ut in _research_btn_rects(r):
             already_t2 = ut in team_t2
             is_hov = br.collidepoint(mx, my)
@@ -702,13 +799,13 @@ def _draw_extractor_actions(screen: pygame.Surface, r: pygame.Rect,
         bar_w = min(r.width - 16, 180)
         bar_h = 8
         bar_y = r.top + 48
-        _dur = WATCH_TOWER_UPGRADE_DURATION if me.upgrade_state == "upgrading_tower" else RESEARCH_LAB_UPGRADE_DURATION
+        _dur = OUTPOST_UPGRADE_DURATION if me.upgrade_state == "upgrading_outpost" else RESEARCH_LAB_UPGRADE_DURATION
         progress = 1.0 - max(0.0, me.upgrade_timer / _dur)
         pygame.draw.rect(screen, (40, 40, 50), (r.left + 8, bar_y, bar_w, bar_h))
         pygame.draw.rect(screen, (200, 200, 60), (r.left + 8, bar_y, int(bar_w * progress), bar_h))
 
-    elif me.upgrade_state == "watch_tower":
-        ts = tf.render("Watch Tower", True, _TITLE_COLOR)
+    elif me.upgrade_state == "outpost":
+        ts = tf.render("Outpost", True, _TITLE_COLOR)
         screen.blit(ts, (r.left + 8, r.top + 6))
 
     elif me.upgrade_state == "research_lab":
@@ -717,6 +814,116 @@ def _draw_extractor_actions(screen: pygame.Surface, r: pygame.Rect,
         if me.researched_unit_type:
             rt = sf.render(f"Producing: {get_t2_name(me.researched_unit_type)}", True, _STAT_VALUE)
             screen.blit(rt, (r.left + 8, r.top + 28))
+
+
+def _draw_upgrade_tooltip(screen: pygame.Surface, path: str,
+                          action_rect: pygame.Rect,
+                          disabled: bool = False, missing_stacks: int = 0):
+    """Tooltip shown when hovering an Outpost / Research Lab upgrade button.
+
+    Lists the upgrade's description, stat changes, weapon (where relevant),
+    and build duration so the player can compare the two options at a glance.
+    When *disabled* is True, an extra red requirement line is appended.
+    """
+    tf = _font(20)
+    bf = _font(16)
+
+    if path == "outpost":
+        title = "Outpost"
+        desc = (
+            "Fortifies the extractor with a defensive laser, extended vision, "
+            "and self-repair."
+        )
+        duration = OUTPOST_UPGRADE_DURATION
+        # (label, value, optional positive-diff color)
+        rows: list[tuple[str, str, tuple | None]] = [
+            ("HP", f"+{OUTPOST_HP_BONUS}", (100, 255, 100)),
+            ("Spawn bonus", f"{int(T2_SPAWN_BONUS * 100)}%", (100, 255, 100)),
+            ("Self-heal", f"{OUTPOST_HEAL_PER_SEC:g} HP/s", (100, 255, 100)),
+            ("Vision", f"{int(OUTPOST_LOS)} px", (100, 255, 100)),
+            ("Weapon", f"{OUTPOST_LASER_DAMAGE} dmg", None),
+            ("Range", f"{int(OUTPOST_LASER_RANGE)} px", None),
+            ("Cooldown", f"{OUTPOST_LASER_COOLDOWN:g}s", None),
+        ]
+    elif path == "research_lab":
+        title = "Research Lab"
+        desc = (
+            "Unlocks T2 production for one chosen unit type. Affected CCs "
+            "spawn the T2 variant."
+        )
+        duration = RESEARCH_LAB_UPGRADE_DURATION
+        rows = [
+            ("HP", f"+{RESEARCH_LAB_HP_BONUS}", (100, 255, 100)),
+            ("Spawn bonus", f"{int(T2_SPAWN_BONUS * 100)}%", (100, 255, 100)),
+            ("Unlocks", "T2 unit research", (100, 255, 100)),
+        ]
+    else:
+        return
+
+    # Word-wrap the description manually so the tooltip can size itself.
+    tt_w = 240
+    inner_w = tt_w - _TT_PAD * 2
+    desc_lines: list[str] = []
+    words = desc.split()
+    cur = ""
+    for w in words:
+        test = (cur + " " + w).strip()
+        if bf.size(test)[0] <= inner_w:
+            cur = test
+        else:
+            if cur:
+                desc_lines.append(cur)
+            cur = w
+    if cur:
+        desc_lines.append(cur)
+
+    title_h = _TT_LINE_H + 4
+    desc_h = len(desc_lines) * (_TT_LINE_H - 2) + 4
+    rows_h = len(rows) * _TT_LINE_H
+    footer_h = _TT_LINE_H + 2
+    req_h = (_TT_LINE_H + 2) if disabled else 0
+    tt_h = _TT_PAD + title_h + desc_h + rows_h + footer_h + req_h + _TT_PAD
+
+    tt_x = action_rect.left + 10
+    tt_y = action_rect.top - tt_h - 6
+
+    rect = pygame.Rect(tt_x, tt_y, tt_w, tt_h)
+    pygame.draw.rect(screen, _TT_BG, rect, border_radius=6)
+    pygame.draw.rect(screen, _TT_BORDER, rect, 1, border_radius=6)
+
+    # Title
+    ts = tf.render(title, True, (220, 220, 240))
+    screen.blit(ts, (tt_x + _TT_PAD, tt_y + _TT_PAD))
+    y = tt_y + _TT_PAD + title_h
+
+    # Description (italic-ish grey, wrapped)
+    for line in desc_lines:
+        ds = bf.render(line, True, (160, 160, 180))
+        screen.blit(ds, (tt_x + _TT_PAD, y))
+        y += _TT_LINE_H - 2
+    y += 4
+
+    # Stat rows
+    for label, value, color in rows:
+        ls = bf.render(label, True, (140, 140, 165))
+        vs = bf.render(value, True, color or (200, 200, 220))
+        screen.blit(ls, (tt_x + _TT_PAD, y))
+        screen.blit(vs, (tt_x + _TT_PAD + 100, y))
+        y += _TT_LINE_H
+
+    # Build time footer
+    ft = bf.render(f"Build time: {int(duration)}s", True, (200, 200, 100))
+    screen.blit(ft, (tt_x + _TT_PAD, y))
+    y += _TT_LINE_H
+
+    # Disabled requirement line (red)
+    if disabled:
+        plural = "s" if missing_stacks != 1 else ""
+        rt = bf.render(
+            f"Requires {missing_stacks} more plating{plural} to upgrade",
+            True, (255, 110, 110),
+        )
+        screen.blit(rt, (tt_x + _TT_PAD, y))
 
 
 def _draw_tooltip(screen: pygame.Surface, utype: str,
@@ -837,7 +1044,8 @@ def handle_minimap_click(mx: int, my: int,
 
 def handle_hud_click(entities, mx: int, my: int,
                      width: int, height: int, hud_h: int,
-                     enable_t2: bool = False, t2_upgrades: dict | None = None) -> dict | None:
+                     enable_t2: bool = False, t2_upgrades: dict | None = None,
+                     t2_researching: dict | None = None) -> dict | None:
     """Return an action dict if a button was clicked, else None."""
     _, _, _, action = _hud_sections(width, height, hud_h)
     if not action.collidepoint(mx, my):

@@ -8,6 +8,7 @@ class CrashTestAI(BaseAI):
 
     ai_id = "crash_test"
     ai_name = "Crash Test AI"
+    deprecated = True
 
     def on_start(self) -> None:
         self.set_build("soldier")

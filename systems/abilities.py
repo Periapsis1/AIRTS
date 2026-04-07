@@ -15,6 +15,12 @@ from config.settings import (
     ELECTRIC_ARMOR_REGEN_PER_STACK,
     ELECTRIC_ARMOR_SPEED_BONUS,
     ELECTRIC_ARMOR_COLOR,
+    OVERCLOCK_RANGE,
+    OVERCLOCK_REGEN,
+    OVERCLOCK_BONUS,
+    OVERCLOCK_REGEN_T2,
+    OVERCLOCK_BONUS_T2,
+    OVERCLOCK_COLOR,
 )
 import pygame
 
@@ -341,12 +347,81 @@ class CombatStim(PassiveAbility):
         return obj
 
 
+class Overclock(PassiveAbility):
+    """Allied metal extractors in range gain HP/s regen and an additive spawn bonus."""
+    name = "overclock"
+    description = (
+        "Allied metal extractors in range gain HP regen and a small spawn boost."
+    )
+
+    # Set by Game each tick: tuple of all live MetalExtractor instances.
+    all_metal_extractors: tuple = ()
+
+    def __init__(self, regen: float = OVERCLOCK_REGEN,
+                 bonus: float = OVERCLOCK_BONUS,
+                 aura_range: float = OVERCLOCK_RANGE):
+        super().__init__()
+        self.regen: float = regen
+        self.bonus: float = bonus
+        self.aura_range: float = aura_range
+
+    def update(self, entity, dt: float) -> None:
+        # Buff every allied metal extractor whose centre is within aura_range.
+        range_sq = self.aura_range * self.aura_range
+        for me in Overclock.all_metal_extractors:
+            if not me.alive or me.team != entity.team:
+                continue
+            dx = me.x - entity.x
+            dy = me.y - entity.y
+            if dx * dx + dy * dy > range_sq:
+                continue
+            # Direct heal — capped at max_hp. Multiple engineers heal additively.
+            if me.hp < me.max_hp:
+                me.hp = min(me.max_hp, me.hp + self.regen * dt)
+            # Stack additively with other engineers via the pending accumulator.
+            me._overclock_bonus_pending += self.bonus
+        # Show as "active" purely for UI/inspection — never gates anything.
+        self.active = True
+
+    def draw(self, entity, surface: pygame.Surface) -> None:
+        # Faint aura ring so the player can see the buff radius on selected engineers.
+        if not getattr(entity, "selected", False):
+            return
+        r = int(self.aura_range)
+        if r <= 0:
+            return
+        ix, iy = int(round(entity.x)), int(round(entity.y))
+        ring = pygame.Surface((r * 2 + 4, r * 2 + 4), pygame.SRCALPHA)
+        pygame.draw.circle(ring, (*OVERCLOCK_COLOR, 60), (r + 2, r + 2), r, 1)
+        surface.blit(ring, (ix - r - 2, iy - r - 2))
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d.update({
+            "regen": self.regen,
+            "bonus": self.bonus,
+            "aura_range": self.aura_range,
+        })
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Overclock:
+        obj = cls(
+            regen=data.get("regen", OVERCLOCK_REGEN),
+            bonus=data.get("bonus", OVERCLOCK_BONUS),
+            aura_range=data.get("aura_range", OVERCLOCK_RANGE),
+        )
+        obj.active = data.get("active", False)
+        return obj
+
+
 ABILITY_REGISTRY: dict[str, type[PassiveAbility]] = {
     "reinforce": Reinforce,
     "reactive_armor": ReactiveArmor,
     "focus": Focus,
     "electric_armor": ElectricArmor,
     "combat_stim": CombatStim,
+    "overclock": Overclock,
 }
 
 

@@ -8,6 +8,7 @@ from systems.ai.base import BaseAI
 class HardAI(BaseAI):
     ai_id = "hard"
     ai_name = "Hard AI"
+    deprecated = True
 
     _SCOUT_INTERVAL = 4
 

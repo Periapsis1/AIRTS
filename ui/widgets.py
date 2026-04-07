@@ -537,6 +537,39 @@ class Checkbox:
 # LineGraph
 # ---------------------------------------------------------------------------
 
+def _nice_ticks_for_max(y_max: float) -> list[float]:
+    """Pick ~5–6 evenly spaced 'nice' ticks ending exactly at *y_max*.
+
+    Used when a graph has a hard cap (e.g. CC HP = 1000) so the top tick
+    lands on the cap rather than overshooting.
+    """
+    if y_max <= 0:
+        return [0.0, 1.0]
+    nice_steps = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50,
+                  100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000,
+                  100000, 200000, 500000, 1000000]
+    step = nice_steps[-1]
+    for s in nice_steps:
+        n = y_max / s
+        if 4 <= n <= 6 and abs(n - round(n)) < 1e-9:
+            step = s
+            break
+    else:
+        # Fallback: closest step that gives ≤8 intervals.
+        for s in nice_steps:
+            if y_max / s <= 8:
+                step = s
+                break
+    ticks: list[float] = []
+    v = 0.0
+    while v <= y_max + step * 1e-6:
+        ticks.append(v)
+        v += step
+    if ticks[-1] < y_max - step * 1e-6:
+        ticks.append(y_max)
+    return ticks
+
+
 class LineGraph:
     """Draws a line graph with N data series."""
 
@@ -560,6 +593,7 @@ class LineGraph:
         self.y_suffix: str = ""  # appended to y-axis labels (e.g. "%")
         self.y_tick_step: float | None = None  # explicit y-axis step (e.g. 8 for Build %)
         self.y_integer_ticks: bool = False  # snap y ticks to nice whole numbers
+        self.y_max_fixed: float | None = None  # force y-axis maximum (e.g. 1000 for CC HP)
         self.value_format: str | None = None  # tooltip format (e.g. "{:.2f}")
         self._hover_index: int | None = None
         self._hover_mouse_y: int = 0
@@ -630,7 +664,8 @@ class LineGraph:
 
         if self.y_integer_ticks:
             # Nice whole-number steps
-            nice_steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+            nice_steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000,
+                          10000, 20000, 50000, 100000, 200000, 500000, 1000000]
             step = nice_steps[-1]
             for s in nice_steps:
                 if data_max / s <= 6:
@@ -644,9 +679,22 @@ class LineGraph:
                 v += step
             return ticks
 
-        # Default: 5 evenly-spaced ticks with 10% headroom
-        y_max = data_max * 1.1
-        return [y_max * i / 4.0 for i in range(5)]
+        # Default: pick a "nice" step from a wide range so labels stay readable
+        # for both very small and very large data. Mirrors MultiLineGraph.
+        nice_steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500,
+                      1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000]
+        step = nice_steps[-1]
+        for s in nice_steps:
+            if data_max / s <= 6:
+                step = s
+                break
+        ticks = []
+        v = 0.0
+        top = data_max + step
+        while v <= top:
+            ticks.append(v)
+            v += step
+        return ticks
 
     def _compute_x_ticks(self, n: int, gw: int, font) -> list[int]:
         """Return data indices for x-axis tick marks at 30-second intervals."""
@@ -747,8 +795,12 @@ class LineGraph:
             data_max = y_min + 1.0
 
         # Compute y-axis tick values
-        y_ticks = self._compute_y_ticks(data_max)
-        y_max = y_ticks[-1] if y_ticks else data_max * 1.1
+        if self.y_max_fixed is not None:
+            y_max = float(self.y_max_fixed)
+            y_ticks = _nice_ticks_for_max(y_max)
+        else:
+            y_ticks = self._compute_y_ticks(data_max)
+            y_max = y_ticks[-1] if y_ticks else data_max * 1.1
 
         # Grid lines at computed tick positions
         for val in y_ticks:
@@ -876,6 +928,7 @@ class MultiLineGraph:
         self.y_suffix: str = ""  # appended to y-axis labels (e.g. "%")
         self.y_tick_step: float | None = None  # explicit y-axis step
         self.y_integer_ticks: bool = False  # snap y ticks to nice whole numbers
+        self.y_max_fixed: float | None = None  # force y-axis maximum (e.g. 1000 for CC HP)
         self.value_format: str | None = None  # tooltip format (e.g. "{:.2f}")
 
     def set_series(self, series_list: list[dict],
@@ -956,7 +1009,8 @@ class MultiLineGraph:
             return ticks
 
         if self.y_integer_ticks:
-            nice_int = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+            nice_int = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000,
+                        10000, 20000, 50000, 100000, 200000, 500000, 1000000]
             step_i = nice_int[-1]
             for s in nice_int:
                 if data_max / s <= 6:
@@ -970,7 +1024,8 @@ class MultiLineGraph:
                 v_i += step_i
             return ticks
 
-        nice_steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500]
+        nice_steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500,
+                      1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000]
         step = nice_steps[-1]
         for s in nice_steps:
             if data_max / s <= 6:
@@ -1054,8 +1109,12 @@ class MultiLineGraph:
         if data_max <= 0:
             data_max = 1.0
 
-        y_ticks = self._compute_y_ticks(data_max)
-        y_max = y_ticks[-1] if y_ticks else data_max * 1.1
+        if self.y_max_fixed is not None:
+            y_max = float(self.y_max_fixed)
+            y_ticks = _nice_ticks_for_max(y_max)
+        else:
+            y_ticks = self._compute_y_ticks(data_max)
+            y_max = y_ticks[-1] if y_ticks else data_max * 1.1
 
         # Grid lines
         for val in y_ticks:
@@ -1171,3 +1230,46 @@ class MultiLineGraph:
             for r_surf in rendered:
                 surface.blit(r_surf, (tip_x + 6, cy_tip))
                 cy_tip += line_h
+
+
+# ---------------------------------------------------------------------------
+# Game-start countdown overlay
+# ---------------------------------------------------------------------------
+
+def draw_countdown_overlay(surface: pygame.Surface, area: pygame.Rect,
+                           anim_timer: float, total: float = 3.0) -> None:
+    """Draw a 3-2-1 countdown centered in `area` during the warp-in phase.
+
+    `anim_timer` counts up from 0.0 to `total` seconds. Each integer second
+    pulses: starts large + slightly transparent, settles to a normal size,
+    then fades out toward the next digit.
+    """
+    if anim_timer < 0 or anim_timer >= total:
+        return
+    digit = max(1, int(total) - int(anim_timer))
+    frac = anim_timer - int(anim_timer)  # 0.0 → 1.0 within current second
+
+    # Pop in (0.0–0.25), hold (0.25–0.7), fade out (0.7–1.0)
+    if frac < 0.25:
+        k = frac / 0.25
+        scale = 1.6 - 0.6 * k
+        alpha = int(120 + 135 * k)
+    elif frac < 0.7:
+        scale = 1.0
+        alpha = 255
+    else:
+        k = (frac - 0.7) / 0.3
+        scale = 1.0 + 0.3 * k
+        alpha = int(255 * (1.0 - k))
+
+    base_size = max(72, min(area.width, area.height) // 6)
+    font = _get_font(base_size)
+    text_surf = font.render(str(digit), True, (240, 240, 255))
+    w = max(1, int(text_surf.get_width() * scale))
+    h = max(1, int(text_surf.get_height() * scale))
+    scaled = pygame.transform.smoothscale(text_surf, (w, h))
+    scaled.set_alpha(alpha)
+
+    cx = area.centerx - w // 2
+    cy = area.centery - h // 2
+    surface.blit(scaled, (cx, cy))

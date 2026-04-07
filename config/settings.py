@@ -92,6 +92,14 @@ ELECTRIC_ARMOR_REGEN_PER_STACK = 0.25    # HP/s per stack
 ELECTRIC_ARMOR_SPEED_BONUS = 0.10       # +20% speed per stack
 ELECTRIC_ARMOR_COLOR = (80, 180, 255)
 
+# -- overclock (engineer passive) ---------------------------------------------
+OVERCLOCK_RANGE = 70.0          # px — engineer aura radius
+OVERCLOCK_REGEN = 3.0           # HP/s healed on each metal extractor in range
+OVERCLOCK_BONUS = 0.02          # +2% additive spawn bonus per extractor
+OVERCLOCK_REGEN_T2 = 5.0        # HP/s for Mechanic
+OVERCLOCK_BONUS_T2 = 0.03       # +3% for Mechanic
+OVERCLOCK_COLOR = (255, 180, 60)
+
 
 # -- metal spot -------------------------------------------------------------
 METAL_SPOT_COLOR = (255, 200, 60)
@@ -114,14 +122,15 @@ REINFORCE_STACK_INTERVAL = 15.0             # seconds per plating stack
 REINFORCE_MAX_STACKS = 4
 
 # -- T2 upgrade system -------------------------------------------------------
-WATCH_TOWER_UPGRADE_DURATION = 30.0          # seconds to build watch tower
+OUTPOST_UPGRADE_DURATION = 30.0              # seconds to build the Outpost
 RESEARCH_LAB_UPGRADE_DURATION = 60.0         # seconds to build research lab
-T2_SPAWN_BONUS = 0.20                       # 20% spawn bonus for Watch Tower / Research Lab
-WATCH_TOWER_HEAL_PER_SEC = 1.0
-WATCH_TOWER_LASER_RANGE = 75.0
-WATCH_TOWER_LASER_DAMAGE = 15
-WATCH_TOWER_LASER_COOLDOWN = 2.0
-WATCH_TOWER_HP_BONUS = 50
+T2_SPAWN_BONUS = 0.20                       # 20% spawn bonus for Outpost / Research Lab
+OUTPOST_HEAL_PER_SEC = 1.0
+OUTPOST_LASER_RANGE = 75.0
+OUTPOST_LASER_DAMAGE = 15
+OUTPOST_LASER_COOLDOWN = 2.0
+OUTPOST_HP_BONUS = 50
+OUTPOST_LOS = 140.0                          # line-of-sight radius (vision)
 RESEARCH_LAB_HP_BONUS = 100
 
 # -- health bars ------------------------------------------------------------

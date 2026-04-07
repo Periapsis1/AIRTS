@@ -8,6 +8,7 @@ BUILD_ORDER = ["sniper", "soldier", "soldier", "medic", "medic", "medic"]
 class CowardBot(BaseAI):
     ai_id = "coward_bot"
     ai_name = "CowardBot"
+    deprecated = True
 
     def on_start(self) -> None:
         self._build_idx = 0

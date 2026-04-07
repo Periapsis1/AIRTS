@@ -99,22 +99,36 @@ def _make_proxy(d: dict, selected_ids: set[int]) -> _EntityProxy:
         p.upgrade_timer = 0.0
         utt = d.get("utt", 0.0)
         if p.upgrade_state.startswith("upgrading") and utt < 1.0:
-            from config.settings import WATCH_TOWER_UPGRADE_DURATION, RESEARCH_LAB_UPGRADE_DURATION
-            _dur = WATCH_TOWER_UPGRADE_DURATION if p.upgrade_state == "upgrading_tower" else RESEARCH_LAB_UPGRADE_DURATION
+            from config.settings import OUTPOST_UPGRADE_DURATION, RESEARCH_LAB_UPGRADE_DURATION
+            _dur = OUTPOST_UPGRADE_DURATION if p.upgrade_state == "upgrading_outpost" else RESEARCH_LAB_UPGRADE_DURATION
             p.upgrade_timer = (1.0 - utt) * _dur
         p.researched_unit_type = d.get("rut", "") or None
         p.is_fully_reinforced = d.get("ifr", False)
         _meb = d.get("meb", 0)
 
-        if p.upgrade_state == "watch_tower":
-            from config.settings import (WATCH_TOWER_LASER_DAMAGE,
-                                         WATCH_TOWER_LASER_RANGE,
-                                         WATCH_TOWER_LASER_COOLDOWN)
+        # Reconstruct a Reinforce ability proxy from the compact rst/rsp fields
+        # so the HUD plating bar works in multiplayer/replay viewing.
+        from config.settings import REINFORCE_MAX_STACKS, REINFORCE_STACK_INTERVAL
+        _rst = d.get("rst", REINFORCE_MAX_STACKS if p.is_fully_reinforced else 0)
+        _rsp = d.get("rsp", 0.0)
+        p.abilities.append(SimpleNamespace(
+            name="reinforce",
+            active=p.is_fully_reinforced,
+            stacks=_rst,
+            max_stacks=REINFORCE_MAX_STACKS,
+            stack_timer=_rsp * REINFORCE_STACK_INTERVAL,
+            stack_interval=REINFORCE_STACK_INTERVAL,
+        ))
+
+        if p.upgrade_state == "outpost":
+            from config.settings import (OUTPOST_LASER_DAMAGE,
+                                         OUTPOST_LASER_RANGE,
+                                         OUTPOST_LASER_COOLDOWN)
             p.weapon = SimpleNamespace(
                 name="Laser",
-                damage=WATCH_TOWER_LASER_DAMAGE,
-                range=WATCH_TOWER_LASER_RANGE,
-                cooldown=WATCH_TOWER_LASER_COOLDOWN,
+                damage=OUTPOST_LASER_DAMAGE,
+                range=OUTPOST_LASER_RANGE,
+                cooldown=OUTPOST_LASER_COOLDOWN,
                 charge_time=0,
             )
 

@@ -8,10 +8,13 @@ from config.settings import (
     PLAYER_COLORS, TEAM1_SELECTED_COLOR,
     SELECTED_COLOR, HEALTH_BAR_OFFSET, MEDIC_HEAL_COLOR,
     RANGE_COLOR, HEAL_LASER_COLOR,
+    OVERCLOCK_REGEN, OVERCLOCK_BONUS, OVERCLOCK_REGEN_T2, OVERCLOCK_BONUS_T2,
 )
 from config.unit_types import UNIT_TYPES
 from core.helpers import angle_diff
-from systems.abilities import ReactiveArmor, ElectricArmor, Focus, CombatStim, ability_from_dict
+from systems.abilities import (
+    ReactiveArmor, ElectricArmor, Focus, CombatStim, Overclock, ability_from_dict,
+)
 
 # fire-mode constants
 HOLD_FIRE = "hold_fire"
@@ -146,6 +149,10 @@ class Unit(CircleEntity, Damageable):
             self.abilities = [Focus()]
         elif unit_type == "soldier_t2":
             self.abilities = [CombatStim()]
+        elif unit_type == "engineer":
+            self.abilities = [Overclock(regen=OVERCLOCK_REGEN, bonus=OVERCLOCK_BONUS)]
+        elif unit_type == "engineer_t2":
+            self.abilities = [Overclock(regen=OVERCLOCK_REGEN_T2, bonus=OVERCLOCK_BONUS_T2)]
 
     # -- damage -------------------------------------------------------------
 

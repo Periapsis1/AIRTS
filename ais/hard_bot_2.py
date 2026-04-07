@@ -14,6 +14,7 @@ from systems.ai.base import BaseAI
 class HardBot2(BaseAI):
     ai_id = "hard_bot_2"
     ai_name = "Hard Bot 2"
+    deprecated = True
 
     _SCOUT_INTERVAL = 4
 

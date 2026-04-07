@@ -8,6 +8,7 @@ BUILD_ORDER = ["sniper", "soldier", "soldier", "medic", "medic", "medic"]
 class TerrorBot(BaseAI):
     ai_id = "terror_bot"
     ai_name = "TerrorBot"
+    deprecated = True
 
     def on_start(self) -> None:
         self._build_idx = 0

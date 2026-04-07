@@ -12,7 +12,7 @@ from ui.theme import (
 )
 from ui.widgets import Button, ToggleGroup, MultiLineGraph, _get_font
 from config.unit_types import UNIT_TYPES
-from config.settings import TEAM_COLORS
+from config.settings import TEAM_COLORS, CC_HP
 
 # Player colour dots (matches lobby palette)
 _PLAYER_COLORS = [
@@ -42,6 +42,17 @@ _BAR_GAP = 4
 _BAR_HEIGHT = 28
 _BAR_Y = 48
 _ANIM_MS = 3000
+
+
+def _lighten_color(color: tuple, amount: float = 0.5) -> tuple:
+    """Blend a color toward white by *amount* (0..1). Used to derive a paired
+    secondary color for the instantaneous-APM series."""
+    r, g, b = color[:3]
+    return (
+        min(255, int(r + (255 - r) * amount)),
+        min(255, int(g + (255 - g) * amount)),
+        min(255, int(b + (255 - b) * amount)),
+    )
 
 
 def _bar_color(team_id: int) -> tuple:
@@ -202,6 +213,9 @@ class ResultsScreen(BaseScreen):
 
         # Tab bar and graph (only if stats available)
         self._has_stats = stats is not None and "teams" in (stats or {})
+        # APM tab options — show both teams by default; user can hide AI
+        # if its values dwarf the player line.
+        self._apm_hide_ai: bool = False
         if self._has_stats:
             tab_options = [(key, label) for key, label in _TABS]
             total_tabs = len(tab_options)
@@ -214,6 +228,13 @@ class ResultsScreen(BaseScreen):
             graph_y = 125 + badge_offset
             graph_h = 340 - badge_offset
             self._graph = MultiLineGraph(30, graph_y, self.width - 60, graph_h)
+            # APM "Show/Hide AI" toggle button — drawn inline with the tab
+            # bar on the right side, only on the APM tab.
+            self._apm_ai_btn = Button(
+                self.width - 130, tab_y, 110, 28,
+                "Show AI" if self._apm_hide_ai else "Hide AI",
+                font_size=14,
+            )
             self._update_graph()
 
     def _derive_team_ids(self) -> list[int]:
@@ -264,16 +285,35 @@ class ResultsScreen(BaseScreen):
                 team_key = str(team_id)
                 data = teams_data.get(team_key, {}).get(key, [])
 
-                # metal_spots data is already in build % (from stats sampling)
-
                 color_idx = (team_id - 1) % len(GRAPH_LINE_COLORS)
+                color = GRAPH_LINE_COLORS[color_idx]
                 team_name = self._team_names.get(team_id, f"Team {team_id}")
-                series.append({
-                    "name": team_name,
-                    "data": data,
-                    "color": GRAPH_LINE_COLORS[color_idx],
-                    "visible": True,
-                })
+                is_ai = team_id not in self._human_teams
+                visible = not (key == "apm" and is_ai and self._apm_hide_ai)
+
+                if key == "apm":
+                    # Plot rolling-average APM and instantaneous APM as two
+                    # related series per team (instant uses a lighter shade).
+                    inst_data = teams_data.get(team_key, {}).get("apm_inst", [])
+                    series.append({
+                        "name": f"{team_name} avg",
+                        "data": data,
+                        "color": color,
+                        "visible": visible,
+                    })
+                    series.append({
+                        "name": f"{team_name} now",
+                        "data": inst_data,
+                        "color": _lighten_color(color, 0.5),
+                        "visible": visible,
+                    })
+                else:
+                    series.append({
+                        "name": team_name,
+                        "data": data,
+                        "color": color,
+                        "visible": True,
+                    })
 
         title = dict(_TABS).get(key, key)
         self._graph.title = title
@@ -282,12 +322,19 @@ class ResultsScreen(BaseScreen):
         self._graph.y_suffix = "%" if key == "metal_spots" else ""
         self._graph.value_format = "{:.2f}" if key == "step_ms" else None
         self._graph.y_tick_step = 10.0 if key == "metal_spots" else None
-        self._graph.y_integer_ticks = key in ("army_count", "units_killed")
+        self._graph.y_integer_ticks = key in (
+            "army_count", "units_killed", "apm", "damage_dealt", "healing_done"
+        )
+        # CC health is hard-capped at CC_HP, so anchor the y-axis there.
+        self._graph.y_max_fixed = float(CC_HP) if key == "cc_health" else None
 
         self._graph.set_series(series, timestamps=timestamps)
 
     def _is_build_tab(self) -> bool:
         return self._has_stats and self._tabs.value == "build_order"
+
+    def _is_apm_tab(self) -> bool:
+        return self._has_stats and self._tabs.value == "apm"
 
     def run(self) -> ScreenResult:
         while True:
@@ -311,6 +358,13 @@ class ResultsScreen(BaseScreen):
                     if self._tabs.handle_event(event):
                         self._build_scroll = 0
                         self._update_graph()
+                    if self._is_apm_tab() and self._apm_ai_btn.handle_event(event):
+                        self._apm_hide_ai = not self._apm_hide_ai
+                        self._apm_ai_btn.label = (
+                            "Show AI" if self._apm_hide_ai else "Hide AI"
+                        )
+                        self._update_graph()
+                        continue
                     if self._is_build_tab():
                         if event.type == pygame.MOUSEWHEEL:
                             self._build_scroll -= event.y * 18
@@ -400,6 +454,8 @@ class ResultsScreen(BaseScreen):
             self._draw_build_order_tab()
         else:
             self._graph.draw(self.screen)
+            if self._is_apm_tab():
+                self._apm_ai_btn.draw(self.screen)
 
     def _draw_score_bars(self):
         """Draw N horizontal score bars, one per team, stacked vertically."""
