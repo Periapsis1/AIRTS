@@ -78,7 +78,7 @@ class MetalExtractor(Unit):
         self.upgrade_timer = 0.0
         self.max_hp += OUTPOST_HP_BONUS
         self.hp += OUTPOST_HP_BONUS
-        color = PLAYER_COLORS[(self.player_id - 1) % len(PLAYER_COLORS)] if self.player_id >= 1 else PLAYER_COLORS[0]
+        color = TEAM_COLORS.get(self.team, PLAYER_COLORS[0])
         self.weapon = Weapon(
             name="Laser",
             damage=OUTPOST_LASER_DAMAGE,

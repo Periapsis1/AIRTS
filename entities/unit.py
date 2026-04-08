@@ -161,6 +161,20 @@ class Unit(CircleEntity, Damageable):
             amount = ability.modify_damage(amount, self)
         super().take_damage(amount)
 
+    def on_death(self) -> dict | None:
+        """Return a death-event dict for client visuals (or None to skip).
+
+        Called by the game's cleanup pass when this unit's `alive` flips to
+        False. Server-side gameplay cleanup belongs in `on_destroy` (called
+        earlier from `take_damage`); this hook only emits visual data.
+        """
+        return {
+            "x": round(self.x, 1),
+            "y": round(self.y, 1),
+            "c": list(self._base_color[:3]),
+            "r": float(self.radius),
+        }
+
     # -- commands -----------------------------------------------------------
 
     def move(self, x: float, y: float, stop_dist: float = 0.0):

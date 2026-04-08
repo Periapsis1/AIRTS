@@ -88,7 +88,7 @@ def _entity_visual(e: Entity) -> dict | None:
             d["spt"] = _q2(min(timer / CC_SPAWN_INTERVAL, 1.0)) if CC_SPAWN_INTERVAL > 0 else 0.0
             # Bonus %
             bonus = sum(me.get_spawn_bonus() for me in getattr(e, "metal_extractors", []))
-            d["bp"] = int(bonus * 100)
+            d["bp"] = round(bonus * 100)
             # Rally point
             rp = getattr(e, "rally_point", None)
             if rp is not None:
@@ -121,7 +121,7 @@ def _entity_visual(e: Entity) -> dict | None:
             d["rst"] = _rstacks
             d["rsp"] = _q2(_rstep)
             bonus = e.get_spawn_bonus()
-            d["meb"] = int(bonus * 100)
+            d["meb"] = round(bonus * 100)
         else:
             # Non-building units
             d["fa"] = _q2(e.facing_angle)
@@ -313,6 +313,8 @@ class ReplayRecorder:
         self._obstacles: list[dict] | None = None
         self._start_tick: int | None = None
         self._last_tick: int = 0
+        # Death-burst events accumulated between RECORD_INTERVAL ticks
+        self._pending_deaths: list[dict] = []
 
     # -- public API ---------------------------------------------------------
 
@@ -321,8 +323,16 @@ class ReplayRecorder:
         tick: int,
         entities: list[Entity],
         laser_flashes: list[LaserFlash],
+        death_events: list[dict] | None = None,
     ):
-        """Called every game tick.  Only records at RECORD_INTERVAL intervals."""
+        """Called every game tick.  Only records at RECORD_INTERVAL intervals.
+
+        Death events arrive every tick but frames are only written every
+        RECORD_INTERVAL ticks, so we buffer them between writes.
+        """
+        if death_events:
+            self._pending_deaths.extend(death_events)
+
         if tick % RECORD_INTERVAL != 0:
             return
 
@@ -350,6 +360,11 @@ class ReplayRecorder:
         # Laser flashes (always recorded in full — they're transient)
         lf_list = [_laser_visual(lf) for lf in laser_flashes]
 
+        # Drain accumulated death events for this recorded frame
+        de_list = self._pending_deaths if self._pending_deaths else None
+        if de_list:
+            self._pending_deaths = []
+
         is_keyframe = (self._frame_index % KEYFRAME_INTERVAL == 0)
 
         if is_keyframe:
@@ -360,6 +375,8 @@ class ReplayRecorder:
             }
             if lf_list:
                 frame["lf"] = lf_list
+            if de_list:
+                frame["de"] = de_list
         else:
             # Delta frame
             deltas: dict[str, dict] = {}
@@ -392,6 +409,8 @@ class ReplayRecorder:
                 frame["r"] = removed
             if lf_list:
                 frame["lf"] = lf_list
+            if de_list:
+                frame["de"] = de_list
 
         self._frames.append(frame)
         self._prev_snapshot = cur_snapshot
@@ -457,6 +476,7 @@ class ReplayReader:
         self._index: int = 0
         self._state: dict[int, dict] = {}  # entity_id -> visual dict
         self._laser_flashes: list[list] = []
+        self._frame_deaths: list[dict] = []
 
         # Build initial state from first frame (which must be a keyframe)
         if self._frames:
@@ -529,6 +549,7 @@ class ReplayReader:
         """Apply a single frame to current state."""
         frame = self._frames[index]
         self._laser_flashes = frame.get("lf", [])
+        self._frame_deaths = frame.get("de", [])
 
         if frame.get("k"):
             # Keyframe — full snapshot replaces state
@@ -563,6 +584,7 @@ class ReplayReader:
         # Rebuild from keyframe
         self._state = {}
         self._laser_flashes = []
+        self._frame_deaths = []
         for i in range(kf, index + 1):
             self._apply_frame(i)
         self._index = index
@@ -578,6 +600,10 @@ class ReplayReader:
     def get_state(self) -> tuple[list[dict], list[list]]:
         """Return (entities_list, laser_flashes) for the current frame."""
         return list(self._state.values()), list(self._laser_flashes)
+
+    def get_deaths(self) -> list[dict]:
+        """Death-burst events recorded with the current frame (may be empty)."""
+        return list(self._frame_deaths)
 
     # -- static helpers -----------------------------------------------------
 

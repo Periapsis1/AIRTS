@@ -9,6 +9,7 @@ from screens.results import (_draw_3d_bar, _ease_out_cubic,
                               _PLAYER_COLORS as _RES_PLAYER_COLORS,
                               _BAR_HEIGHT, _BAR_PAD_X, _BAR_GAP, _ANIM_MS)
 from systems.replay import ReplayReader, normalize_cp
+from entities.effects import DeathBurst
 from config.settings import (
     OBSTACLE_OUTLINE, HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT,
     HEALTH_BAR_BG, HEALTH_BAR_FG, HEALTH_BAR_LOW, HEALTH_BAR_OFFSET,
@@ -21,10 +22,13 @@ from config.settings import (
     TEAM_COLORS, PLAYER_COLORS, RANGE_COLOR, MEDIC_HEAL_COLOR,
     CC_LASER_RANGE,
     CAMERA_ZOOM_STEP, CAMERA_MAX_ZOOM,
+    OUTPOST_LOS,
 )
 from core.camera import Camera
 from config.unit_types import UNIT_TYPES
 from ui.widgets import Slider, Button, ToggleGroup, LineGraph, _get_font
+import gui
+from gui_adapter import wrap_entities
 from ui.theme import (
     MENU_BG, GRAPH_LINE_COLORS,
     SCORE_FONT_SIZE, SCORE_TEAM_COLORS,
@@ -173,19 +177,35 @@ class ReplayPlaybackScreen(BaseScreen):
         self._cur_lasers: list[list] = []
         self._capture_current_snapshot()
 
+        # Death-burst particle effects (client-side, ticked each frame)
+        self._death_bursts: list[DeathBurst] = []
+
         mw = self._reader.map_width
         mh = self._reader.map_height
         total = self._reader.frame_count
         sw = self.width   # screen width
         sh = self.height  # screen height
 
-        # Layout: top bar, game area (with pink bg), bottom bar
-        self._game_area = pygame.Rect(0, TOP_BAR_HEIGHT, sw,
-                                      sh - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT)
+        # Layout: top bar, game area, in-game HUD, bottom bar
+        # The in-game HUD (minimap/display/portrait/actions) sits between the
+        # game area and the transport bar so the player can see stats/minimap
+        # for the currently selected entities, matching the live game.
+        self._hud_h = int(sh * 0.20)
+        self._game_area = pygame.Rect(
+            0, TOP_BAR_HEIGHT, sw,
+            sh - TOP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT - self._hud_h,
+        )
         # Y offset for game area (below top bar)
         self._gy = TOP_BAR_HEIGHT
         # Bottom bar top edge
         bot_y = sh - BOTTOM_BAR_HEIGHT
+        # In-game HUD rect — sits directly above the bottom bar
+        self._hud_rect = pygame.Rect(
+            0, bot_y - self._hud_h, sw, self._hud_h,
+        )
+        # Effective screen height to pass to gui.draw_hud so the HUD anchors
+        # to the top of the bottom bar instead of the very bottom of the screen.
+        self._hud_screen_h = bot_y
 
         # ── Top bar: Back (left) → Show Actions, Score Screen, Show Stats (right) ──
         btn_h = 28
@@ -219,6 +239,8 @@ class ReplayPlaybackScreen(BaseScreen):
 
         # Camera & world surface for zoom/pan (viewport = game area)
         self._world_surface = pygame.Surface((mw, mh))
+        # SRCALPHA scratch for transient effects (death bursts)
+        self._anim_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
         self._bg_surface, self._bg_tile = self._build_background(mw, mh)
         self._camera = Camera(self._game_area.w, self._game_area.h,
                               mw, mh, max_zoom=CAMERA_MAX_ZOOM)
@@ -369,7 +391,14 @@ class ReplayPlaybackScreen(BaseScreen):
         if not self._reader.advance():
             return False
         self._capture_current_snapshot()
+        self._spawn_death_bursts_from_reader()
         return True
+
+    def _spawn_death_bursts_from_reader(self) -> None:
+        """Spawn DeathBurst particles for any deaths recorded in the current frame."""
+        events = self._reader.get_deaths()
+        if events:
+            DeathBurst.extend_from_events(self._death_bursts, events)
 
     def _get_interpolated_entities(self) -> list[dict]:
         """Return entities with positions blended between prev and cur frames."""
@@ -388,6 +417,7 @@ class ReplayPlaybackScreen(BaseScreen):
         self._reader.seek_to_frame(0)
         self._capture_current_snapshot()
         self._prev_entities = dict(self._cur_entities)
+        self._death_bursts.clear()
         self._lerp_t = 1.0
         self._ended = False
         self._playing = True
@@ -500,6 +530,7 @@ class ReplayPlaybackScreen(BaseScreen):
                     self._reader.seek_to_frame(self._scrubber.value)
                     self._capture_current_snapshot()
                     self._prev_entities = dict(self._cur_entities)
+                    self._death_bursts.clear()
                     self._lerp_t = 1.0
                     # If we were at end, scrubbing resets that
                     if self._ended:
@@ -534,6 +565,16 @@ class ReplayPlaybackScreen(BaseScreen):
 
                 # Selection input handling (only in game area)
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    # Minimap click → recenter camera (handled before drag)
+                    if self._hud_rect.collidepoint(event.pos):
+                        minimap_world = gui.handle_minimap_click(
+                            event.pos[0], event.pos[1],
+                            self.width, self._hud_screen_h, self._hud_h,
+                            self._reader.map_width, self._reader.map_height,
+                        )
+                        if minimap_world is not None:
+                            self._camera.center_on(*minimap_world)
+                        continue
                     if game_rect.collidepoint(event.pos):
                         self._dragging = True
                         self._drag_start = event.pos  # screen space for threshold
@@ -563,13 +604,11 @@ class ReplayPlaybackScreen(BaseScreen):
                         self._last_click_time = now
                         self._last_click_pos = (mx, my)  # screen space for distance
                     else:
-                        # Circle select — convert both endpoints to world
+                        # Box select — convert both endpoints to world
                         w_sx, w_sy = self._screen_to_world(self._drag_start)
                         w_ex, w_ey = self._screen_to_world(event.pos)
-                        cx = (w_sx + w_ex) / 2.0
-                        cy = (w_sy + w_ey) / 2.0
-                        sr = math.hypot(w_ex - w_sx, w_ey - w_sy) / 2.0
-                        self._circle_select(entities, cx, cy, sr, additive)
+                        self._box_select(entities, w_sx, w_sy,
+                                         w_ex, w_ey, additive)
 
             if self._show_score_screen:
                 self._draw_stats_overlay()
@@ -590,6 +629,12 @@ class ReplayPlaybackScreen(BaseScreen):
                         break
                 self._lerp_t = min(1.0, self._accumulator / self._frame_dt)
                 self._scrubber.value = self._reader.current_index
+
+            # Update death-burst particles every render frame, scaled by speed
+            if self._death_bursts:
+                burst_dt = dt * _SPEEDS[self._speed_idx] if self._playing else dt
+                self._death_bursts = [b for b in self._death_bursts
+                                      if b.update(burst_dt)]
 
             self._draw()
 
@@ -647,26 +692,35 @@ class ReplayPlaybackScreen(BaseScreen):
         for lf in self._cur_lasers:
             self._draw_laser(lf)
 
+        # Death-burst particles
+        if self._death_bursts:
+            self._anim_surface.fill((0, 0, 0, 0))
+            for b in self._death_bursts:
+                b.draw(self._anim_surface)
+            ws.blit(self._anim_surface, (0, 0))
+
         # Team name labels above command centers
         self._draw_team_labels(entities)
 
-        # Drag selection circle (in world space)
+        # Drag selection rectangle (in world space) — matches the live game's
+        # box select rather than the older circle select.
         if self._dragging:
             sx, sy = self._drag_start
             ex, ey = self._drag_end
-            # Convert screen drag points to world
-            w_sx, w_sy = self._screen_to_world(self._drag_start)
-            w_ex, w_ey = self._screen_to_world(self._drag_end)
-            screen_r = math.hypot(ex - sx, ey - sy) / 2.0
-            if screen_r >= 5:
-                wcx = (w_sx + w_ex) / 2.0
-                wcy = (w_sy + w_ey) / 2.0
-                wr = math.hypot(w_ex - w_sx, w_ey - w_sy) / 2.0
+            screen_dist = math.hypot(ex - sx, ey - sy)
+            if screen_dist >= 5:
+                w_sx, w_sy = self._screen_to_world(self._drag_start)
+                w_ex, w_ey = self._screen_to_world(self._drag_end)
+                rx = min(w_sx, w_ex)
+                ry = min(w_sy, w_ey)
+                rw = abs(w_ex - w_sx)
+                rh = abs(w_ey - w_sy)
+                rect = pygame.Rect(int(rx), int(ry), int(rw), int(rh))
                 self._selection_surface.fill((0, 0, 0, 0))
-                pygame.draw.circle(self._selection_surface, SELECTION_FILL_COLOR,
-                                   (int(wcx), int(wcy)), int(wr))
-                pygame.draw.circle(self._selection_surface, SELECTION_RECT_COLOR,
-                                   (int(wcx), int(wcy)), int(wr), 1)
+                pygame.draw.rect(self._selection_surface,
+                                 SELECTION_FILL_COLOR, rect)
+                pygame.draw.rect(self._selection_surface,
+                                 SELECTION_RECT_COLOR, rect, 1)
                 ws.blit(self._selection_surface, (0, 0))
 
         # Fog of war
@@ -689,6 +743,26 @@ class ReplayPlaybackScreen(BaseScreen):
         from core.background import blit_screen_background
         blit_screen_background(self.screen, ga, self._camera, self._bg_tile)
         self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
+
+        # In-game HUD (minimap / display / portrait / actions) — always
+        # visible so the minimap is available, and selection details show
+        # whenever entities are picked.
+        self.screen.fill((20, 20, 30), self._hud_rect)
+        pygame.draw.line(self.screen, (40, 40, 55),
+                         (0, self._hud_rect.top),
+                         (sw, self._hud_rect.top))
+        proxies = wrap_entities(entities, self._selected_ids)
+        gui.draw_hud(
+            self.screen, proxies,
+            sw, self._hud_screen_h, self._hud_h,
+            enable_t2=self._reader.config.get("enable_t2", False),
+            t2_upgrades=None,
+            t2_researching=None,
+            camera=self._camera,
+            world_w=self._reader.map_width,
+            world_h=self._reader.map_height,
+            obstacles=self._reader.obstacles,
+        )
 
         # Bottom bar
         self.screen.fill((20, 20, 30), (0, bot_y, sw, BOTTOM_BAR_HEIGHT))
@@ -1079,28 +1153,42 @@ class ReplayPlaybackScreen(BaseScreen):
         if best_id is not None:
             self._selected_ids.add(best_id)
 
-    def _circle_select(self, entities: list[dict], cx: float, cy: float,
-                       sr: float, additive: bool):
-        """Select all selectable entities in a drag circle (CC only if no units)."""
+    def _box_select(self, entities: list[dict],
+                    wx1: float, wy1: float,
+                    wx2: float, wy2: float, additive: bool):
+        """Select all selectable entities inside a drag rectangle.
+
+        Army units take priority over buildings — if any units are inside the
+        box only those get selected, otherwise the buildings inside the box
+        (e.g. a CC) get selected. Mirrors client_game.py's rectangle select.
+        """
         if not additive:
             self._selected_ids.clear()
-        selected_units: list[int] = []
-        cc_id: int | None = None
+        rx = min(wx1, wx2)
+        ry = min(wy1, wy2)
+        rw = abs(wx2 - wx1)
+        rh = abs(wy2 - wy1)
+        rcx, rcy = rx + rw / 2.0, ry + rh / 2.0
+        hw, hh = rw / 2.0, rh / 2.0
+
+        army_ids: list[int] = []
+        building_ids: list[int] = []
         for ent in entities:
             if not self._is_selectable(ent):
                 continue
             ex, ey = ent.get("x", 0), ent.get("y", 0)
             t = ent.get("t")
             er = CC_RADIUS if t == "CC" else ent.get("r", 5)
-            if math.hypot(ex - cx, ey - cy) <= sr + er:
-                if t == "CC":
-                    cc_id = ent.get("id")
-                elif t == "U":
-                    selected_units.append(ent.get("id"))
-        if selected_units:
-            self._selected_ids.update(selected_units)
-        elif cc_id is not None:
-            self._selected_ids.add(cc_id)
+            if abs(ex - rcx) <= hw + er and abs(ey - rcy) <= hh + er:
+                eid = ent.get("id")
+                if eid is None:
+                    continue
+                if t == "U":
+                    army_ids.append(eid)
+                else:
+                    building_ids.append(eid)
+        targets = army_ids if army_ids else building_ids
+        self._selected_ids.update(targets)
 
     def _select_all_of_type(self, entities: list[dict], mx: float, my: float):
         """Double-click: select all selectable units of the same type under cursor."""
@@ -1235,6 +1323,9 @@ class ReplayPlaybackScreen(BaseScreen):
             ut = ent.get("ut", "soldier")
             stats = UNIT_TYPES.get(ut, {})
             los = int(stats.get("los", 100))
+            # Outpost upgrade grants extended vision
+            if ut == "metal_extractor" and ent.get("us") == "outpost":
+                los = int(OUTPOST_LOS)
             if los <= 0:
                 continue
             los_circles.append((int(ent.get("x", 0)), int(ent.get("y", 0)), los))
@@ -1261,19 +1352,32 @@ class ReplayPlaybackScreen(BaseScreen):
     # -- team name labels ---------------------------------------------------
 
     def _draw_team_labels(self, entities: list[dict]):
-        """Draw player/AI name labels above command centers."""
+        """Draw player/AI name labels above command centers and
+        spawn-bonus labels above metal extractors."""
         font = _get_font(20)
         ws = self._world_surface
         for ent in entities:
-            if ent.get("t") != "CC":
-                continue
-            tm = ent.get("tm", 1)
-            name = self._team_names.get(tm, f"Team {tm}")
-            team_color = TEAM_COLORS.get(tm, PLAYER_COLORS[0])
-            name_surf = font.render(name, True, team_color)
-            nx = int(ent.get("x", 0)) - name_surf.get_width() // 2
-            ny = int(ent.get("y", 0)) - 40
-            ws.blit(name_surf, (nx, ny))
+            t = ent.get("t")
+            if t == "CC":
+                tm = ent.get("tm", 1)
+                name = self._team_names.get(tm, f"Team {tm}")
+                bonus_pct = int(ent.get("bp", 0))
+                if bonus_pct > 0:
+                    name = f"{name} (+{bonus_pct}%)"
+                team_color = TEAM_COLORS.get(tm, PLAYER_COLORS[0])
+                name_surf = font.render(name, True, team_color)
+                nx = int(ent.get("x", 0)) - name_surf.get_width() // 2
+                ny = int(ent.get("y", 0)) - 40
+                ws.blit(name_surf, (nx, ny))
+            elif t == "ME":
+                pct = int(ent.get("meb", 0))
+                if pct <= 0:
+                    continue
+                label_surf = font.render(f"+{pct}%", True, (255, 255, 255))
+                r = ent.get("r", METAL_EXTRACTOR_RADIUS)
+                lx = int(ent.get("x", 0)) - label_surf.get_width() // 2
+                ly = int(ent.get("y", 0) - r - HEALTH_BAR_OFFSET - 12)
+                ws.blit(label_surf, (lx, ly))
 
     # -- command line helper ------------------------------------------------
 

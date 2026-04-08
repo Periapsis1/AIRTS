@@ -25,6 +25,7 @@ from config.settings import (
     GUI_TEXT_COLOR,
     RANGE_COLOR, MEDIC_HEAL_COLOR, CC_LASER_RANGE,
     REACTIVE_ARMOR_COLOR, ELECTRIC_ARMOR_COLOR,
+    OUTPOST_LOS,
 )
 from core.camera import Camera
 from config import audio
@@ -34,6 +35,7 @@ import gui
 from gui_adapter import wrap_entities
 from systems.replay import normalize_cp
 from config import display as display_config
+from entities.effects import DeathBurst
 
 _STATUS_COLOR = (180, 180, 200)
 _DISCONNECT_COLOR = (255, 100, 100)
@@ -158,6 +160,7 @@ class ClientGameScreen(BaseScreen):
         self._anim_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
         self._fragments: list[dict] = []
         self._splashes: list[dict] = []
+        self._death_bursts: list[DeathBurst] = []
 
         # Player names from game_start
         self._player_names: dict[int, str] = client.player_names or {}
@@ -264,6 +267,8 @@ class ClientGameScreen(BaseScreen):
                     self._disconnect_timer = 0.0
                     # Play sounds from server events
                     self._play_sound_events(frame.get("sounds", []))
+                    # Spawn death-burst particles for units that died this tick
+                    self._spawn_death_bursts(frame.get("deaths", []))
                     # Recompute movement extrapolation state
                     self._update_extrapolation(self._entities)
                     # Rebuild T2 upgrade display from entity state
@@ -292,6 +297,10 @@ class ClientGameScreen(BaseScreen):
             # Update explosion fragments
             if self._phase == "explode":
                 self._update_fragments(dt)
+
+            # Update death-burst particles every frame (independent of phase)
+            if self._death_bursts:
+                self._death_bursts = [b for b in self._death_bursts if b.update(dt)]
 
             # Check for disconnect or game over
             if self._client.error and not self._is_local:
@@ -1044,6 +1053,12 @@ class ClientGameScreen(BaseScreen):
                 snd.set_volume(audio.master_volume)
                 snd.play()
 
+    def _spawn_death_bursts(self, events: list[dict]) -> None:
+        """Spawn DeathBurst particles for unit-death events from the server."""
+        if not events or self._phase != "playing":
+            return
+        DeathBurst.extend_from_events(self._death_bursts, events)
+
     # -- animations ---------------------------------------------------------
 
     def _init_fragments(self, losing_team: int) -> None:
@@ -1255,6 +1270,18 @@ class ClientGameScreen(BaseScreen):
                 pygame.draw.circle(temp, (255, 60, 30, alpha),
                                    (int(sx), int(sy)), cur_r, 2)
                 ws.blit(temp, (0, 0))
+
+        # Death-burst particles (drawn into the shared anim surface)
+        if self._death_bursts:
+            self._anim_surface.fill((0, 0, 0, 0))
+            drew_any = False
+            for b in self._death_bursts:
+                if _los is not None and not self._is_visible(b.x, b.y, _los):
+                    continue
+                b.draw(self._anim_surface)
+                drew_any = True
+            if drew_any:
+                ws.blit(self._anim_surface, (0, 0))
 
         # (ME bonus labels and team labels drawn in screen space after camera.apply)
         self._label_data = (entities, _los)
@@ -1902,6 +1929,9 @@ class ClientGameScreen(BaseScreen):
             ut = ent.get("ut", "soldier")
             stats = UNIT_TYPES.get(ut, {})
             los = int(stats.get("los", 100))
+            # Outpost upgrade grants extended vision
+            if ut == "metal_extractor" and ent.get("us") == "outpost":
+                los = int(OUTPOST_LOS)
             if los > 0:
                 circles.append((int(ent.get("x", 0)), int(ent.get("y", 0)), los))
         return circles

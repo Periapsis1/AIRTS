@@ -46,6 +46,11 @@ class CommandCenter(Unit):
         bonus = sum(me.get_spawn_bonus() for me in self.metal_extractors)
         self._spawn_timer += dt * (1.0 + bonus)
 
+    def on_death(self) -> dict | None:
+        # CCs already get the dramatic end-of-game explosion fragment effect,
+        # so suppress the per-unit death-burst particles for them.
+        return None
+
     def get_total_bonus_percent(self) -> int:
         """Return total spawn bonus as an integer percentage (e.g. 32 for +32%)."""
         bonus = sum(me.get_spawn_bonus() for me in self.metal_extractors)
@@ -66,6 +71,11 @@ class CommandCenter(Unit):
         u = Unit(ux, uy, team=self.team, unit_type=actual_type,
                  player_id=self.player_id)
         u._bounds = self._bounds
+        # Face the center of the map so right-side players don't get a free
+        # turn-around vs left-side players (FOV cone is symmetric this way).
+        cx = self._bounds[0] / 2.0
+        cy = self._bounds[1] / 2.0
+        u.facing_angle = math.atan2(cy - uy, cx - ux)
         if self.rally_point is not None:
             u.move(*self.rally_point)
         return u

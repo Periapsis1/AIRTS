@@ -273,6 +273,11 @@ class Game:
         self.command_centers: list[CommandCenter] = [
             e for e in self.entities if isinstance(e, CommandCenter)
         ]
+        # Snapshot each player's starting CC position. Survives CC destruction
+        # so AIs can keep targeting an enemy spawn even after the CC is gone.
+        self._spawn_locations: dict[int, tuple[float, float]] = {
+            cc.player_id: (cc.x, cc.y) for cc in self.command_centers
+        }
         self.metal_extractors: list[MetalExtractor] = [
             e for e in self.entities if isinstance(e, MetalExtractor)
         ]
@@ -338,6 +343,17 @@ class Game:
                 ("surrender", Button(_mx, _my + 2 * (_mbh + _mgap), _mbw, _mbh, "Surrender")),
                 ("lobby", Button(_mx, _my + 3 * (_mbh + _mgap), _mbw, _mbh, "Back to Lobby")),
             ]
+
+            # Headless "Draw Game" button — lets the user end a long-running
+            # headless game in a draw with one click (no esc menu needed).
+            self._draw_game_btn: Button | None = None
+            if headless:
+                _dgw, _dgh = 160, 40
+                self._draw_game_btn = Button(
+                    self._screen_width // 2 - _dgw // 2,
+                    self._screen_height - _dgh - 30,
+                    _dgw, _dgh, "Draw Game",
+                )
 
             # -- camera & world surface -------------------------------------------
             self._world_surface = pygame.Surface((width, height))
@@ -643,6 +659,14 @@ class Game:
             if event.type == pygame.QUIT:
                 self._set_mouse_grab(False)
                 self.running = False
+
+            # Headless: "Draw Game" button ends the game in a draw.
+            if (self._headless and self._draw_game_btn is not None
+                    and self._draw_game_btn.handle_event(event)):
+                if self._winner == 0:
+                    self._winner = -1
+                self.running = False
+                continue
 
             if self._pause_btn.handle_event(event):
                 if not self._esc_menu_open:
@@ -1257,6 +1281,7 @@ class Game:
 
         _t = _perf()
         self._sound_events: list[str] = []
+        self._death_events: list[dict] = []
         combat_step(alive_units, obstacles, self.laser_flashes, dt,
                     quadfield=self._quadfield,
                     circle_obs=self._obs_circle, rect_obs=self._obs_rect,
@@ -1298,6 +1323,9 @@ class Game:
         _had_deaths = False
         for u in self.units:
             if not u.alive:
+                ev = u.on_death()
+                if ev is not None:
+                    self._death_events.append(ev)
                 self._quadfield.remove_unit(u)
                 _had_deaths = True
         if _had_deaths:
@@ -1391,6 +1419,7 @@ class Game:
         if self._replay_recorder is not None:
             self._replay_recorder.capture_tick(
                 self._iteration, self.entities, self.laser_flashes,
+                death_events=getattr(self, '_death_events', None),
             )
 
         # -- win condition: game ends when <= 1 team has a living CC ---------------
@@ -1451,6 +1480,8 @@ class Game:
             "iteration": self._iteration,
             "winner": self._winner,
             "next_entity_id": self._next_entity_id,
+            "spawn_locations": {str(pid): list(pos)
+                                for pid, pos in self._spawn_locations.items()},
         }
 
     def load_state(self, data: dict[str, Any]):
@@ -1530,6 +1561,18 @@ class Game:
         self._iteration = data["iteration"]
         self._winner = data["winner"]
         self._next_entity_id = data["next_entity_id"]
+        # Spawn locations: prefer the saved snapshot (handles late-frame loads
+        # where CCs may already be destroyed); fall back to current CC
+        # positions for older saves that pre-date this field.
+        saved_spawns = data.get("spawn_locations")
+        if saved_spawns:
+            self._spawn_locations = {
+                int(pid): tuple(pos) for pid, pos in saved_spawns.items()
+            }
+        else:
+            self._spawn_locations = {
+                cc.player_id: (cc.x, cc.y) for cc in self.command_centers
+            }
         self._apply_selectability()
 
     # -- render -------------------------------------------------------------
@@ -2154,6 +2197,8 @@ class Game:
                     snap_x = self._screen_width // 2 - self._SNAP_W // 2
                     snap_y = ty + timer_surf.get_height() + self._SNAP_PAD
                     self.screen.blit(self._headless_snap_surf, (snap_x, snap_y))
+                if self._draw_game_btn is not None:
+                    self._draw_game_btn.draw(self.screen)
                 pygame.display.flip()
         else:
             # Grab the mouse at game start
@@ -2261,8 +2306,9 @@ class Game:
         """Run the game loop for a dedicated server — no display, real-time 60Hz.
 
         *pre_step* is called before each tick (e.g. to inject remote commands).
-        *post_step(tick, entities, laser_flashes, winner, sound_events)* is
-        called after each tick (e.g. to broadcast state to clients).
+        *post_step(tick, entities, laser_flashes, winner, sound_events,
+        death_events)* is called after each tick (e.g. to broadcast state to
+        clients).
         """
         # On Windows, increase timer resolution from ~15.6ms to ~1ms so that
         # time.sleep() is accurate enough for a 60Hz game loop.
@@ -2291,7 +2337,8 @@ class Game:
             if post_step:
                 post_step(self._iteration, self.entities,
                           self.laser_flashes, self._winner,
-                          getattr(self, '_sound_events', []))
+                          getattr(self, '_sound_events', []),
+                          getattr(self, '_death_events', []))
             time.sleep(0.016)
 
         # Set CCs ready to spawn on first tick
@@ -2318,7 +2365,8 @@ class Game:
                     if post_step:
                         post_step(self._iteration, self.entities,
                                   self.laser_flashes, self._winner,
-                                  getattr(self, '_sound_events', []))
+                                  getattr(self, '_sound_events', []),
+                                  getattr(self, '_death_events', []))
                     next_tick = time.perf_counter()
                     continue
 
@@ -2345,7 +2393,8 @@ class Game:
                 if post_step:
                     post_step(self._iteration, self.entities,
                               self.laser_flashes, self._winner,
-                              getattr(self, '_sound_events', []))
+                              getattr(self, '_sound_events', []),
+                              getattr(self, '_death_events', []))
 
                 # If phase transitioned to explode, the game is over
                 if self._phase == "explode":

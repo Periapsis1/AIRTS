@@ -219,11 +219,13 @@ class InternalServer:
         def pre_step():
             self._host.inject_remote_commands()
 
-        def post_step(tick, entities, laser_flashes, winner, sound_events=None):
+        def post_step(tick, entities, laser_flashes, winner,
+                      sound_events=None, death_events=None):
             self._host.broadcast_state(
                 tick, entities, laser_flashes, winner,
                 splash_effects=game.splash_effects,
                 sound_events=sound_events,
+                death_events=death_events,
                 team_visibility=game._team_vision if game._fog_of_war else None,
                 player_team=dict(game.player_team) if game._fog_of_war else None,
                 metal_spots=game.metal_spots if game._fog_of_war else None,

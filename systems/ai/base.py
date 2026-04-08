@@ -124,6 +124,25 @@ class BaseAI(ABC):
                 if isinstance(e, CommandCenter) and e.alive and e.team != self._team
                 and (vis is None or e.entity_id in vis)]
 
+    def get_enemy_spawn_locations(self) -> list[tuple[float, float]]:
+        """Return the starting (x, y) of every player not on this AI's team.
+
+        Spawn positions are public knowledge — the list is fog-independent
+        and survives the destruction of the corresponding command center,
+        so it stays a stable target reference for macro planning. The list
+        contains one entry per enemy *player*, so FFA and team games both
+        return every distinct enemy spawn.
+        """
+        spawns = getattr(self._game, "_spawn_locations", None)
+        if not spawns:
+            return []
+        player_team = getattr(self._game, "player_team", {})
+        out: list[tuple[float, float]] = []
+        for pid, pos in spawns.items():
+            if player_team.get(pid) != self._team:
+                out.append((float(pos[0]), float(pos[1])))
+        return out
+
     def get_enemy_direction(self) -> tuple[float, float]:
         """Unit vector from own CC toward average enemy CC position.
 
@@ -190,6 +209,30 @@ class BaseAI(ABC):
             key=lambda e: e.entity_id,
         )
 
+    def get_unclaimed_moons(self) -> list[MetalSpot]:
+        """Return metal spots the AI's team *believes* are unclaimed.
+
+        With fog of war on, this respects the team's last-known view of
+        each spot rather than ground truth. So if an enemy captured a
+        moon while it was hidden from this team, it still appears here
+        as "unclaimed" — exactly what the AI knows. Spots the team has
+        never scouted are also reported as unclaimed (the default belief).
+
+        With fog off, returns the literal set of moons whose ``owner``
+        is None.
+        """
+        spots = self.get_metal_spots()
+        if not getattr(self._game, "_fog_of_war", False):
+            return [s for s in spots if s.owner is None]
+
+        vis_state = self._game._team_vision.get(self._team)
+        if vis_state is None:
+            # Fog enabled but no vision state yet — fall back to ground truth
+            return [s for s in spots if s.owner is None]
+
+        memory = vis_state.metal_spot_memory
+        return [s for s in spots if memory.get(s.entity_id) is None]
+
     def get_metal_extractors(self) -> list[MetalExtractor]:
         vis = self._fog_visible_ids
         return sorted(
@@ -203,6 +246,25 @@ class BaseAI(ABC):
             [e for e in self._entities if isinstance(e, MetalExtractor) and e.alive and e.team == self._team],
             key=lambda e: e.entity_id,
         )
+
+    def get_bases(self) -> list[Unit]:
+        """Return every visible base — both CommandCenters and MetalExtractors.
+
+        Own bases are always included; enemy bases are included only when
+        they are currently in this team's line of sight (matching the
+        behavior of get_metal_extractors / get_enemy_ccs). Useful for
+        macro-level decisions like target selection or expansion planning.
+        """
+        vis = self._fog_visible_ids
+        bases: list[Unit] = []
+        for e in self._entities:
+            if not e.alive:
+                continue
+            if not isinstance(e, (CommandCenter, MetalExtractor)):
+                continue
+            if e.team == self._team or vis is None or e.entity_id in vis:
+                bases.append(e)
+        return sorted(bases, key=lambda e: e.entity_id)
 
     def get_cc(self) -> CommandCenter | None:
         for e in self._entities:
@@ -219,6 +281,16 @@ class BaseAI(ABC):
         tick = self._game._iteration if self._game else 0
         self._command_queue.enqueue(GameCommand(
             type="move",
+            player_id=self._player_id,
+            tick=tick,
+            data={"unit_ids": [unit.entity_id], "targets": [(x, y)]},
+        ))
+
+    def fight_unit(self, unit, x: float, y: float):
+        """Issue a fight-move to (x, y): walk there, pause to engage anything in range."""
+        tick = self._game._iteration if self._game else 0
+        self._command_queue.enqueue(GameCommand(
+            type="fight",
             player_id=self._player_id,
             tick=tick,
             data={"unit_ids": [unit.entity_id], "targets": [(x, y)]},
@@ -265,3 +337,36 @@ class BaseAI(ABC):
                 tick=tick,
                 data={"unit_type": unit_type},
             ))
+
+    # -- T2 upgrades --------------------------------------------------------
+
+    def upgrade_extractor(self, extractor, path: str):
+        """Begin a T2 upgrade on a metal extractor.
+
+        ``path`` is either ``"outpost"`` (defensive turret) or
+        ``"research_lab"`` (enables a single T2 unit research). The
+        extractor must already be fully reinforced and in its base
+        state, and the game must have T2 enabled — otherwise the
+        command is silently dropped server-side.
+        """
+        tick = self._game._iteration if self._game else 0
+        self._command_queue.enqueue(GameCommand(
+            type="upgrade_extractor",
+            player_id=self._player_id,
+            tick=tick,
+            data={"entity_id": extractor.entity_id, "path": path},
+        ))
+
+    def set_research_type(self, extractor, unit_type: str):
+        """Pick which unit type a research-lab-in-progress will upgrade to T2.
+
+        Must be issued after ``upgrade_extractor(.., 'research_lab')`` while
+        the extractor is in the ``choosing_research`` state.
+        """
+        tick = self._game._iteration if self._game else 0
+        self._command_queue.enqueue(GameCommand(
+            type="set_research_type",
+            player_id=self._player_id,
+            tick=tick,
+            data={"entity_id": extractor.entity_id, "unit_type": unit_type},
+        ))

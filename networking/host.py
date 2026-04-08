@@ -62,6 +62,7 @@ class GameHost:
         self._max_players = max_players
         self._broadcast_interval = broadcast_interval
         self._pending_sounds: list[str] = []
+        self._pending_deaths: list[dict] = []
 
         # Cross-thread queues
         self._inbound_commands: queue.Queue[GameCommand] = queue.Queue()
@@ -213,6 +214,7 @@ class GameHost:
         winner: int,
         splash_effects: list | None = None,
         sound_events: list[str] | None = None,
+        death_events: list[dict] | None = None,
         team_visibility: dict | None = None,
         player_team: dict[int, int] | None = None,
         metal_spots: list | None = None,
@@ -225,6 +227,8 @@ class GameHost:
         """
         if sound_events:
             self._pending_sounds.extend(sound_events)
+        if death_events:
+            self._pending_deaths.extend(death_events)
         if tick % self._broadcast_interval != 0:
             return
 
@@ -234,6 +238,9 @@ class GameHost:
         sounds = self._pending_sounds if self._pending_sounds else None
         if sounds:
             self._pending_sounds = []
+        deaths = self._pending_deaths if self._pending_deaths else None
+        if deaths:
+            self._pending_deaths = []
 
         if team_visibility and player_team:
             # -- Per-team filtered frames (fog of war) --
@@ -280,6 +287,8 @@ class GameHost:
                     frame["splashes"] = splash_list
                 if sounds:
                     frame["sounds"] = sounds
+                if deaths:
+                    frame["deaths"] = deaths
                 team_frames[team_id] = frame
 
             # Queue per-client based on their team
@@ -310,6 +319,8 @@ class GameHost:
                 frame["splashes"] = splash_list
             if sounds:
                 frame["sounds"] = sounds
+            if deaths:
+                frame["deaths"] = deaths
             with self._clients_lock:
                 for c in self._clients.values():
                     if c.connected.is_set():

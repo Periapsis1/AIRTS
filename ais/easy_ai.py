@@ -6,7 +6,7 @@ from systems.ai.base import BaseAI
 
 class EasyAI(BaseAI):
     ai_id = "easy"
-    ai_name = "Easy AI v1"
+    ai_name = "Easy AI v0"
     deprecated = True
 
     def on_start(self) -> None:
