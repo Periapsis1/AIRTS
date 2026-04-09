@@ -176,7 +176,7 @@ UNIT_TYPES = {
         "hp": 65, "speed": 35, "radius": 6,
         "symbol": SNIPER_SYMBOL, "can_attack": True,
         "fov": 35, "turn_rate": 50, "los": 135,
-        "weapon": {"name": "Heavy Laser", "damage": 45, "range": 150, "cooldown": 5.0,
+        "weapon": {"name": "Heavy Laser", "damage": 45, "range": 150, "cooldown": 6.0,
                    "laser_width": 3, "sound": "laser"},
         "is_t2": True,
     },
