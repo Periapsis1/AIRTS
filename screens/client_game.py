@@ -85,6 +85,7 @@ class ClientGameScreen(BaseScreen):
         self._is_local = is_local
         self._my_team: int = client.client_team
         self._all_teams: set[int] = set(client.player_team.values()) if client.player_team else {1, 2}
+        self._team_colors: dict[int, tuple] = getattr(client, 'team_colors', {}) or {}
         mw = client.map_width
         mh = client.map_height
 
@@ -1139,8 +1140,7 @@ class ClientGameScreen(BaseScreen):
             if pts:
                 scaled = [(cx + px * scale, cy + py * scale) for px, py in pts]
                 pygame.draw.polygon(ws, color, scaled)
-                outline = TEAM_COLORS.get(tm, PLAYER_COLORS[0])
-                pygame.draw.polygon(ws, outline, scaled, 2)
+                pygame.draw.polygon(ws, SELECTED_COLOR, scaled, 2)
 
             # Glow ring
             glow_radius = int(CC_RADIUS * 3 * t)
@@ -1381,7 +1381,7 @@ class ClientGameScreen(BaseScreen):
         font = _get_font(22)
 
         # Team indicator
-        team_color = TEAM_COLORS.get(self._my_team, PLAYER_COLORS[0])
+        team_color = self._resolve_team_color(self._my_team)
         team_label = font.render(f"Team {self._my_team}", True, team_color)
         self.screen.blit(team_label, (10, 10))
 
@@ -1733,8 +1733,7 @@ class ClientGameScreen(BaseScreen):
         if pts:
             translated = [(x + px, y + py) for px, py in pts]
             pygame.draw.polygon(ws, c, translated)
-            outline = TEAM_COLORS.get(tm, PLAYER_COLORS[0])
-            pygame.draw.polygon(ws, outline, translated, 2)
+            pygame.draw.polygon(ws, SELECTED_COLOR, translated, 2)
 
         # Spawn progress arc
         spt = ent.get("spt", 0.0)
@@ -1761,6 +1760,12 @@ class ClientGameScreen(BaseScreen):
             self._draw_health_bar(x, y, CC_RADIUS + HEALTH_BAR_OFFSET,
                                   hp, CC_HP, bar_w=40)
 
+    def _resolve_team_color(self, team_id: int) -> tuple:
+        """Return the color for a team, using server-provided team_colors if available."""
+        if self._team_colors and team_id in self._team_colors:
+            return self._team_colors[team_id]
+        return TEAM_COLORS.get(team_id, PLAYER_COLORS[0])
+
     def _draw_metal_spot(self, ent: dict) -> None:
         ws = self._world_surface
         x, y = ent.get("x", 0), ent.get("y", 0)
@@ -1777,7 +1782,7 @@ class ClientGameScreen(BaseScreen):
         if ow is None:
             color = (255, 200, 60)
         else:
-            color = TEAM_COLORS.get(ow, PLAYER_COLORS[0])
+            color = self._resolve_team_color(ow)
         pygame.draw.circle(ws, color, (int(x), int(y)), int(r))
 
         cp_dict = normalize_cp(cp)
@@ -1789,7 +1794,7 @@ class ClientGameScreen(BaseScreen):
             for team_id, progress in cp_dict.items():
                 if progress < 0.01:
                     continue
-                progress_color = TEAM_COLORS.get(team_id, PLAYER_COLORS[0])
+                progress_color = self._resolve_team_color(team_id)
                 end_angle = start_angle + progress * math.tau
                 pygame.draw.arc(ws, progress_color, rect,
                                 start_angle, end_angle,
@@ -1801,7 +1806,7 @@ class ClientGameScreen(BaseScreen):
         r = ent.get("r", METAL_EXTRACTOR_RADIUS)
         rot = ent.get("rot", 0.0)
         hp = ent.get("hp", 200)
-        tm = ent.get("tm", 1)
+        c = tuple(ent.get("c", [255, 255, 255]))
 
         s = r * math.sqrt(3) / 2
         static_points = [
@@ -1811,12 +1816,13 @@ class ClientGameScreen(BaseScreen):
         ]
         rotated = [p * complex(math.cos(rot), math.sin(rot)) for p in static_points]
         points = [(p.real + x, p.imag + y) for p in rotated]
+        pygame.draw.polygon(ws, c, points)
         pygame.draw.polygon(ws, (0, 0, 0), points, 1)
 
         # Reinforcement plating arcs
         rst = ent.get("rst", 0)
         if rst > 0:
-            arc_color = TEAM_COLORS.get(tm, PLAYER_COLORS[0])
+            arc_color = c
             arc_r = METAL_SPOT_CAPTURE_RADIUS
             rect = pygame.Rect(x - arc_r, y - arc_r, arc_r * 2, arc_r * 2)
             arc_span = math.radians(87.5)
@@ -1892,7 +1898,7 @@ class ClientGameScreen(BaseScreen):
             bp = ent.get("bp", 0)
             if bp > 0:
                 name = f"{name} (+{bp}%)"
-            team_color = TEAM_COLORS.get(tm, PLAYER_COLORS[0])
+            team_color = self._resolve_team_color(tm)
             name_surf = font.render(name, True, team_color)
             nx = int(ent.get("x", 0)) - name_surf.get_width() // 2
             ny = int(ent.get("y", 0)) - 40
@@ -1926,7 +1932,7 @@ class ClientGameScreen(BaseScreen):
             bp = ent.get("bp", 0)
             if bp > 0:
                 name = f"{name} (+{bp}%)"
-            team_color = TEAM_COLORS.get(tm, PLAYER_COLORS[0])
+            team_color = self._resolve_team_color(tm)
             name_surf = font.render(name, True, team_color)
             sx, sy = cam.world_to_screen(ex, ey - 40)
             self.screen.blit(name_surf, (int(sx) + ga.x - name_surf.get_width() // 2,

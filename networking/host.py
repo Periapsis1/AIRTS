@@ -351,6 +351,7 @@ class GameHost:
         fog_of_war: bool = False,
         player_team: dict[int, int] | None = None,
         player_names: dict[int, str] | None = None,
+        team_colors: dict[int, list[int]] | None = None,
     ) -> None:
         """Send the initial game_start message with obstacle data."""
         obstacles = []
@@ -370,6 +371,8 @@ class GameHost:
             msg["player_team"] = {str(k): v for k, v in player_team.items()}
         if player_names is not None:
             msg["player_names"] = {str(k): v for k, v in player_names.items()}
+        if team_colors is not None:
+            msg["team_colors"] = {str(k): v for k, v in team_colors.items()}
         with self._clients_lock:
             for c in self._clients.values():
                 c.outbound.put(msg)

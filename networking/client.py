@@ -227,6 +227,10 @@ class GameClient:
                 self.player_team = {int(k): v for k, v in raw_pt.items()} if raw_pt else {}
                 raw_pn = msg.get("player_names", {})
                 self.player_names = {int(k): v for k, v in raw_pn.items()} if raw_pn else {}
+                raw_tc = msg.get("team_colors", {})
+                self.team_colors: dict[int, tuple] = {
+                    int(k): tuple(v) for k, v in raw_tc.items()
+                } if raw_tc else {}
                 self._game_started.set()
             elif msg_type == "lobby_status":
                 with self._lobby_lock:

@@ -169,8 +169,7 @@ class MetalExtractor(Unit):
         ]
         rotated_points = [p * complex(math.cos(self.rotation), math.sin(self.rotation)) for p in static_points]
         points = [(p.real + self.x, p.imag + self.y) for p in rotated_points]
-        color = PLAYER_COLORS[(self.team - 1) % len(PLAYER_COLORS)]
-        pygame.draw.polygon(surface, color, points)
+        pygame.draw.polygon(surface, self._base_color, points)
         pygame.draw.polygon(surface, (0, 0, 0), points, 1)
 
     def _draw_outpost(self, surface: pygame.Surface):
@@ -180,8 +179,7 @@ class MetalExtractor(Unit):
         static_points = [complex(-r, -r), complex(r, -r), complex(r, r), complex(-r, r)]
         rotated = [p * rot for p in static_points]
         points = [(p.real + self.x, p.imag + self.y) for p in rotated]
-        color = TEAM_COLORS.get(self.team, PLAYER_COLORS[0])
-        pygame.draw.polygon(surface, color, points)
+        pygame.draw.polygon(surface, self._base_color, points)
         pygame.draw.polygon(surface, (0, 0, 0), points, 1)
 
     def _draw_research_lab(self, surface: pygame.Surface):
@@ -201,8 +199,7 @@ class MetalExtractor(Unit):
         static_points = [complex(r * math.cos(math.tau * i / 6), r * math.sin(math.tau * i / 6)) for i in range(6)]
         rotated = [p * rot for p in static_points]
         points = [(p.real + self.x, p.imag + self.y) for p in rotated]
-        color = TEAM_COLORS.get(self.team, PLAYER_COLORS[0])
-        pygame.draw.polygon(surface, color, points)
+        pygame.draw.polygon(surface, self._base_color, points)
         pygame.draw.polygon(surface, (0, 0, 0), points, 1)
 
     def _draw_upgrade_progress(self, surface: pygame.Surface):

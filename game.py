@@ -97,6 +97,7 @@ class Game:
         map_generator: BaseMapGenerator | None = None,
         player_ai: dict[int, BaseAI] | None = None,
         player_team: dict[int, int] | None = None,
+        player_colors: dict[int, int] | None = None,
         team_ai: dict[int, BaseAI] | None = None,  # legacy alias for player_ai
         screen: pygame.Surface | None = None,
         clock: pygame.time.Clock | None = None,
@@ -302,6 +303,11 @@ class Game:
         self._t2_upgrades: dict[int, set[str]] = {t: set() for t in self.all_teams}
         # T2 in-progress tracking: unit types currently being researched
         self._t2_researching: dict[int, set[str]] = {t: set() for t in self.all_teams}
+
+        # Player color mapping: player_id → index into PLAYER_COLORS
+        self._player_colors: dict[int, int] | None = player_colors
+        if player_colors:
+            self._apply_player_colors()
 
         self._apply_selectability()
         self._bind_and_start_ais()
@@ -651,15 +657,43 @@ class Game:
             float(pos[1] - self._game_area.y),
         )
 
+    def _player_color(self, player_id: int) -> tuple:
+        """Return the PLAYER_COLORS entry for a player, respecting lobby selection."""
+        if self._player_colors and player_id in self._player_colors:
+            idx = self._player_colors[player_id] % len(PLAYER_COLORS)
+        else:
+            idx = (player_id - 1) % len(PLAYER_COLORS)
+        return PLAYER_COLORS[idx]
+
+    def _team_color(self, team: int) -> tuple:
+        """Return the color for a team, using the first player's color on that team."""
+        if self._player_colors:
+            for pid, t in self.player_team.items():
+                if t == team and pid in self._player_colors:
+                    return self._player_color(pid)
+        return PLAYER_COLORS[(team - 1) % len(PLAYER_COLORS)]
+
+    def _apply_player_colors(self) -> None:
+        """Recolor all entities using the lobby-selected player colors."""
+        for e in self.entities:
+            if not isinstance(e, Unit):
+                continue
+            new_color = self._player_color(e.player_id)
+            e._base_color = new_color
+            e.color = new_color
+            # Update weapon laser color too
+            if hasattr(e, 'weapon') and e.weapon is not None:
+                e.weapon.laser_color = new_color
+
     def _apply_color_mode(self) -> None:
         """Recolor all units based on current color mode (player or team)."""
         for e in self.entities:
             if not isinstance(e, Unit):
                 continue
             if self._color_mode == "team":
-                new_color = PLAYER_COLORS[(e.team - 1) % len(PLAYER_COLORS)]
+                new_color = self._team_color(e.team)
             else:
-                new_color = PLAYER_COLORS[(e.player_id - 1) % len(PLAYER_COLORS)]
+                new_color = self._player_color(e.player_id)
             e._base_color = new_color
             if not e.selected:
                 e.color = new_color
@@ -1346,11 +1380,15 @@ class Game:
                 if isinstance(e, Unit):
                     self._quadfield.add_unit(e)
                     self.team_units.setdefault(e.team, []).append(e)
-                    # Apply color mode to newly spawned units
+                    # Apply lobby-selected colors and color mode to newly spawned units
                     if hasattr(self, '_color_mode') and self._color_mode == "team":
-                        new_color = PLAYER_COLORS[(e.team - 1) % len(PLAYER_COLORS)]
-                        e._base_color = new_color
-                        e.color = new_color
+                        new_color = self._team_color(e.team)
+                    else:
+                        new_color = self._player_color(e.player_id)
+                    e._base_color = new_color
+                    e.color = new_color
+                    if hasattr(e, 'weapon') and e.weapon is not None:
+                        e.weapon.laser_color = new_color
         self._stats.record_subsystem("spawn", (_perf() - _t) * 1000)
 
         _t = _perf()

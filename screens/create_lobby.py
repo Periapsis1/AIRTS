@@ -737,9 +737,15 @@ class CreateLobbyScreen(BaseScreen):
         map_w, map_h = _MAP_SIZES[self._map_size.value]
         obs_val = self._sl_obstacles.value
 
+        player_colors: dict[int, int] = {}
+        for i, slot in enumerate(self._slots):
+            pid = i + 1
+            player_colors[pid] = slot.color_idx
+
         return ScreenResult("game", data={
             "player_ai_ids": player_ai_ids,
             "player_team":   player_team,
+            "player_colors": player_colors,
             "player_name":   player_name,
             "width":         map_w,
             "height":        map_h,
@@ -787,11 +793,33 @@ class CreateLobbyScreen(BaseScreen):
             used_pids.add(next_pid)
             next_pid += 1
 
+        # Build player_colors: map each player_id to their selected color index
+        player_colors: dict[int, int] = {}
+        for slot in self._slots:
+            if slot.online_pid:
+                player_colors[slot.online_pid] = slot.color_idx
+        # AI slots — match the pid assignment above
+        used_pids2 = {s.online_pid for s in self._slots if s.online_pid}
+        if client and client.player_id not in used_pids2:
+            used_pids2.add(client.player_id)
+        next_pid2 = max(used_pids2 | {0}) + 1
+        for slot in self._slots:
+            if slot.online_pid:
+                continue
+            if slot.ai_dd.value == "human":
+                continue
+            while next_pid2 in used_pids2:
+                next_pid2 += 1
+            player_colors[next_pid2] = slot.color_idx
+            used_pids2.add(next_pid2)
+            next_pid2 += 1
+
         map_w, map_h = _MAP_SIZES[self._map_size.value]
 
         config = {
             "player_ai_ids": {str(k): v for k, v in player_ai_ids.items()},
             "player_team":   {str(k): v for k, v in player_team.items()},
+            "player_colors": {str(k): v for k, v in player_colors.items()},
             "width":         map_w,
             "height":        map_h,
             "obstacle_count": self._sl_obstacles.value,

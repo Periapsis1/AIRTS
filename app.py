@@ -179,6 +179,7 @@ class App:
             or {}
         )
         player_team: dict[int, int] | None = data.get("player_team")
+        player_colors: dict[int, int] | None = data.get("player_colors")
 
         # Build AI instances from registry
         player_ai: dict = {}
@@ -223,6 +224,7 @@ class App:
                 map_generator=map_gen,
                 player_ai=player_ai,
                 player_team=player_team,
+                player_colors=player_colors,
                 screen=self._screen,
                 clock=self._clock,
                 replay_config=replay_config,
@@ -278,6 +280,7 @@ class App:
                 map_generator=map_gen,
                 player_ai=player_ai,
                 player_team=player_team,
+                player_colors=player_colors,
                 replay_config=replay_config,
                 player_name=player_name,
                 max_ticks=max_ticks,

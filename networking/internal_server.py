@@ -101,8 +101,9 @@ class InternalServer:
         map_generator,
         player_ai: dict,
         player_team: dict[int, int] | None,
-        replay_config: dict | None,
-        player_name: str,
+        player_colors: dict[int, int] | None = None,
+        replay_config: dict | None = None,
+        player_name: str = "Human",
         max_ticks: int = 0,
         enable_t2: bool = False,
         fog_of_war: bool = False,
@@ -120,6 +121,7 @@ class InternalServer:
             "map_generator": map_generator,
             "player_ai": player_ai,
             "player_team": player_team,
+            "player_colors": player_colors,
             "replay_config": replay_config,
             "player_name": player_name,
             "max_ticks": max_ticks,
@@ -172,6 +174,7 @@ class InternalServer:
             map_generator=p["map_generator"],
             player_ai=p["player_ai"],
             player_team=p["player_team"],
+            player_colors=p.get("player_colors"),
             player_name=p["player_name"],
             headless=True,
             max_ticks=p["max_ticks"],
@@ -206,6 +209,12 @@ class InternalServer:
             else:
                 player_names[pid] = p["player_name"]
 
+        # Build team_colors from game's resolved colors
+        team_colors: dict[int, list[int]] = {}
+        for t in game.all_teams:
+            c = game._team_color(t)
+            team_colors[t] = list(c[:3])
+
         # Send game_start
         self._host.send_game_start(
             game.entities, p["width"], p["height"],
@@ -213,6 +222,7 @@ class InternalServer:
             fog_of_war=p["fog_of_war"],
             player_team=dict(game.player_team),
             player_names=player_names,
+            team_colors=team_colors,
         )
 
         # Run simulation with networked callbacks
