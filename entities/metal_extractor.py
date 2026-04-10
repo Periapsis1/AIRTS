@@ -27,10 +27,11 @@ import math
 
 class MetalExtractor(Unit):
     def __init__(self, *, metal_spot: MetalSpot | None = None, team: int = 1,
-                 x: float = 0, y: float = 0):
+                 x: float = 0, y: float = 0, player_id: int | None = None):
         if metal_spot is not None:
             x, y = metal_spot.x, metal_spot.y
-        super().__init__(x, y, team, unit_type="metal_extractor")
+        super().__init__(x, y, team, unit_type="metal_extractor",
+                         player_id=player_id if player_id is not None else team)
         self.metal_spot = metal_spot
         self.rotation: float = 0.0
         self.rotation_speed: float = 10.0
@@ -255,7 +256,8 @@ class MetalExtractor(Unit):
 
     @classmethod
     def from_dict(cls, data: dict) -> MetalExtractor:
-        me = cls(team=data["team"], x=data["x"], y=data["y"])
+        me = cls(team=data["team"], x=data["x"], y=data["y"],
+                 player_id=data.get("player_id", data.get("team", 1)))
         me.entity_id = data["entity_id"]
         me.color = tuple(data["color"])
         me.selected = data["selected"]

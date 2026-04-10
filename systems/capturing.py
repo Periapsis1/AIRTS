@@ -16,6 +16,9 @@ def capture_step(entities: list[Entity], command_centers: list[CommandCenter], u
         if metal_spot.owner is not None:
             continue
         team_counts: dict[int, float] = {t: 0.0 for t in all_teams}
+        # Track per-player contribution to determine ME owner
+        player_counts: dict[int, float] = {}
+        player_team_map: dict[int, int] = {}
         sx, sy = metal_spot.center()
         nearby = grid.get_units_exact(sx, sy, METAL_SPOT_CAPTURE_RADIUS) if grid is not None else units
         for unit in nearby:
@@ -29,12 +32,23 @@ def capture_step(entities: list[Entity], command_centers: list[CommandCenter], u
                 continue
             weight = 0.3 if unit.unit_type == "scout" else 1.0
             team_counts[unit.team] += weight
+            pid = getattr(unit, 'player_id', unit.team)
+            player_counts[pid] = player_counts.get(pid, 0.0) + weight
+            player_team_map[pid] = unit.team
 
         metal_spot.update_progress(team_counts, dt)
 
         def _claim_for(claiming_team: int):
+            # Find the player on this team with the most units near the spot
+            best_pid = claiming_team
+            best_weight = -1.0
+            for pid, w in player_counts.items():
+                if player_team_map.get(pid) == claiming_team and w > best_weight:
+                    best_weight = w
+                    best_pid = pid
             metal_spot.claim(claiming_team)
-            metal_extractor = MetalExtractor(metal_spot=metal_spot, team=claiming_team)
+            metal_extractor = MetalExtractor(metal_spot=metal_spot, team=claiming_team,
+                                             player_id=best_pid)
             entities.append(metal_extractor)
             metal_extractors.append(metal_extractor)
             # Give the spawn bonus to ALL living CCs on the claiming team equally

@@ -1140,7 +1140,7 @@ class ClientGameScreen(BaseScreen):
             if pts:
                 scaled = [(cx + px * scale, cy + py * scale) for px, py in pts]
                 pygame.draw.polygon(ws, color, scaled)
-                pygame.draw.polygon(ws, SELECTED_COLOR, scaled, 2)
+                pygame.draw.polygon(ws, color, scaled, 2)
 
             # Glow ring
             glow_radius = int(CC_RADIUS * 3 * t)
@@ -1733,7 +1733,7 @@ class ClientGameScreen(BaseScreen):
         if pts:
             translated = [(x + px, y + py) for px, py in pts]
             pygame.draw.polygon(ws, c, translated)
-            pygame.draw.polygon(ws, SELECTED_COLOR, translated, 2)
+            pygame.draw.polygon(ws, c, translated, 2)
 
         # Spawn progress arc
         spt = ent.get("spt", 0.0)

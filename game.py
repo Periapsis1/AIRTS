@@ -1347,6 +1347,10 @@ class Game:
                     self.units.append(e)
                     self._quadfield.add_unit(e)
                     self.team_units.setdefault(e.team, []).append(e)
+                    # Apply lobby-selected color to newly captured extractors
+                    new_color = self._player_color(e.player_id)
+                    e._base_color = new_color
+                    e.color = new_color
                 if hasattr(e, "selectable"):
                     e.selectable = e.team in self._selectable_teams
         self._stats.record_subsystem("capture", (_perf() - _t) * 1000)

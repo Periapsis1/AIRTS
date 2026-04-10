@@ -84,7 +84,7 @@ class CommandCenter(Unit):
         """Draw the CC hexagon at a given scale factor (0..1). No spawn arc or rally flag."""
         scaled_pts = [(self.x + px * scale, self.y + py * scale) for px, py in self.points]
         pygame.draw.polygon(surface, self.color, scaled_pts)
-        pygame.draw.polygon(surface, SELECTED_COLOR, scaled_pts, 2)
+        pygame.draw.polygon(surface, self._base_color, scaled_pts, 2)
 
         # Health bar only if visible
         if scale > 0.1:
@@ -93,7 +93,7 @@ class CommandCenter(Unit):
     def draw(self, surface: pygame.Surface):
         translated = [(self.x + px, self.y + py) for px, py in self.points]
         pygame.draw.polygon(surface, self.color, translated)
-        pygame.draw.polygon(surface, SELECTED_COLOR, translated, 2)
+        pygame.draw.polygon(surface, self._base_color, translated, 2)
 
         if self.selected:
             pygame.draw.polygon(surface, SELECTED_COLOR, translated, 2)
