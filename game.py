@@ -1,5 +1,6 @@
 """Game class — owns the loop, wires systems together."""
 from __future__ import annotations
+import dataclasses
 import math
 import random
 import sys
@@ -681,9 +682,9 @@ class Game:
             new_color = self._player_color(e.player_id)
             e._base_color = new_color
             e.color = new_color
-            # Update weapon laser color too
+            # Update weapon laser color too (Weapon is a frozen dataclass)
             if hasattr(e, 'weapon') and e.weapon is not None:
-                e.weapon.laser_color = new_color
+                e.weapon = dataclasses.replace(e.weapon, laser_color=new_color)
 
     def _apply_color_mode(self) -> None:
         """Recolor all units based on current color mode (player or team)."""
@@ -1388,7 +1389,7 @@ class Game:
                     e._base_color = new_color
                     e.color = new_color
                     if hasattr(e, 'weapon') and e.weapon is not None:
-                        e.weapon.laser_color = new_color
+                        e.weapon = dataclasses.replace(e.weapon, laser_color=new_color)
         self._stats.record_subsystem("spawn", (_perf() - _t) * 1000)
 
         _t = _perf()
