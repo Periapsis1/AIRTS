@@ -9,6 +9,10 @@ from screens.results import (_draw_3d_bar, _ease_out_cubic,
                               _PLAYER_COLORS as _RES_PLAYER_COLORS,
                               _BAR_HEIGHT, _BAR_PAD_X, _BAR_GAP, _ANIM_MS)
 from systems.replay import ReplayReader, normalize_cp
+from systems.chat import (
+    ChatLog, ChatMessage, FloatingChatText,
+    CHAT_DISPLAY_COUNT, CHAT_DISPLAY_DURATION,
+)
 from entities.effects import DeathBurst
 from config.settings import (
     OBSTACLE_OUTLINE, HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT,
@@ -179,6 +183,11 @@ class ReplayPlaybackScreen(BaseScreen):
 
         # Death-burst particle effects (client-side, ticked each frame)
         self._death_bursts: list[DeathBurst] = []
+
+        # Chat state (replays show all messages regardless of team/mode)
+        self._chat_log = ChatLog()
+        self._floating_chats: list[FloatingChatText] = []
+        self._game_time = 0.0
 
         mw = self._reader.map_width
         mh = self._reader.map_height
@@ -392,7 +401,29 @@ class ReplayPlaybackScreen(BaseScreen):
             return False
         self._capture_current_snapshot()
         self._spawn_death_bursts_from_reader()
+        self._process_chat_events()
         return True
+
+    def _process_chat_events(self) -> None:
+        """Add chat messages from the current replay frame to the log."""
+        for ce in self._reader.get_chat_events():
+            msg = ChatMessage(
+                player_id=ce["pid"], player_name=ce["name"],
+                team_id=ce["tid"], message=ce["msg"],
+                mode=ce["mode"], tick=ce.get("tick", 0),
+                timestamp=self._game_time,
+            )
+            self._chat_log.add_message(msg)
+            # Spawn floating text above sender's CC
+            for ent in self._cur_entities.values():
+                if ent.get("t") == "CC" and ent.get("pid") == ce["pid"]:
+                    color = PLAYER_COLORS[(ce["pid"] - 1) % len(PLAYER_COLORS)]
+                    self._floating_chats.append(FloatingChatText(
+                        x=ent["x"], y=ent["y"] - 60,
+                        message=ce["msg"], color=color,
+                        player_name=ce["name"],
+                    ))
+                    break
 
     def _spawn_death_bursts_from_reader(self) -> None:
         """Spawn DeathBurst particles for any deaths recorded in the current frame."""
@@ -418,6 +449,9 @@ class ReplayPlaybackScreen(BaseScreen):
         self._capture_current_snapshot()
         self._prev_entities = dict(self._cur_entities)
         self._death_bursts.clear()
+        self._chat_log = ChatLog()
+        self._floating_chats.clear()
+        self._game_time = 0.0
         self._lerp_t = 1.0
         self._ended = False
         self._playing = True
@@ -531,6 +565,7 @@ class ReplayPlaybackScreen(BaseScreen):
                     self._capture_current_snapshot()
                     self._prev_entities = dict(self._cur_entities)
                     self._death_bursts.clear()
+                    self._floating_chats.clear()
                     self._lerp_t = 1.0
                     # If we were at end, scrubbing resets that
                     if self._ended:
@@ -635,6 +670,12 @@ class ReplayPlaybackScreen(BaseScreen):
                 burst_dt = dt * _SPEEDS[self._speed_idx] if self._playing else dt
                 self._death_bursts = [b for b in self._death_bursts
                                       if b.update(burst_dt)]
+
+            # Update floating chat text and game time
+            effect_dt = dt * _SPEEDS[self._speed_idx] if self._playing else dt
+            self._floating_chats = [fc for fc in self._floating_chats
+                                    if fc.update(effect_dt)]
+            self._game_time += effect_dt
 
             self._draw()
 
@@ -744,6 +785,24 @@ class ReplayPlaybackScreen(BaseScreen):
         blit_screen_background(self.screen, ga, self._camera, self._bg_tile)
         self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
 
+        # Floating chat text (screen-space)
+        if self._floating_chats:
+            cam = self._camera
+            chat_font_size = max(8, int(round(20 * cam.zoom)))
+            chat_font = _get_font(chat_font_size)
+            for fc in self._floating_chats:
+                alpha = int(220 * fc.alpha_frac)
+                sx, sy = cam.world_to_screen(fc.x, fc.y)
+                sy -= fc.rise_offset
+                display = f"{fc.player_name}: {fc.message}" if fc.player_name else fc.message
+                if len(display) > 50:
+                    display = display[:47] + "..."
+                chat_surf = chat_font.render(display, True, fc.color)
+                chat_surf.set_alpha(alpha)
+                self.screen.blit(chat_surf,
+                                 (int(sx) + ga.x - chat_surf.get_width() // 2,
+                                  int(sy) + ga.y))
+
         # In-game HUD (minimap / display / portrait / actions) — always
         # visible so the minimap is available, and selection details show
         # whenever entities are picked.
@@ -794,11 +853,39 @@ class ReplayPlaybackScreen(BaseScreen):
         time_y = self._scrubber.y + 2
         self.screen.blit(time_surf, (time_x, time_y))
 
+        # Chat log overlay
+        self._draw_chat_overlay()
+
         # Stats HUD (always on top)
         if self._stat_mode > 0:
             self._draw_stat_dropdown()
 
         pygame.display.flip()
+
+    # -- chat overlay -----------------------------------------------------------
+
+    def _draw_chat_overlay(self) -> None:
+        """Draw recent chat messages near the top-left of the game area."""
+        visible = self._chat_log.get_visible(self._game_time)
+        if not visible:
+            return
+        font = _get_font(20)
+        ga = self._game_area
+        x = ga.x + 8
+        y = ga.y + 8
+        for msg in visible[-CHAT_DISPLAY_COUNT:]:
+            age = self._game_time - msg.timestamp
+            alpha = max(0, min(255, int(255 * (1.0 - age / CHAT_DISPLAY_DURATION))))
+            prefix = "[TEAM] " if msg.mode == "team" else ""
+            color = PLAYER_COLORS[(msg.player_id - 1) % len(PLAYER_COLORS)]
+            text = f"{prefix}{msg.player_name}: {msg.message}"
+            surf = font.render(text, True, color)
+            surf.set_alpha(alpha)
+            bg = pygame.Surface((surf.get_width() + 8, surf.get_height() + 2), pygame.SRCALPHA)
+            bg.fill((0, 0, 0, int(120 * alpha / 255)))
+            self.screen.blit(bg, (x - 4, y - 1))
+            self.screen.blit(surf, (x, y))
+            y += surf.get_height() + 3
 
     # -- inline stats dropdown -------------------------------------------------
 

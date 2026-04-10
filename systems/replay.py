@@ -315,6 +315,8 @@ class ReplayRecorder:
         self._last_tick: int = 0
         # Death-burst events accumulated between RECORD_INTERVAL ticks
         self._pending_deaths: list[dict] = []
+        # Chat events accumulated between RECORD_INTERVAL ticks
+        self._pending_chats: list[dict] = []
 
     # -- public API ---------------------------------------------------------
 
@@ -324,14 +326,17 @@ class ReplayRecorder:
         entities: list[Entity],
         laser_flashes: list[LaserFlash],
         death_events: list[dict] | None = None,
+        chat_events: list[dict] | None = None,
     ):
         """Called every game tick.  Only records at RECORD_INTERVAL intervals.
 
-        Death events arrive every tick but frames are only written every
-        RECORD_INTERVAL ticks, so we buffer them between writes.
+        Death and chat events arrive every tick but frames are only written
+        every RECORD_INTERVAL ticks, so we buffer them between writes.
         """
         if death_events:
             self._pending_deaths.extend(death_events)
+        if chat_events:
+            self._pending_chats.extend(chat_events)
 
         if tick % RECORD_INTERVAL != 0:
             return
@@ -364,6 +369,10 @@ class ReplayRecorder:
         de_list = self._pending_deaths if self._pending_deaths else None
         if de_list:
             self._pending_deaths = []
+        # Drain accumulated chat events for this recorded frame
+        ch_list = self._pending_chats if self._pending_chats else None
+        if ch_list:
+            self._pending_chats = []
 
         is_keyframe = (self._frame_index % KEYFRAME_INTERVAL == 0)
 
@@ -377,6 +386,8 @@ class ReplayRecorder:
                 frame["lf"] = lf_list
             if de_list:
                 frame["de"] = de_list
+            if ch_list:
+                frame["ch"] = ch_list
         else:
             # Delta frame
             deltas: dict[str, dict] = {}
@@ -411,6 +422,8 @@ class ReplayRecorder:
                 frame["lf"] = lf_list
             if de_list:
                 frame["de"] = de_list
+            if ch_list:
+                frame["ch"] = ch_list
 
         self._frames.append(frame)
         self._prev_snapshot = cur_snapshot
@@ -477,6 +490,7 @@ class ReplayReader:
         self._state: dict[int, dict] = {}  # entity_id -> visual dict
         self._laser_flashes: list[list] = []
         self._frame_deaths: list[dict] = []
+        self._frame_chats: list[dict] = []
 
         # Build initial state from first frame (which must be a keyframe)
         if self._frames:
@@ -550,6 +564,7 @@ class ReplayReader:
         frame = self._frames[index]
         self._laser_flashes = frame.get("lf", [])
         self._frame_deaths = frame.get("de", [])
+        self._frame_chats = frame.get("ch", [])
 
         if frame.get("k"):
             # Keyframe — full snapshot replaces state
@@ -585,6 +600,7 @@ class ReplayReader:
         self._state = {}
         self._laser_flashes = []
         self._frame_deaths = []
+        self._frame_chats = []
         for i in range(kf, index + 1):
             self._apply_frame(i)
         self._index = index
@@ -604,6 +620,10 @@ class ReplayReader:
     def get_deaths(self) -> list[dict]:
         """Death-burst events recorded with the current frame (may be empty)."""
         return list(self._frame_deaths)
+
+    def get_chat_events(self) -> list[dict]:
+        """Chat events recorded with the current frame (may be empty)."""
+        return list(self._frame_chats)
 
     # -- static helpers -----------------------------------------------------
 

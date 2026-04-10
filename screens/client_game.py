@@ -34,6 +34,10 @@ from ui.widgets import _get_font, Slider, Button, draw_countdown_overlay
 import gui
 from gui_adapter import wrap_entities
 from systems.replay import normalize_cp
+from systems.chat import (
+    ChatLog, ChatMessage, FloatingChatText,
+    CHAT_DISPLAY_COUNT, CHAT_DISPLAY_DURATION, MAX_MESSAGE_LENGTH,
+)
 from config import display as display_config
 from entities.effects import DeathBurst
 
@@ -163,6 +167,15 @@ class ClientGameScreen(BaseScreen):
         self._splashes: list[dict] = []
         self._death_bursts: list[DeathBurst] = []
 
+        # Chat state
+        self._chat_log = ChatLog()
+        self._floating_chats: list[FloatingChatText] = []
+        self._chat_input_active = False
+        self._chat_input_text = ""
+        self._chat_mode = "all"
+        self._chat_scroll = 0
+        self._game_time = 0.0
+
         # Player names from game_start
         self._player_names: dict[int, str] = client.player_names or {}
 
@@ -274,6 +287,25 @@ class ClientGameScreen(BaseScreen):
                     self._update_extrapolation(self._entities)
                     # Rebuild T2 upgrade display from entity state
                     self._refresh_t2_display()
+                    # Process chat events
+                    for ce in frame.get("chats", []):
+                        msg = ChatMessage(
+                            player_id=ce["pid"], player_name=ce["name"],
+                            team_id=ce["tid"], message=ce["msg"],
+                            mode=ce["mode"], tick=ce.get("tick", 0),
+                            timestamp=self._game_time,
+                        )
+                        self._chat_log.add_message(msg)
+                        # Spawn floating text above sender's CC
+                        for ent in self._entities:
+                            if ent.get("t") == "CC" and ent.get("pid") == ce["pid"]:
+                                color = PLAYER_COLORS[(ce["pid"] - 1) % len(PLAYER_COLORS)]
+                                self._floating_chats.append(FloatingChatText(
+                                    x=ent["x"], y=ent["y"] - 60,
+                                    message=ce["msg"], color=color,
+                                    player_name=ce["name"],
+                                ))
+                                break
                 elif msg_type == "game_over":
                     self._winner = frame.get("winner", 0)
             else:
@@ -303,6 +335,10 @@ class ClientGameScreen(BaseScreen):
             if self._death_bursts:
                 self._death_bursts = [b for b in self._death_bursts if b.update(dt)]
 
+            # Update floating chat text
+            self._floating_chats = [fc for fc in self._floating_chats if fc.update(dt)]
+            self._game_time += dt
+
             # Check for disconnect or game over
             if self._client.error and not self._is_local:
                 return self._build_result()
@@ -314,6 +350,44 @@ class ClientGameScreen(BaseScreen):
                 if event.type == pygame.QUIT:
                     self._client.stop()
                     return ScreenResult("quit")
+
+                # -- Chat input handling (must be before ESC handler) --------
+                if self._chat_input_active:
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE:
+                            self._chat_input_active = False
+                            self._chat_input_text = ""
+                            self._chat_scroll = 0
+                        elif event.key == pygame.K_RETURN:
+                            if self._chat_input_text.strip():
+                                self._client.send_command(GameCommand(
+                                    type="chat",
+                                    player_id=self._client.player_id,
+                                    tick=self._tick,
+                                    data={"message": self._chat_input_text,
+                                          "mode": self._chat_mode},
+                                ))
+                            self._chat_input_active = False
+                            self._chat_input_text = ""
+                            self._chat_scroll = 0
+                        elif event.key == pygame.K_TAB:
+                            self._chat_mode = "team" if self._chat_mode == "all" else "all"
+                        elif event.key == pygame.K_BACKSPACE:
+                            self._chat_input_text = self._chat_input_text[:-1]
+                        elif event.unicode and event.unicode.isprintable():
+                            if len(self._chat_input_text) < MAX_MESSAGE_LENGTH:
+                                self._chat_input_text += event.unicode
+                    elif event.type == pygame.MOUSEWHEEL:
+                        self._chat_scroll = max(0, self._chat_scroll - event.y)
+                    continue  # block ALL events while chat is active
+
+                # Enter key opens chat
+                if (event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN
+                        and not self._esc_menu_open):
+                    self._chat_input_active = True
+                    self._chat_input_text = ""
+                    self._chat_scroll = 0
+                    continue
 
                 # ESC toggles the escape menu (without pausing)
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
@@ -1452,6 +1526,22 @@ class ClientGameScreen(BaseScreen):
             # Team name labels above CCs
             self._draw_team_labels_screen(entities_l, _los_l)
 
+            # Floating chat text (world-space, rendered in screen-space)
+            chat_font_size = max(8, int(round(20 * cam.zoom)))
+            chat_font = _get_font(chat_font_size)
+            for fc in self._floating_chats:
+                alpha = int(220 * fc.alpha_frac)
+                sx, sy = cam.world_to_screen(fc.x, fc.y)
+                sy -= fc.rise_offset
+                display = f"{fc.player_name}: {fc.message}" if fc.player_name else fc.message
+                if len(display) > 50:
+                    display = display[:47] + "..."
+                chat_surf = chat_font.render(display, True, fc.color)
+                chat_surf.set_alpha(alpha)
+                self.screen.blit(chat_surf,
+                                 (int(sx) + ga.x - chat_surf.get_width() // 2,
+                                  int(sy) + ga.y))
+
         self.screen.set_clip(clip_save)
 
         # HUD area
@@ -1488,11 +1578,114 @@ class ClientGameScreen(BaseScreen):
             py = self.height // 2 - pause_surf.get_height() // 2
             self.screen.blit(pause_surf, (px, py))
 
+        # Chat log overlay + chat input box
+        self._draw_chat_overlay()
+        if self._chat_input_active:
+            self._draw_chat_input()
+
         # Escape menu overlay
         if self._esc_menu_open:
             self._draw_esc_menu()
 
         pygame.display.flip()
+
+    # -- chat overlay / input -------------------------------------------------
+
+    def _draw_chat_overlay(self) -> None:
+        """Draw chat messages near the top-left of the game area.
+
+        When chat input is open, shows the full scrollable history.
+        Otherwise, shows only recent messages that fade out.
+        """
+        font = _get_font(20)
+        ga = self._game_area
+        x = ga.x + 8
+        line_h = font.get_height() + 3
+
+        if self._chat_input_active:
+            all_msgs = self._chat_log.get_all()
+            if not all_msgs:
+                return
+            max_lines = max(1, (ga.h - 60) // line_h)
+            max_scroll = max(0, len(all_msgs) - max_lines)
+            self._chat_scroll = min(self._chat_scroll, max_scroll)
+            start = len(all_msgs) - max_lines - self._chat_scroll
+            end = start + max_lines
+            start = max(0, start)
+            window = all_msgs[start:end]
+
+            y = ga.y + 8
+            for msg in window:
+                prefix = "[TEAM] " if msg.mode == "team" else ""
+                color = PLAYER_COLORS[(msg.player_id - 1) % len(PLAYER_COLORS)]
+                text = f"{prefix}{msg.player_name}: {msg.message}"
+                surf = font.render(text, True, color)
+                bg = pygame.Surface((surf.get_width() + 8, surf.get_height() + 2), pygame.SRCALPHA)
+                bg.fill((0, 0, 0, 150))
+                self.screen.blit(bg, (x - 4, y - 1))
+                self.screen.blit(surf, (x, y))
+                y += line_h
+        else:
+            visible = self._chat_log.get_visible(self._game_time)
+            if not visible:
+                return
+            y = ga.y + 8
+            for msg in visible[-CHAT_DISPLAY_COUNT:]:
+                age = self._game_time - msg.timestamp
+                alpha = max(0, min(255, int(255 * (1.0 - age / CHAT_DISPLAY_DURATION))))
+                prefix = "[TEAM] " if msg.mode == "team" else ""
+                color = PLAYER_COLORS[(msg.player_id - 1) % len(PLAYER_COLORS)]
+                text = f"{prefix}{msg.player_name}: {msg.message}"
+                surf = font.render(text, True, color)
+                surf.set_alpha(alpha)
+                bg = pygame.Surface((surf.get_width() + 8, surf.get_height() + 2), pygame.SRCALPHA)
+                bg.fill((0, 0, 0, int(120 * alpha / 255)))
+                self.screen.blit(bg, (x - 4, y - 1))
+                self.screen.blit(surf, (x, y))
+                y += line_h
+
+    def _draw_chat_input(self) -> None:
+        """Draw the chat input box at the bottom of the game area."""
+        font = _get_font(22)
+        ga = self._game_area
+        box_h = 28
+        box_w = min(400, ga.w - 16)
+        box_x = ga.x + 8
+        box_y = ga.bottom - box_h - 8
+
+        bg = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+        bg.fill((20, 20, 30, 200))
+        self.screen.blit(bg, (box_x, box_y))
+        pygame.draw.rect(self.screen, (80, 80, 100),
+                         pygame.Rect(box_x, box_y, box_w, box_h), 1)
+
+        mode_label = "[ALL] " if self._chat_mode == "all" else "[TEAM] "
+        mode_color = (200, 200, 200) if self._chat_mode == "all" else (100, 255, 100)
+        mode_surf = font.render(mode_label, True, mode_color)
+        self.screen.blit(mode_surf, (box_x + 6,
+                                     box_y + (box_h - mode_surf.get_height()) // 2))
+
+        text_x = box_x + 6 + mode_surf.get_width()
+        max_text_w = box_w - mode_surf.get_width() - 16
+        text_surf = font.render(self._chat_input_text, True, (220, 220, 220))
+        if text_surf.get_width() > max_text_w:
+            clip_x = text_surf.get_width() - max_text_w
+            self.screen.blit(text_surf, (text_x, box_y + (box_h - text_surf.get_height()) // 2),
+                             area=pygame.Rect(clip_x, 0, max_text_w, text_surf.get_height()))
+            cursor_x = text_x + max_text_w + 2
+        else:
+            self.screen.blit(text_surf, (text_x,
+                                         box_y + (box_h - text_surf.get_height()) // 2))
+            cursor_x = text_x + text_surf.get_width() + 2
+
+        if (pygame.time.get_ticks() // 500) % 2 == 0:
+            pygame.draw.line(self.screen, (220, 220, 220),
+                             (cursor_x, box_y + 5), (cursor_x, box_y + box_h - 5))
+
+        hint_font = _get_font(16)
+        hint = hint_font.render("TAB: toggle mode  |  ENTER: send  |  ESC: close  |  Scroll: history",
+                                True, (100, 100, 120))
+        self.screen.blit(hint, (box_x, box_y - hint.get_height() - 2))
 
     # -- escape menu overlay ---------------------------------------------------
 

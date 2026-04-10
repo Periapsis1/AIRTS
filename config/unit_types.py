@@ -70,7 +70,7 @@ UNIT_TYPES = {
         "symbol": MEDIC_SYMBOL, "can_attack": True,
         "fov": 30, "turn_rate": 90, "los": 80,
         "weapon": {
-            "name": "HealLaser", "damage": -1, "range": 50, "cooldown": 0.3,
+            "name": "HealLaser", "damage": -2, "range": 60, "cooldown": 0.4,
             "hits_only_friendly": True, "laser_flash_duration": 0.2,
         },
     },
@@ -160,8 +160,8 @@ UNIT_TYPES = {
         "symbol": MEDIC_SYMBOL, "can_attack": True,
         "fov": 30, "turn_rate": 90, "los": 90,
         "weapon": {
-            "name": "HealLaser", "damage": -1, "range": 70, "cooldown": 0.2,
-            "hits_only_friendly": True, "laser_flash_duration": 0.2,
+            "name": "HealLaser", "damage": -8, "range": 60, "cooldown": 0.5,
+            "hits_only_friendly": True, "laser_flash_duration": 0.4,
         },
         "is_t2": True,
     },
@@ -207,13 +207,13 @@ UNIT_TYPES = {
         "is_t2": True,
     },
     "artillery_t2": {
-        "hp": 120, "speed": 15, "radius": 9,
+        "hp": 75, "speed": 15, "radius": 9,
         "symbol": ARTILLERY_SYMBOL, "can_attack": True,
-        "fov": 15, "turn_rate": 25, "los": 180,
+        "fov": 15, "turn_rate": 15, "los": 180,
         "weapon": {
             "name": "ArtilleryCannon", "damage": 70, "range": 180, "cooldown": 6.0,
-            "splash_radius": 75, "splash_damage_max": 70, "splash_damage_min": 1,
-            "charge_time": 3.0,
+            "splash_radius": 60, "splash_damage_max": 60, "splash_damage_min": 5,
+            "charge_time": 2.5,
             "friendly_fire": True,
             "sound": "artillery",
             "laser_width": 6,

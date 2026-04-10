@@ -94,9 +94,9 @@ ELECTRIC_ARMOR_COLOR = (80, 180, 255)
 
 # -- overclock (engineer passive) ---------------------------------------------
 OVERCLOCK_RANGE = 70.0          # px — engineer aura radius
-OVERCLOCK_REGEN = 3.0           # HP/s healed on each metal extractor in range
+OVERCLOCK_REGEN = 1.0           # HP/s healed on each metal extractor in range
 OVERCLOCK_BONUS = 0.02          # +2% additive spawn bonus per extractor
-OVERCLOCK_REGEN_T2 = 5.0        # HP/s for Mechanic
+OVERCLOCK_REGEN_T2 = 2.0        # HP/s for Mechanic
 OVERCLOCK_BONUS_T2 = 0.03       # +3% for Mechanic
 OVERCLOCK_COLOR = (255, 180, 60)
 

@@ -5,9 +5,9 @@ from systems.ai.base import BaseAI
 from entities.unit import Unit
 
 
-class MediumAI(BaseAI):
-    ai_id = "medium"
-    ai_name = "Medium AI"
+class MediumAIv0(BaseAI):
+    ai_id = "medium_v0"
+    ai_name = "Medium AI v0"
     deprecated = True
 
     # Desired combat comp ratio: tank:sniper:medic = 1:1:2

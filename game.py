@@ -41,6 +41,10 @@ from config.settings import (
 from entities.shapes import RectEntity, CircleEntity, PolygonEntity
 from systems.commands import GameCommand, CommandQueue
 from systems.replay import ReplayRecorder
+from systems.chat import (
+    ChatLog, ChatMessage, FloatingChatText,
+    MAX_MESSAGE_LENGTH, CHAT_DISPLAY_COUNT, CHAT_DISPLAY_DURATION,
+)
 from systems.stats import GameStats
 from core.vectorized import build_obstacle_arrays, batch_obstacle_push, batch_unit_collisions, batch_facing_update
 from core.quadfield import QuadField
@@ -199,6 +203,16 @@ class Game:
         self.laser_flashes: list[LaserFlash] = []
         self.splash_effects: list[SplashEffect] = []
         self._pending_chains: list[PendingChain] = []
+
+        # -- chat -------------------------------------------------------------
+        self._chat_log = ChatLog()
+        self._chat_events: list[dict] = []
+        self._floating_chats: list[FloatingChatText] = []
+        self._chat_input_active = False
+        self._chat_input_text = ""
+        self._chat_mode = "all"  # "all" or "team"
+        self._chat_scroll = 0    # scroll offset for full chat log when input is open
+        self._game_time = 0.0
 
         # -- sounds -----------------------------------------------------------
         if not headless:
@@ -721,6 +735,58 @@ class Game:
                     self._toggle_pause()
                 continue
 
+            # -- Chat input handling (must be before ESC handler) ---------------
+            if self._chat_input_active:
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        self._chat_input_active = False
+                        self._chat_input_text = ""
+                        self._chat_scroll = 0
+                    elif event.key == pygame.K_RETURN:
+                        if self._chat_input_text.strip():
+                            if self._has_human:
+                                pid = next(iter(self.human_players), 1)
+                                self._command_queue.enqueue(GameCommand(
+                                    type="chat",
+                                    player_id=pid,
+                                    tick=self._iteration,
+                                    data={"message": self._chat_input_text,
+                                          "mode": self._chat_mode},
+                                ))
+                            else:
+                                # Spectator: local-only message
+                                self._chat_log.add_message(ChatMessage(
+                                    player_id=0,
+                                    player_name="Spectator",
+                                    team_id=0,
+                                    message=self._chat_input_text,
+                                    mode="all",
+                                    tick=self._iteration,
+                                    timestamp=self._game_time,
+                                ))
+                        self._chat_input_active = False
+                        self._chat_input_text = ""
+                        self._chat_scroll = 0
+                    elif event.key == pygame.K_TAB:
+                        self._chat_mode = "team" if self._chat_mode == "all" else "all"
+                    elif event.key == pygame.K_BACKSPACE:
+                        self._chat_input_text = self._chat_input_text[:-1]
+                    elif event.unicode and event.unicode.isprintable():
+                        if len(self._chat_input_text) < MAX_MESSAGE_LENGTH:
+                            self._chat_input_text += event.unicode
+                elif event.type == pygame.MOUSEWHEEL:
+                    # Scroll chat history
+                    self._chat_scroll = max(0, self._chat_scroll - event.y)
+                continue  # block ALL events while chat is active
+
+            # Enter key opens chat (works for players and spectators)
+            if (event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN
+                    and not self._esc_menu_open and not self._paused):
+                self._chat_input_active = True
+                self._chat_input_text = ""
+                self._chat_scroll = 0
+                continue
+
             # ESC toggles the escape menu
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 self._esc_menu_open = not self._esc_menu_open
@@ -1070,6 +1136,43 @@ class Game:
                 entity.researched_unit_type = unit_type
                 entity.start_upgrade("lab")
 
+        elif cmd.type == "chat":
+            raw_msg = str(data.get("message", ""))[:MAX_MESSAGE_LENGTH]
+            mode = data.get("mode", "all")
+            if mode not in ("all", "team"):
+                mode = "all"
+            if raw_msg.strip():
+                ai = self.player_ai.get(cmd.player_id)
+                name = ai.ai_name if ai else self._player_name
+                team = self.player_team.get(cmd.player_id, 0)
+                msg = ChatMessage(
+                    player_id=cmd.player_id,
+                    player_name=name,
+                    team_id=team,
+                    message=raw_msg,
+                    mode=mode,
+                    tick=self._iteration,
+                    timestamp=self._game_time,
+                )
+                self._chat_log.add_message(msg)
+                self._chat_events.append({
+                    "pid": cmd.player_id,
+                    "name": name,
+                    "tid": team,
+                    "msg": raw_msg,
+                    "mode": mode,
+                    "tick": self._iteration,
+                })
+                # Spawn floating text above sender's CC
+                for e in self.entities:
+                    if isinstance(e, CommandCenter) and e.player_id == cmd.player_id and e.alive:
+                        color = PLAYER_COLORS[(cmd.player_id - 1) % len(PLAYER_COLORS)]
+                        self._floating_chats.append(FloatingChatText(
+                            x=e.x, y=e.y - 60, message=raw_msg,
+                            color=color, player_name=name,
+                        ))
+                        break
+
         elif cmd.type == "surrender":
             surrendering_team = self.player_team.get(cmd.player_id, cmd.player_id)
             self._eliminate_team(surrendering_team)
@@ -1176,6 +1279,9 @@ class Game:
     def step(self, dt: float):
         _t0 = time.perf_counter()
         _perf = time.perf_counter
+
+        # Reset chat events before draining commands (commands populate this list)
+        self._chat_events = []
 
         # Drain and apply all pending commands before simulation
         _t = _perf()
@@ -1363,6 +1469,7 @@ class Game:
         _t = _perf()
         self._sound_events: list[str] = []
         self._death_events: list[dict] = []
+        self._game_time += dt
         combat_step(alive_units, obstacles, self.laser_flashes, dt,
                     quadfield=self._quadfield,
                     circle_obs=self._obs_circle, rect_obs=self._obs_rect,
@@ -1492,6 +1599,7 @@ class Game:
         _t = _perf()
         self.laser_flashes = [lf for lf in self.laser_flashes if lf.update(dt)]
         self.splash_effects = [se for se in self.splash_effects if se.update(dt)]
+        self._floating_chats = [fc for fc in self._floating_chats if fc.update(dt)]
         self._iteration += 1
 
         # Sample stats time-series every SAMPLE_INTERVAL ticks
@@ -1505,6 +1613,7 @@ class Game:
             self._replay_recorder.capture_tick(
                 self._iteration, self.entities, self.laser_flashes,
                 death_events=getattr(self, '_death_events', None),
+                chat_events=self._chat_events or None,
             )
 
         # -- team elimination: kill units when a team loses all CCs ----------------
@@ -1832,6 +1941,21 @@ class Game:
                 self.screen.blit(label_surf, (int(sx) + ga.x - label_surf.get_width() // 2,
                                               int(sy) + ga.y))
 
+        # Floating chat text (world-space, rendered in screen-space for crisp text)
+        for fc in self._floating_chats:
+            alpha = int(220 * fc.alpha_frac)
+            sx, sy = cam.world_to_screen(fc.x, fc.y)
+            sy -= fc.rise_offset
+            # Build display string: "Name: message" (truncated)
+            display = f"{fc.player_name}: {fc.message}" if fc.player_name else fc.message
+            if len(display) > 50:
+                display = display[:47] + "..."
+            chat_surf = zfont.render(display, True, fc.color)
+            chat_surf.set_alpha(alpha)
+            self.screen.blit(chat_surf,
+                             (int(sx) + ga.x - chat_surf.get_width() // 2,
+                              int(sy) + ga.y))
+
         self.screen.set_clip(clip_save)
 
         # HUD area
@@ -1861,11 +1985,124 @@ class Game:
             hx = ga.centerx - hint_surf.get_width() // 2
             self.screen.blit(hint_surf, (hx, py + pause_surf.get_height() + 4))
 
+        # Chat log overlay + chat input box
+        self._draw_chat_overlay()
+        if self._chat_input_active:
+            self._draw_chat_input()
+
         # Escape menu overlay
         if self._esc_menu_open:
             self._draw_esc_menu()
 
         pygame.display.flip()
+
+    def _draw_chat_overlay(self) -> None:
+        """Draw chat messages near the top-left of the game area.
+
+        When chat input is open, shows the full scrollable history.
+        Otherwise, shows only recent messages that fade out.
+        """
+        from ui.widgets import _get_font
+        font = _get_font(20)
+        ga = self._game_area
+        x = ga.x + 8
+        line_h = font.get_height() + 3
+
+        if self._chat_input_active:
+            # Full scrollable history
+            all_msgs = self._chat_log.get_all()
+            if not all_msgs:
+                return
+            # How many lines fit in the game area (leave room for input box at bottom)
+            max_lines = max(1, (ga.h - 60) // line_h)
+            # Clamp scroll
+            max_scroll = max(0, len(all_msgs) - max_lines)
+            self._chat_scroll = min(self._chat_scroll, max_scroll)
+            start = len(all_msgs) - max_lines - self._chat_scroll
+            end = start + max_lines
+            start = max(0, start)
+            window = all_msgs[start:end]
+
+            y = ga.y + 8
+            for msg in window:
+                prefix = "[TEAM] " if msg.mode == "team" else ""
+                color = PLAYER_COLORS[(msg.player_id - 1) % len(PLAYER_COLORS)]
+                text = f"{prefix}{msg.player_name}: {msg.message}"
+                surf = font.render(text, True, color)
+                bg = pygame.Surface((surf.get_width() + 8, surf.get_height() + 2), pygame.SRCALPHA)
+                bg.fill((0, 0, 0, 150))
+                self.screen.blit(bg, (x - 4, y - 1))
+                self.screen.blit(surf, (x, y))
+                y += line_h
+        else:
+            # Fading recent messages
+            visible = self._chat_log.get_visible(self._game_time)
+            if not visible:
+                return
+            y = ga.y + 8
+            for msg in visible[-CHAT_DISPLAY_COUNT:]:
+                age = self._game_time - msg.timestamp
+                alpha = max(0, min(255, int(255 * (1.0 - age / CHAT_DISPLAY_DURATION))))
+                prefix = "[TEAM] " if msg.mode == "team" else ""
+                color = PLAYER_COLORS[(msg.player_id - 1) % len(PLAYER_COLORS)]
+                text = f"{prefix}{msg.player_name}: {msg.message}"
+                surf = font.render(text, True, color)
+                surf.set_alpha(alpha)
+                bg = pygame.Surface((surf.get_width() + 8, surf.get_height() + 2), pygame.SRCALPHA)
+                bg.fill((0, 0, 0, int(120 * alpha / 255)))
+                self.screen.blit(bg, (x - 4, y - 1))
+                self.screen.blit(surf, (x, y))
+                y += line_h
+
+    def _draw_chat_input(self) -> None:
+        """Draw the chat input box at the bottom of the game area."""
+        from ui.widgets import _get_font
+        font = _get_font(22)
+        ga = self._game_area
+        box_h = 28
+        box_w = min(400, ga.w - 16)
+        box_x = ga.x + 8
+        box_y = ga.bottom - box_h - 8
+
+        # Background
+        bg = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+        bg.fill((20, 20, 30, 200))
+        self.screen.blit(bg, (box_x, box_y))
+        pygame.draw.rect(self.screen, (80, 80, 100),
+                         pygame.Rect(box_x, box_y, box_w, box_h), 1)
+
+        # Mode label
+        mode_label = "[ALL] " if self._chat_mode == "all" else "[TEAM] "
+        mode_color = (200, 200, 200) if self._chat_mode == "all" else (100, 255, 100)
+        mode_surf = font.render(mode_label, True, mode_color)
+        self.screen.blit(mode_surf, (box_x + 6,
+                                     box_y + (box_h - mode_surf.get_height()) // 2))
+
+        # Text + cursor
+        text_x = box_x + 6 + mode_surf.get_width()
+        max_text_w = box_w - mode_surf.get_width() - 16
+        text_surf = font.render(self._chat_input_text, True, (220, 220, 220))
+        # Scroll text left if it overflows
+        if text_surf.get_width() > max_text_w:
+            clip_x = text_surf.get_width() - max_text_w
+            self.screen.blit(text_surf, (text_x, box_y + (box_h - text_surf.get_height()) // 2),
+                             area=pygame.Rect(clip_x, 0, max_text_w, text_surf.get_height()))
+            cursor_x = text_x + max_text_w + 2
+        else:
+            self.screen.blit(text_surf, (text_x,
+                                         box_y + (box_h - text_surf.get_height()) // 2))
+            cursor_x = text_x + text_surf.get_width() + 2
+
+        # Blinking cursor
+        if (pygame.time.get_ticks() // 500) % 2 == 0:
+            pygame.draw.line(self.screen, (220, 220, 220),
+                             (cursor_x, box_y + 5), (cursor_x, box_y + box_h - 5))
+
+        # Hint text
+        hint_font = _get_font(16)
+        hint = hint_font.render("TAB: toggle mode  |  ENTER: send  |  ESC: close  |  Scroll: history",
+                                True, (100, 100, 120))
+        self.screen.blit(hint, (box_x, box_y - hint.get_height() - 2))
 
     def _draw_esc_menu(self) -> None:
         """Draw a semi-transparent overlay with pause menu buttons."""
@@ -2414,8 +2651,8 @@ class Game:
 
         *pre_step* is called before each tick (e.g. to inject remote commands).
         *post_step(tick, entities, laser_flashes, winner, sound_events,
-        death_events)* is called after each tick (e.g. to broadcast state to
-        clients).
+        death_events, chat_events)* is called after each tick (e.g. to
+        broadcast state to clients).
         """
         # On Windows, increase timer resolution from ~15.6ms to ~1ms so that
         # time.sleep() is accurate enough for a 60Hz game loop.
@@ -2445,7 +2682,9 @@ class Game:
                 post_step(self._iteration, self.entities,
                           self.laser_flashes, self._winner,
                           getattr(self, '_sound_events', []),
-                          getattr(self, '_death_events', []))
+                          getattr(self, '_death_events', []),
+                          getattr(self, '_chat_events', []))
+                self._chat_events = []
             time.sleep(0.016)
 
         # Set CCs ready to spawn on first tick
@@ -2473,7 +2712,9 @@ class Game:
                         post_step(self._iteration, self.entities,
                                   self.laser_flashes, self._winner,
                                   getattr(self, '_sound_events', []),
-                                  getattr(self, '_death_events', []))
+                                  getattr(self, '_death_events', []),
+                                  getattr(self, '_chat_events', []))
+                        self._chat_events = []
                     next_tick = time.perf_counter()
                     continue
 
@@ -2501,7 +2742,8 @@ class Game:
                     post_step(self._iteration, self.entities,
                               self.laser_flashes, self._winner,
                               getattr(self, '_sound_events', []),
-                              getattr(self, '_death_events', []))
+                              getattr(self, '_death_events', []),
+                              getattr(self, '_chat_events', []))
 
                 # If phase transitioned to explode, the game is over
                 if self._phase == "explode":

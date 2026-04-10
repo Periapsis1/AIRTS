@@ -10,7 +10,7 @@ from typing import Any
 class GameCommand:
     """A single player action that can be serialized and replayed."""
 
-    type: str          # "move", "fight", "attack", "attack_move", "stop", "set_fire_mode", "set_rally", "set_spawn_type"
+    type: str          # "move", "fight", "attack", "attack_move", "stop", "set_fire_mode", "set_rally", "set_spawn_type", "chat"
     player_id: int     # issuing player (controller id, not alliance team)
     tick: int          # game tick when issued
     data: dict[str, Any] = field(default_factory=dict)

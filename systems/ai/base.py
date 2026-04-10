@@ -370,3 +370,23 @@ class BaseAI(ABC):
             tick=tick,
             data={"entity_id": extractor.entity_id, "unit_type": unit_type},
         ))
+
+    # -- chat -----------------------------------------------------------------
+
+    def send_chat(self, message: str, mode: str = "all") -> None:
+        """Send a chat message visible to other players.
+
+        *mode* is ``"all"`` (visible to everyone) or ``"team"``
+        (visible only to teammates).  Messages are capped at 200
+        characters.  Useful for AI logging, strategy narration,
+        or lore flavor text.
+        """
+        if mode not in ("all", "team"):
+            mode = "all"
+        tick = self._game._iteration if self._game else 0
+        self._command_queue.enqueue(GameCommand(
+            type="chat",
+            player_id=self._player_id,
+            tick=tick,
+            data={"message": str(message)[:200], "mode": mode},
+        ))

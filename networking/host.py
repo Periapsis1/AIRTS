@@ -63,6 +63,7 @@ class GameHost:
         self._broadcast_interval = broadcast_interval
         self._pending_sounds: list[str] = []
         self._pending_deaths: list[dict] = []
+        self._pending_chats: list[dict] = []
 
         # Cross-thread queues
         self._inbound_commands: queue.Queue[GameCommand] = queue.Queue()
@@ -215,6 +216,7 @@ class GameHost:
         splash_effects: list | None = None,
         sound_events: list[str] | None = None,
         death_events: list[dict] | None = None,
+        chat_events: list[dict] | None = None,
         team_visibility: dict | None = None,
         player_team: dict[int, int] | None = None,
         metal_spots: list | None = None,
@@ -229,6 +231,8 @@ class GameHost:
             self._pending_sounds.extend(sound_events)
         if death_events:
             self._pending_deaths.extend(death_events)
+        if chat_events:
+            self._pending_chats.extend(chat_events)
         if tick % self._broadcast_interval != 0:
             return
 
@@ -241,6 +245,9 @@ class GameHost:
         deaths = self._pending_deaths if self._pending_deaths else None
         if deaths:
             self._pending_deaths = []
+        chats = self._pending_chats if self._pending_chats else None
+        if chats:
+            self._pending_chats = []
 
         if team_visibility and player_team:
             # -- Per-team filtered frames (fog of war) --
@@ -289,6 +296,12 @@ class GameHost:
                     frame["sounds"] = sounds
                 if deaths:
                     frame["deaths"] = deaths
+                # Filter chat events: "all" for everyone, "team" only for this team
+                if chats:
+                    team_chats = [ce for ce in chats
+                                  if ce["mode"] == "all" or ce["tid"] == team_id]
+                    if team_chats:
+                        frame["chats"] = team_chats
                 team_frames[team_id] = frame
 
             # Queue per-client based on their team
@@ -321,10 +334,28 @@ class GameHost:
                 frame["sounds"] = sounds
             if deaths:
                 frame["deaths"] = deaths
-            with self._clients_lock:
-                for c in self._clients.values():
-                    if c.connected.is_set():
-                        self._queue_frame(c, frame)
+
+            # Chat: if any team-only messages, must filter per-client
+            has_team_chat = chats and any(ce["mode"] == "team" for ce in chats)
+            if has_team_chat and player_team:
+                with self._clients_lock:
+                    for c in self._clients.values():
+                        if not c.connected.is_set():
+                            continue
+                        c_team = player_team.get(c.player_id, c.player_id)
+                        client_chats = [ce for ce in chats
+                                        if ce["mode"] == "all" or ce["tid"] == c_team]
+                        client_frame = dict(frame)
+                        if client_chats:
+                            client_frame["chats"] = client_chats
+                        self._queue_frame(c, client_frame)
+            else:
+                if chats:
+                    frame["chats"] = chats
+                with self._clients_lock:
+                    for c in self._clients.values():
+                        if c.connected.is_set():
+                            self._queue_frame(c, frame)
 
     @staticmethod
     def _queue_frame(client: ClientConnection, frame: dict) -> None:
