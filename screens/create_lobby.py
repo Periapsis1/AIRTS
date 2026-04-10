@@ -587,13 +587,16 @@ class CreateLobbyScreen(BaseScreen):
         """Serialize current lobby state for network broadcast."""
         ai_slots = []
         player_teams: dict[str, int] = {}
+        player_colors: dict[str, int] = {}
         for slot in self._slots:
             if slot.online_pid:
                 player_teams[str(slot.online_pid)] = int(slot.team_dd.value)
+                player_colors[str(slot.online_pid)] = slot.color_idx
             else:
                 ai_slots.append({
                     "ai_id": slot.ai_dd.value,
                     "team": int(slot.team_dd.value),
+                    "color_idx": slot.color_idx,
                 })
         return {
             "map_size": self._map_size.value,
@@ -604,6 +607,7 @@ class CreateLobbyScreen(BaseScreen):
             "fog_of_war": self._fog_of_war_cb.checked,
             "ai_slots": ai_slots,
             "player_teams": player_teams,
+            "player_colors": player_colors,
         }
 
     def _apply_lobby_config(self, config: dict) -> None:
@@ -638,7 +642,7 @@ class CreateLobbyScreen(BaseScreen):
             # Add received AI slots
             for entry in ai_slots:
                 idx = len(self._slots)
-                cidx = self._next_free_color()
+                cidx = entry.get("color_idx", self._next_free_color())
                 ai_id = entry.get("ai_id", "human")
                 team = int(entry.get("team", 2))
                 slot = self._make_slot(idx + 1, ai_id, team, idx, color_idx=cidx)
@@ -647,8 +651,9 @@ class CreateLobbyScreen(BaseScreen):
                 s.pid = i + 1
             self._rebuild_slot_positions()
 
-        # Player team assignments (for online slots)
+        # Player team and color assignments (for online slots)
         player_teams = config.get("player_teams", {})
+        player_colors = config.get("player_colors", {})
         for slot in self._slots:
             if slot.online_pid:
                 pt_key = str(slot.online_pid)
@@ -658,6 +663,8 @@ class CreateLobbyScreen(BaseScreen):
                         if v == team_val:
                             slot.team_dd.selected_index = i
                             break
+                if pt_key in player_colors:
+                    slot.color_idx = int(player_colors[pt_key])
 
     def _maybe_broadcast_config(self) -> None:
         """If online and config changed since last broadcast, send to server."""

@@ -382,6 +382,7 @@ class Game:
         self._anim_timer: float = 0.0
         self._fragments: list[dict] = []
         self._dying_units: list[dict] = []  # frozen draw data for staggered death
+        self._eliminated_teams: set[int] = set()  # teams that lost all CCs
         if not server_mode:
             self._anim_surface = pygame.Surface((width, height), pygame.SRCALPHA)
             self._fog_surface = pygame.Surface((width, height), pygame.SRCALPHA)
@@ -1071,10 +1072,16 @@ class Game:
 
         elif cmd.type == "surrender":
             surrendering_team = self.player_team.get(cmd.player_id, cmd.player_id)
-            other_teams = self.all_teams - {surrendering_team}
-            if self._winner == 0:
-                self._winner = next(iter(other_teams)) if other_teams else -1
-            self._phase = "explode"
+            self._eliminate_team(surrendering_team)
+            # Check if game should end (≤1 team remaining)
+            remaining = self.all_teams - self._eliminated_teams
+            if len(remaining) <= 1 and self._winner == 0:
+                if len(remaining) == 1:
+                    self._winner = next(iter(remaining))
+                else:
+                    self._winner = -1
+                self._phase = "explode"
+                self._anim_timer = 0.0
 
         elif cmd.type == "set_pause":
             self._paused = bool(data.get("paused", False))
@@ -1330,10 +1337,8 @@ class Game:
                 ai.on_step(self._iteration)
             except Exception:
                 failing_team = self.player_team.get(player_id)
-                surviving = self.all_teams - ({failing_team} if failing_team else set())
-                self._winner = next(iter(surviving)) if len(surviving) == 1 else -1
-                self._phase = "explode"
-                self._anim_timer = 0.0
+                if failing_team is not None:
+                    self._eliminate_team(failing_team)
         self._stats.record_subsystem("ai_step", (_perf() - _t) * 1000)
 
         # Capture — track new entities so extractors join units + team lists
@@ -1502,24 +1507,21 @@ class Game:
                 death_events=getattr(self, '_death_events', None),
             )
 
-        # -- win condition: game ends when <= 1 team has a living CC ---------------
+        # -- team elimination: kill units when a team loses all CCs ----------------
         surviving_teams = {cc.team for cc in self.command_centers if cc.alive}
-        if len(surviving_teams) <= 1 and self._winner == 0:
-            if len(surviving_teams) == 1:
-                self._winner = next(iter(surviving_teams))
+        newly_dead = (self.all_teams - surviving_teams) - self._eliminated_teams
+        for t in newly_dead:
+            self._eliminate_team(t)
+
+        # -- win condition: game ends when <= 1 team remains alive ---------------
+        remaining = self.all_teams - self._eliminated_teams
+        if len(remaining) <= 1 and self._winner == 0:
+            if len(remaining) == 1:
+                self._winner = next(iter(remaining))
             else:
-                self._winner = -1  # draw (all CCs dead)
-            # Transition to explode phase instead of ending immediately
+                self._winner = -1  # draw (all teams eliminated)
             self._phase = "explode"
             self._anim_timer = 0.0
-            # Init fragments for all losing teams
-            losing_teams = self.all_teams - surviving_teams
-            for t in losing_teams:
-                self._init_fragments(t)
-                self._init_unit_death(t)
-            # Prune dead units so they don't render during explode
-            self.entities = [e for e in self.entities if e.alive]
-            self.units = [u for u in self.units if u.alive]
 
         # Tick limit — score-based tiebreaker, then draw if still tied
         if self._max_ticks > 0 and self._iteration >= self._max_ticks and self._winner == 0:
@@ -2024,6 +2026,24 @@ class Game:
                     ws.blit(self._anim_surface, (0, 0))
 
         self._draw_fog()
+
+    def _eliminate_team(self, team: int):
+        """Kill all CCs and units for a team and mark it as eliminated."""
+        if team in self._eliminated_teams:
+            return
+        self._eliminated_teams.add(team)
+        # Kill all CCs for this team
+        for cc in self.command_centers:
+            if cc.team == team and cc.alive:
+                cc.alive = False
+        # Fragment + staggered death for units
+        self._init_fragments(team)
+        self._init_unit_death(team)
+        # Prune dead entities
+        self.entities = [e for e in self.entities if e.alive]
+        self.units = [u for u in self.units if u.alive]
+        for t in list(self.team_units):
+            self.team_units[t] = [u for u in self.team_units[t] if u.alive]
 
     def _init_fragments(self, team: int):
         """Create 6 triangular fragments from each losing CC's hexagon."""
