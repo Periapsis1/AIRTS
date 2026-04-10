@@ -314,6 +314,8 @@ class Game:
 
         self._rdragging = False
         self._rpath: list[tuple[float, float]] = []
+        self._fight_mode = False
+        self._attack_mode = False
 
         # Double-click detection
         self._last_click_time: int = 0
@@ -537,8 +539,18 @@ class Game:
                         data={"position": list(rally)},
                     ))
 
+    def _move_cmd_type(self) -> str:
+        if self._attack_mode:
+            return "attack_move"
+        if self._fight_mode:
+            return "fight"
+        return "move"
+
     def _assign_path_goals(self):
         selected = [e for e in self.entities if isinstance(e, Unit) and e.selected]
+        cmd_type = self._move_cmd_type()
+        self._fight_mode = False
+        self._attack_mode = False
         if not selected or len(self._rpath) < 2:
             if selected and len(self._rpath) == 1:
                 px, py = self._rpath[0]
@@ -547,7 +559,7 @@ class Game:
                     by_player.setdefault(u.player_id, []).append(u.entity_id)
                 for pid, uids in by_player.items():
                     self._command_queue.enqueue(GameCommand(
-                        type="move",
+                        type=cmd_type,
                         player_id=pid,
                         tick=self._iteration,
                         data={"unit_ids": uids, "targets": [(px, py)] * len(uids)},
@@ -582,7 +594,7 @@ class Game:
             by_player[pid][1].append(tgt)
         for pid, (uids, tgts) in by_player.items():
             self._command_queue.enqueue(GameCommand(
-                type="move",
+                type=cmd_type,
                 player_id=pid,
                 tick=self._iteration,
                 data={"unit_ids": uids, "targets": tgts},
@@ -858,6 +870,7 @@ class Game:
                                            event.pos[1] - self._last_click_pos[1]) < 10):
                         select_all_of_type(
                             self.entities, wx, wy,
+                            viewport_rect=self._camera.get_world_viewport_rect(),
                         )
                     else:
                         click_select(
@@ -1059,6 +1072,30 @@ class Game:
                         player_id=pid,
                         tick=self._iteration,
                         data={"unit_ids": uids},
+                    ))
+        elif action == "attack":
+            self._attack_mode = True
+        elif action == "move":
+            self._fight_mode = False
+            self._attack_mode = False
+        elif action == "fight":
+            self._fight_mode = True
+        elif action == "hold_fire":
+            selected = [e for e in self.entities
+                        if isinstance(e, Unit) and e.selected
+                        and not e.is_building and e.alive]
+            if selected:
+                any_not_held = any(u.fire_mode != HOLD_FIRE for u in selected)
+                new_mode = HOLD_FIRE if any_not_held else FREE_FIRE
+                by_player: dict[int, list[int]] = {}
+                for u in selected:
+                    by_player.setdefault(u.player_id, []).append(u.entity_id)
+                for pid, uids in by_player.items():
+                    self._command_queue.enqueue(GameCommand(
+                        type="set_fire_mode",
+                        player_id=pid,
+                        tick=self._iteration,
+                        data={"unit_ids": uids, "mode": new_mode},
                     ))
         elif action == "upgrade_extractor":
             eid = result["entity_id"]

@@ -1191,7 +1191,8 @@ class ReplayPlaybackScreen(BaseScreen):
         self._selected_ids.update(targets)
 
     def _select_all_of_type(self, entities: list[dict], mx: float, my: float):
-        """Double-click: select all selectable units of the same type under cursor."""
+        """Double-click: select all selectable units of the same type under cursor
+        that are within the current camera viewport."""
         best: dict | None = None
         best_dist = float("inf")
         for ent in entities:
@@ -1208,10 +1209,12 @@ class ReplayPlaybackScreen(BaseScreen):
         self._selected_ids.clear()
         target_type = best.get("ut")
         target_team = best.get("tm")
+        vp = self._camera.get_world_viewport_rect()
         for ent in entities:
             if (ent.get("t") == "U" and self._is_selectable(ent)
                     and ent.get("ut") == target_type
-                    and ent.get("tm") == target_team):
+                    and ent.get("tm") == target_team
+                    and vp.collidepoint(ent.get("x", 0), ent.get("y", 0))):
                 self._selected_ids.add(ent.get("id"))
 
     # -- FOV arc drawing ----------------------------------------------------

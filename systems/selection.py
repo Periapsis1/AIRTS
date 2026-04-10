@@ -149,8 +149,13 @@ def apply_circle_selection(
         entity.set_selected(True)
 
 
-def select_all_of_type(entities: list[Entity], mx: float, my: float):
-    """Double-click: select all units of the same type as the one under cursor."""
+def select_all_of_type(entities: list[Entity], mx: float, my: float,
+                       viewport_rect=None):
+    """Double-click: select all units of the same type as the one under cursor.
+
+    If *viewport_rect* is supplied (a pygame.Rect in world coordinates),
+    only units within the visible camera view are selected.
+    """
     # Find the unit under the cursor
     best: Unit | None = None
     best_dist = float("inf")
@@ -173,6 +178,10 @@ def select_all_of_type(entities: list[Entity], mx: float, my: float):
                 and getattr(entity, "selectable", False)
                 and entity.unit_type == target_type
                 and entity.team == target_team):
+            if viewport_rect is not None:
+                ex, ey = entity.center()
+                if not viewport_rect.collidepoint(ex, ey):
+                    continue
             entity.set_selected(True)
 
 

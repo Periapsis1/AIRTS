@@ -583,10 +583,13 @@ class ClientGameScreen(BaseScreen):
                 self._selected_ids.add(best_id)
                 # Double-click: select all visible units of same type
                 if is_dblclick and best_ut:
+                    vp = self._camera.get_world_viewport_rect()
                     for ent in self._entities:
                         if (ent.get("tm") == self._my_team
                                 and ent.get("ut") == best_ut
-                                and ent.get("t") == "U"):
+                                and ent.get("t") == "U"
+                                and vp.collidepoint(ent.get("x", 0),
+                                                    ent.get("y", 0))):
                             eid = ent.get("id")
                             if eid is not None:
                                 self._selected_ids.add(eid)
@@ -679,6 +682,30 @@ class ClientGameScreen(BaseScreen):
                     player_id=self._my_team,
                     tick=self._tick,
                     data={"unit_ids": [e["id"] for e in selected]},
+                ))
+        elif action == "attack":
+            self._attack_mode = True
+        elif action == "move":
+            self._fight_mode = False
+            self._attack_mode = False
+        elif action == "fight":
+            self._fight_mode = True
+        elif action == "hold_fire":
+            sel_units = [
+                ent for ent in self._entities
+                if ent.get("id") in self._selected_ids and ent.get("t") == "U"
+            ]
+            if sel_units:
+                any_not_held = any(not ent.get("hf") for ent in sel_units)
+                new_mode = "hold_fire" if any_not_held else "free_fire"
+                self._client.send_command(GameCommand(
+                    type="set_fire_mode",
+                    player_id=self._my_team,
+                    tick=self._tick,
+                    data={
+                        "unit_ids": [e["id"] for e in sel_units],
+                        "mode": new_mode,
+                    },
                 ))
         elif action == "upgrade_extractor":
             self._client.send_command(GameCommand(

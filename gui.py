@@ -142,7 +142,8 @@ def _build_btn_rects(ar: pygame.Rect) -> list[tuple[pygame.Rect, str]]:
 
 def _action_btn_rects(ar: pygame.Rect) -> list[tuple[pygame.Rect, str, str]]:
     """Button rects for unit action buttons. Returns (rect, action_id, key_label)."""
-    actions = [("stop", "S"), ("attack", "A"), ("move", "M")]
+    actions = [("stop", "S"), ("attack", "A"), ("move", "M"),
+               ("fight", "F"), ("hold_fire", "H")]
     pad, hdr = 8, 22
     out: list[tuple[pygame.Rect, str, str]] = []
     for i, (aid, key) in enumerate(actions):
@@ -694,7 +695,8 @@ def _draw_actions(screen: pygame.Surface, r: pygame.Rect,
                              br.centery - kt.get_height() // 2))
 
             # label below button
-            lt = _font(12).render(aid.title(), True, _STAT_LABEL)
+            label = aid.replace("_", " ").title()
+            lt = _font(12).render(label, True, _STAT_LABEL)
             screen.blit(lt, (br.centerx - lt.get_width() // 2,
                              br.bottom + 2))
 
