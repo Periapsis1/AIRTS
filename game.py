@@ -2036,14 +2036,19 @@ class Game:
         for cc in self.command_centers:
             if cc.team == team and cc.alive:
                 cc.alive = False
-        # Fragment + staggered death for units
+        # Fragment + staggered death for units (includes MEs)
         self._init_fragments(team)
         self._init_unit_death(team)
-        # Prune dead entities
+        # Prune dead entities from all tracking lists
         self.entities = [e for e in self.entities if e.alive]
         self.units = [u for u in self.units if u.alive]
+        self.metal_extractors = [m for m in self.metal_extractors if m.alive]
         for t in list(self.team_units):
             self.team_units[t] = [u for u in self.team_units[t] if u.alive]
+        # Remove dead MEs from surviving CCs' extractor lists
+        for cc in self.command_centers:
+            if cc.alive:
+                cc.metal_extractors = [m for m in cc.metal_extractors if m.alive]
 
     def _init_fragments(self, team: int):
         """Create 6 triangular fragments from each losing CC's hexagon."""
@@ -2122,8 +2127,10 @@ class Game:
                     "color": u._base_color,
                     "delay": delay,
                 })
-            # Kill the unit
+            # Kill the unit and trigger cleanup (e.g. ME releases metal spot)
             u.alive = False
+            if hasattr(u, "on_destroy"):
+                u.on_destroy()
 
     def _update_fragments(self, dt: float):
         """Move and rotate explosion fragments."""

@@ -288,6 +288,15 @@ def _draw_minimap(screen: pygame.Surface, r: pygame.Rect,
                 orr = max(1, int(obs["r"] * scale))
                 pygame.draw.circle(screen, (80, 80, 80), (ox2, oy2), orr)
 
+    # Build a team→color lookup from actual entities for correct minimap colors
+    _team_color_map: dict[int, tuple] = {}
+    for e in entities:
+        tm = getattr(e, "team", 0)
+        if tm and tm not in _team_color_map:
+            c = getattr(e, "_base_color", getattr(e, "color", None))
+            if c:
+                _team_color_map[tm] = c
+
     # Metal spots (small triangles)
     for e in entities:
         if _is_ms(e) and getattr(e, "alive", True):
@@ -298,7 +307,8 @@ def _draw_minimap(screen: pygame.Surface, r: pygame.Rect,
             if owner is None:
                 color = (255, 255, 255)
             else:
-                color = TEAM_COLORS.get(owner, (255, 255, 255))
+                color = _team_color_map.get(owner,
+                        TEAM_COLORS.get(owner, (255, 255, 255)))
             pygame.draw.polygon(screen, color, pts)
 
     # Metal extractors (colored triangles)
@@ -307,7 +317,7 @@ def _draw_minimap(screen: pygame.Surface, r: pygame.Rect,
             mx, my = w2m(e.x, e.y)
             s = max(2, int(5 * scale))
             pts = [(mx, my - s), (mx - s, my + s), (mx + s, my + s)]
-            color = PLAYER_COLORS[(getattr(e, "team", 1) - 1) % len(PLAYER_COLORS)]
+            color = getattr(e, "color", getattr(e, "_base_color", (200, 200, 200)))
             if getattr(e, "ghost", False):
                 color = tuple(c // 3 for c in color)
             pygame.draw.polygon(screen, color, pts)
@@ -329,7 +339,7 @@ def _draw_minimap(screen: pygame.Surface, r: pygame.Rect,
                 a = math.tau * i / 8
                 pts.append((mx + int(s * math.cos(a)),
                             my + int(s * math.sin(a))))
-            color = PLAYER_COLORS[(getattr(e, "player_id", 1) - 1) % len(PLAYER_COLORS)]
+            color = getattr(e, "color", getattr(e, "_base_color", (200, 200, 200)))
             if getattr(e, "ghost", False):
                 color = tuple(c // 3 for c in color)
             pygame.draw.polygon(screen, color, pts)
@@ -538,7 +548,7 @@ def _draw_group_grid(screen: pygame.Surface, r: pygame.Rect,
         cx, cy = box.centerx, box.centery
         stats = UNIT_TYPES.get(unit.unit_type, {})
         sym = stats.get("symbol")
-        base_color = PLAYER_COLORS[(unit.player_id - 1) % len(PLAYER_COLORS)]
+        base_color = getattr(unit, "_base_color", unit.color)
 
         if _is_cc(unit):
             pts = hexagon_points(bs * 0.3)
@@ -583,29 +593,29 @@ def _draw_portrait(screen: pygame.Surface, r: pygame.Rect,
 
     stats = UNIT_TYPES.get(unit.unit_type, {})
     sym = stats.get("symbol")
-    base_color = PLAYER_COLORS[(unit.player_id - 1) % len(PLAYER_COLORS)]
+    base_color = getattr(unit, "_base_color", unit.color)
 
     if _is_cc(unit):
         pts = hexagon_points(sz * 0.35)
         tp = [(cx + px, cy + py) for px, py in pts]
         pygame.draw.polygon(screen, base_color, tp)
-        pygame.draw.polygon(screen, TEAM1_SELECTED_COLOR, tp, 2)
+        pygame.draw.polygon(screen, base_color, tp, 2)
     elif _is_me(unit):
         radius = sz * 0.3
         s = radius * math.sqrt(3) / 2
         pts = [(cx, cy - radius), (cx - s, cy + radius / 2),
                (cx + s, cy + radius / 2)]
         pygame.draw.polygon(screen, base_color, pts)
-        pygame.draw.polygon(screen, TEAM1_SELECTED_COLOR, pts, 1)
+        pygame.draw.polygon(screen, base_color, pts, 1)
     elif sym is not None:
         sc = sz / 36.0
         pts = [(cx + px * sc, cy + py * sc) for px, py in sym]
         pygame.draw.polygon(screen, base_color, pts)
-        pygame.draw.polygon(screen, TEAM1_SELECTED_COLOR, pts, 1)
+        pygame.draw.polygon(screen, base_color, pts, 1)
     else:
         rad = int(sz * 0.3)
         pygame.draw.circle(screen, base_color, (cx, cy), rad)
-        pygame.draw.circle(screen, TEAM1_SELECTED_COLOR, (cx, cy), rad, 1)
+        pygame.draw.circle(screen, base_color, (cx, cy), rad, 1)
 
     # name below portrait
     if _is_me(unit) and getattr(unit, 'upgrade_state', 'base') in ("outpost", "research_lab"):
@@ -655,14 +665,15 @@ def _draw_actions(screen: pygame.Surface, r: pygame.Rect,
             st = UNIT_TYPES[ut]
             sym = st["symbol"]
             cx, cy = br.centerx, br.centery
+            cc_color = getattr(cc, "_base_color", cc.color)
             if sym is not None:
                 sc = 0.9
                 pts = [(cx + px * sc, cy + py * sc) for px, py in sym]
-                pygame.draw.polygon(screen, PLAYER_COLORS[0], pts)
-                pygame.draw.polygon(screen, TEAM1_SELECTED_COLOR, pts, 1)
+                pygame.draw.polygon(screen, cc_color, pts)
+                pygame.draw.polygon(screen, cc_color, pts, 1)
             else:
-                pygame.draw.circle(screen, PLAYER_COLORS[0], (cx, cy), 7)
-                pygame.draw.circle(screen, TEAM1_SELECTED_COLOR, (cx, cy), 7, 1)
+                pygame.draw.circle(screen, cc_color, (cx, cy), 7)
+                pygame.draw.circle(screen, cc_color, (cx, cy), 7, 1)
 
             # T2 chevron indicator
             if ut in cc_team_t2:
@@ -776,8 +787,8 @@ def _draw_extractor_actions(screen: pygame.Surface, r: pygame.Rect,
                 color = (60, 60, 70)
                 outline = (80, 80, 90)
             else:
-                color = PLAYER_COLORS[0]
-                outline = TEAM1_SELECTED_COLOR
+                color = getattr(me, "_base_color", me.color)
+                outline = color
             if sym is not None:
                 sc = 0.9
                 pts = [(cx + px * sc, cy + py * sc) for px, py in sym]
