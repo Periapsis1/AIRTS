@@ -11,7 +11,7 @@ from ui.theme import (
     BG_DOT_RADIUS, BG_DOT_SPEED, BG_DOT_COUNT,
 )
 from ui.widgets import Button
-from config.settings import TEAM1_COLOR, TEAM2_COLOR
+from config.settings import TEAM_COLORS
 
 
 class _BackgroundUnit:
@@ -53,10 +53,11 @@ class MainMenuScreen(BaseScreen):
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock):
         super().__init__(screen, clock)
 
-        # Background units — half blue, half red
+        # Background units — two randomly chosen team colors
+        color_a, color_b = random.sample(list(TEAM_COLORS.values()), 2)
         self._dots: list[_BackgroundUnit] = []
         for i in range(BG_DOT_COUNT):
-            color = TEAM1_COLOR if i < BG_DOT_COUNT // 2 else TEAM2_COLOR
+            color = color_a if i < BG_DOT_COUNT // 2 else color_b
             self._dots.append(_BackgroundUnit(self.width, self.height, color))
 
         # Buttons — vertically stacked in center

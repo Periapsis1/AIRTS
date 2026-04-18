@@ -43,6 +43,7 @@ class GameClient:
         self.fog_of_war: bool = False
         self.player_team: dict[int, int] = {}
         self.player_names: dict[int, str] = {}
+        self.spectators: set[int] = set()
 
         self._connected = threading.Event()
         self._game_started = threading.Event()
@@ -61,10 +62,21 @@ class GameClient:
 
     @property
     def client_team(self) -> int:
-        """Team this client belongs to, derived from player_team mapping."""
+        """Team this client belongs to, derived from player_team mapping.
+
+        Returns 0 for spectators (who have no team). Callers should check
+        ``is_spectator`` before treating this as a valid team id.
+        """
+        if self.player_id in self.spectators:
+            return 0
         if self.player_team and self.player_id in self.player_team:
             return self.player_team[self.player_id]
         return self.player_id  # fallback for legacy 1v1
+
+    @property
+    def is_spectator(self) -> bool:
+        """True when this client joined the game as a spectator."""
+        return self.player_id in self.spectators
 
     @property
     def connected(self) -> bool:
@@ -231,6 +243,8 @@ class GameClient:
                 self.team_colors: dict[int, tuple] = {
                     int(k): tuple(v) for k, v in raw_tc.items()
                 } if raw_tc else {}
+                raw_sp = msg.get("spectators", []) or []
+                self.spectators = {int(p) for p in raw_sp}
                 self._game_started.set()
             elif msg_type == "lobby_status":
                 with self._lobby_lock:

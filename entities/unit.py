@@ -514,17 +514,19 @@ class Unit(CircleEntity, Damageable):
                     pygame.draw.circle(surface, qcolor, (qx, qy), 3, 1)
                     px, py = qx, qy
 
+        for ability in self.abilities:
+            ability.draw(self, surface)
+
+        self.draw_health_bar(surface, ix, iy, self.radius + HEALTH_BAR_OFFSET)
+
+    def draw_fov(self, surface: pygame.Surface):
+        """Draw FOV/range arc. Called in a pre-pass so arcs render behind units."""
         # Allied units: only show FOV arc when selected; enemies: always
         if not self.selectable or self.selected:
             if self.weapon and self.weapon.hits_only_friendly:
                 self._draw_fov_arc(surface, MEDIC_HEAL_COLOR)
             else:
                 self._draw_fov_arc(surface, RANGE_COLOR)
-
-        for ability in self.abilities:
-            ability.draw(self, surface)
-
-        self.draw_health_bar(surface, ix, iy, self.radius + HEALTH_BAR_OFFSET)
 
     # -- serialization --------------------------------------------------------
 

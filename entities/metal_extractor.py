@@ -153,11 +153,14 @@ class MetalExtractor(Unit):
 
         if self.selected:
             pygame.draw.circle(surface, SELECTED_COLOR, (self.x, self.y), self.radius + 2, 1)
-            if self.upgrade_state == "outpost":
-                from config.settings import RANGE_COLOR
-                self._draw_fov_arc(surface, RANGE_COLOR)
 
         self.draw_health_bar(surface, self.x, self.y, self.radius + HEALTH_BAR_OFFSET)
+
+    def draw_fov(self, surface: pygame.Surface):
+        """Outpost range arc only, and only when selected."""
+        if self.selected and self.upgrade_state == "outpost":
+            from config.settings import RANGE_COLOR
+            self._draw_fov_arc(surface, RANGE_COLOR)
 
     def _draw_base(self, surface: pygame.Surface):
         """Draw the base rotating equilateral triangle."""
@@ -218,7 +221,7 @@ class MetalExtractor(Unit):
 
     def _draw_plating_arcs(self, surface: pygame.Surface, stacks: int):
         """Draw cardinal plating arcs on the capture radius boundary."""
-        arc_color = TEAM_COLORS.get(self.team, PLAYER_COLORS[0])
+        arc_color = self._base_color
         arc_r = METAL_SPOT_CAPTURE_RADIUS
         rect = pygame.Rect(
             self.x - arc_r, self.y - arc_r,

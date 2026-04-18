@@ -109,10 +109,6 @@ class CommandCenter(Unit):
             arc_r = CC_RADIUS + 5
             pygame.draw.circle(surface, SELECTED_COLOR, (int(self.x), int(self.y)), int(arc_r), 2)
 
-        # FOV/range arc (inherited from Unit) — allied: selected only
-        if not self.selectable or self.selected:
-            self._draw_fov_arc(surface, RANGE_COLOR)
-
         self.draw_health_bar(surface, self.x, self.y, CC_RADIUS + HEALTH_BAR_OFFSET, bar_w=40)
 
         if self.rally_point is not None:

@@ -87,9 +87,21 @@ class ClientGameScreen(BaseScreen):
         super().__init__(screen, clock)
         self._client = client
         self._is_local = is_local
+        self._is_spectator: bool = bool(getattr(client, "is_spectator", False))
         self._my_team: int = client.client_team
         self._all_teams: set[int] = set(client.player_team.values()) if client.player_team else {1, 2}
         self._team_colors: dict[int, tuple] = getattr(client, 'team_colors', {}) or {}
+
+        # Spectator-only team-view cycle (mirrors replay playback's button).
+        self._team_view: int = 0
+        self._team_view_options: list[tuple[int, str]] = [(0, "All Teams")]
+        for _tid in sorted(self._all_teams):
+            self._team_view_options.append((_tid, f"Team {_tid}"))
+        self._team_view_btn: Button | None = None
+        if self._is_spectator:
+            self._team_view_btn = Button(200, 12, 95, 24, "All Teams",
+                                         font_size=18)
+        self._spectator_font = pygame.font.SysFont(None, 20)
         mw = client.map_width
         mh = client.map_height
 
@@ -197,18 +209,26 @@ class ClientGameScreen(BaseScreen):
             self._reset_cam_btn = None
             self._pause_font = None
 
-        # Escape menu
+        # Escape menu. Spectators have no team to surrender, so we drop that
+        # button and promote "Back to Lobby" into its slot.
         self._esc_menu_open = False
         _mbw, _mbh, _mgap = 260, 44, 12
         _mx = self.width // 2 - _mbw // 2
-        _total_h = 4 * _mbh + 3 * _mgap
+        _rows = 3 if self._is_spectator else 4
+        _total_h = _rows * _mbh + (_rows - 1) * _mgap
         _my = self.height // 2 - _total_h // 2 + 20
         self._esc_menu_btns = [
             ("resume", Button(_mx, _my, _mbw, _mbh, "Back To Game")),
             ("settings", Button(_mx, _my + (_mbh + _mgap), _mbw, _mbh, "Settings", enabled=False)),
-            ("surrender", Button(_mx, _my + 2 * (_mbh + _mgap), _mbw, _mbh, "Surrender")),
-            ("lobby", Button(_mx, _my + 3 * (_mbh + _mgap), _mbw, _mbh, "Back to Lobby")),
         ]
+        if not self._is_spectator:
+            self._esc_menu_btns.append(
+                ("surrender", Button(_mx, _my + 2 * (_mbh + _mgap), _mbw, _mbh, "Surrender"))
+            )
+        _lobby_row = 3 if not self._is_spectator else 2
+        self._esc_menu_btns.append(
+            ("lobby", Button(_mx, _my + _lobby_row * (_mbh + _mgap), _mbw, _mbh, "Back to Lobby"))
+        )
 
         # Sound effects
         from core.paths import asset_path
@@ -371,7 +391,11 @@ class ClientGameScreen(BaseScreen):
                             self._chat_input_text = ""
                             self._chat_scroll = 0
                         elif event.key == pygame.K_TAB:
-                            self._chat_mode = "team" if self._chat_mode == "all" else "all"
+                            # Spectators have no team, so keep chat pinned to "all".
+                            if not self._is_spectator:
+                                self._chat_mode = (
+                                    "team" if self._chat_mode == "all" else "all"
+                                )
                         elif event.key == pygame.K_BACKSPACE:
                             self._chat_input_text = self._chat_input_text[:-1]
                         elif event.unicode and event.unicode.isprintable():
@@ -416,11 +440,14 @@ class ClientGameScreen(BaseScreen):
                             elif action == "lobby":
                                 if self._winner == 0:
                                     self._winner = -1
-                                self._client.send_command(GameCommand(
-                                    type="surrender",
-                                    player_id=self._my_team,
-                                    tick=self._tick,
-                                ))
+                                # Spectators have no team to surrender — just
+                                # leave the view and return to the lobby.
+                                if not self._is_spectator:
+                                    self._client.send_command(GameCommand(
+                                        type="surrender",
+                                        player_id=self._my_team,
+                                        tick=self._tick,
+                                    ))
                                 return self._build_result()
                             break
                     continue
@@ -430,8 +457,10 @@ class ClientGameScreen(BaseScreen):
                         and self._is_local):
                     self._toggle_pause()
 
-                # Selection hotkeys
-                if event.type == pygame.KEYDOWN:
+                # Selection hotkeys — spectators cannot select / command units.
+                if event.type == pygame.KEYDOWN and self._is_spectator:
+                    pass  # drop selection hotkeys
+                elif event.type == pygame.KEYDOWN:
                     mods = pygame.key.get_mods()
                     if event.key == pygame.K_z and mods & pygame.KMOD_CTRL:
                         # Select own CC
@@ -501,6 +530,16 @@ class ClientGameScreen(BaseScreen):
                                 },
                             ))
 
+                # Spectator: cycle through "All Teams / Team 1 / Team 2 / ..."
+                if self._team_view_btn is not None and self._team_view_btn.handle_event(event):
+                    n_opts = len(self._team_view_options)
+                    if n_opts > 1:
+                        self._team_view = (self._team_view + 1) % n_opts
+                        _, label = self._team_view_options[self._team_view]
+                        self._team_view_btn.label = label
+                        self._selected_ids.clear()
+                    continue
+
                 # Header bar interactions (local controls)
                 if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
                         and self._is_local and self._header_rect.collidepoint(event.pos)):
@@ -546,6 +585,10 @@ class ClientGameScreen(BaseScreen):
                     self._camera.pan(dx, dy)
                     self._mid_last = event.pos
 
+                # Spectators cannot issue selection or commands; minimap click
+                # still centers the camera though, so allow that path.
+                spec_block = self._is_spectator
+
                 # Left click — HUD or selection
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if self._hud_rect.collidepoint(event.pos):
@@ -558,24 +601,28 @@ class ClientGameScreen(BaseScreen):
                         if minimap_world is not None:
                             self._camera.center_on(*minimap_world)
                             continue
+                        if spec_block:
+                            continue
                         self._handle_hud_click(event.pos)
                         # Check if a unit in the group grid was clicked
                         self._handle_display_click(event.pos)
                         continue
-                    if self._game_area.collidepoint(event.pos):
+                    if self._game_area.collidepoint(event.pos) and not spec_block:
                         self._dragging = True
                         self._drag_start = event.pos
                         self._drag_end = event.pos
 
-                elif event.type == pygame.MOUSEMOTION and self._dragging:
+                elif event.type == pygame.MOUSEMOTION and self._dragging and not spec_block:
                     self._drag_end = event.pos
 
-                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self._dragging:
+                elif (event.type == pygame.MOUSEBUTTONUP and event.button == 1
+                        and self._dragging and not spec_block):
                     self._dragging = False
                     self._handle_selection(event.pos)
 
-                # Right click — movement commands
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                # Right click — movement commands (skip for spectators)
+                if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 3
+                        and not spec_block):
                     if self._game_area.collidepoint(event.pos):
                         self._rdragging = True
                         wx, wy = self._screen_to_world(event.pos)
@@ -1010,12 +1057,13 @@ class ClientGameScreen(BaseScreen):
                 team_names[t] = opponent_name
         return ScreenResult("results", data={
             "winner": self._winner,
-            "human_teams": {self._my_team},
+            "human_teams": set() if self._is_spectator else {self._my_team},
             "stats": stats,
             "replay_filepath": None,
             "team_names": team_names,
             "player_names": dict(self._player_names),
             "player_team": dict(self._client.player_team) if self._client.player_team else {},
+            "was_spectator": self._is_spectator,
         })
 
     # -- display click (group grid → center camera) --------------------------
@@ -1274,12 +1322,23 @@ class ClientGameScreen(BaseScreen):
         is_warp_in = self._phase == "warp_in"
 
         # Collect LOS circles for fog-of-war visibility filtering
-        if self._fog_of_war:
+        if self._should_apply_fog():
             _los = self._collect_los_circles(entities)
             self._los_cache = _los
         else:
             _los = None
             self._los_cache = None
+
+        # FOV arcs drawn first so they stay behind unit sprites
+        if not is_warp_in:
+            for ent in entities:
+                eid = ent.get("id")
+                if eid in self._selected_ids:
+                    ex = ent.get("x", 0)
+                    ey = ent.get("y", 0)
+                    if _los is not None and not self._is_visible(ex, ey, _los):
+                        continue
+                    self._draw_fov_arc(ent)
 
         for ent in entities:
             t = ent.get("t")
@@ -1317,7 +1376,7 @@ class ClientGameScreen(BaseScreen):
         if is_warp_in:
             self._render_warp_in(ws)
 
-        # Selection rings + FOV arcs
+        # Selection rings (drawn on top so selection is always visible)
         for ent in entities:
             eid = ent.get("id")
             if eid in self._selected_ids:
@@ -1328,7 +1387,6 @@ class ClientGameScreen(BaseScreen):
                     continue
                 r = CC_RADIUS + 2 if t == "CC" else ent.get("r", 5) + 2
                 pygame.draw.circle(ws, SELECTED_COLOR, (int(round(ex)), int(round(ey))), int(r), 1)
-                self._draw_fov_arc(ent)
 
         # Lasers
         for lf in self._lasers:
@@ -1454,10 +1512,18 @@ class ClientGameScreen(BaseScreen):
         # Header content
         font = _get_font(22)
 
-        # Team indicator
-        team_color = self._resolve_team_color(self._my_team)
-        team_label = font.render(f"Team {self._my_team}", True, team_color)
+        # Team indicator (spectators show a neutral "SPECTATING" label).
+        if self._is_spectator:
+            team_color = (230, 200, 90)
+            team_label = self._spectator_font.render("SPECTATING", True, team_color)
+        else:
+            team_color = self._resolve_team_color(self._my_team)
+            team_label = font.render(f"Team {self._my_team}", True, team_color)
         self.screen.blit(team_label, (10, 10))
+
+        # Spectator's team-view cycle button
+        if self._team_view_btn is not None:
+            self._team_view_btn.draw(self.screen)
 
         # Game time (centered)
         m, s = divmod(self._tick // 60, 60)
@@ -2136,19 +2202,37 @@ class ClientGameScreen(BaseScreen):
         from core.background import build_background
         return build_background(width, height)
 
+    def _effective_view_team(self) -> int | None:
+        """Team whose LOS drives fog; ``None`` reveals everything (spectator 'All Teams')."""
+        if self._is_spectator:
+            if self._team_view == 0:
+                return None
+            return self._team_view_options[self._team_view][0]
+        return self._my_team
+
+    def _should_apply_fog(self) -> bool:
+        """True when entity visibility should be gated by LOS for rendering."""
+        if self._is_spectator:
+            return self._team_view > 0
+        return self._fog_of_war
+
     def _collect_los_circles(self, entities: list[dict]) -> list[tuple[int, int, int]]:
-        """Collect LOS circles from own-team entities for the fog overlay.
+        """Collect LOS circles from the viewer's team for the fog overlay.
 
         Always computed client-side from the received entity positions
         (including extrapolation) so the fog updates smoothly at 60 FPS
-        rather than at the server broadcast rate (~10 FPS).
+        rather than at the server broadcast rate (~10 FPS). Spectators see
+        through their selected team's vision (see ``_effective_view_team``).
         """
+        view_team = self._effective_view_team()
+        if view_team is None:
+            return []
         circles: list[tuple[int, int, int]] = []
         for ent in entities:
             t = ent.get("t")
             if t not in ("U", "CC", "ME"):
                 continue
-            if ent.get("tm") != self._my_team:
+            if ent.get("tm") != view_team:
                 continue
             if ent.get("ghost", False):
                 continue
@@ -2200,9 +2284,13 @@ class ClientGameScreen(BaseScreen):
         saved_ws.blit(temp, (int(x - margin), int(y - margin)))
 
     def _draw_fog(self, entities: list[dict]) -> None:
-        """Draw fog of war — only show own team's vision."""
+        """Draw fog of war — player sees own team; spectator sees selected team."""
+        if self._is_spectator and self._team_view == 0:
+            return  # "All Teams" view reveals everything
+
+        spectator_fog = self._is_spectator  # forces hard fog style for spectators
         # 70% bg dimmed to ~30% → alpha ≈ 146; classic mode keeps heavier fog
-        FOG_ALPHA = 146 if self._fog_of_war else 200
+        FOG_ALPHA = 146 if (self._fog_of_war and not spectator_fog) else 200
         self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
 
         # Reuse cached LOS circles if available, otherwise collect fresh
@@ -2217,8 +2305,8 @@ class ClientGameScreen(BaseScreen):
             self._fog_surface.blit(cutout, (ex - r, ey - r),
                                    special_flags=pygame.BLEND_RGBA_SUB)
 
-        # Blur the fog edges for a softer look when fog_of_war is active
-        if self._fog_of_war:
+        # Blur the fog edges for a softer look when soft fog_of_war is active
+        if self._fog_of_war and not spectator_fog:
             w, h = self._fog_surface.get_size()
             small = pygame.transform.smoothscale(self._fog_surface,
                                                  (max(1, w // 4), max(1, h // 4)))
@@ -2228,8 +2316,8 @@ class ClientGameScreen(BaseScreen):
         ws = self._world_surface
         ws.blit(self._fog_surface, (0, 0))
 
-        # Border at fog edge (skip when fog_of_war hides entities — blur is enough)
-        if not self._fog_of_war:
+        # Border at fog edge (skip when soft fog_of_war hides entities — blur is enough)
+        if not self._fog_of_war or spectator_fog:
             self._fog_border.fill((0, 0, 0))
             for ex, ey, r in los_circles:
                 pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)

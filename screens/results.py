@@ -169,7 +169,8 @@ class ResultsScreen(BaseScreen):
                  player_names: dict[int, str] | None = None,
                  player_team: dict[int, int] | None = None,
                  source_screen: str = "main_menu",
-                 lobby_data: dict | None = None):
+                 lobby_data: dict | None = None,
+                 was_spectator: bool = False):
         super().__init__(screen, clock)
         self._winner = winner
         self._human_teams = human_teams or set()
@@ -180,6 +181,7 @@ class ResultsScreen(BaseScreen):
         self._player_team = player_team or {}
         self._source_screen = source_screen
         self._lobby_data = lobby_data or {}
+        self._was_spectator = bool(was_spectator)
 
         # Derive the set of team IDs from stats or player_team
         self._team_ids: list[int] = self._derive_team_ids()
@@ -394,6 +396,9 @@ class ResultsScreen(BaseScreen):
         if self._winner <= 0:
             return "Draw"
         winner_name = self._team_names.get(self._winner, f"Team {self._winner}")
+        # Spectators have no side, so show the neutral victory line instead of Defeat.
+        if self._was_spectator:
+            return f"{winner_name} Victory"
         if self._human_teams and self._winner not in self._human_teams:
             return "Defeat"
         return f"{winner_name} Victory"

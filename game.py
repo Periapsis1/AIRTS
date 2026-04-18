@@ -121,6 +121,8 @@ class Game:
         enable_t2: bool = False,
         fog_of_war: bool = False,
         server_mode: bool = False,
+        spectator_players: "set[int] | list[int] | None" = None,
+        is_spectator_view: bool = False,
     ):
         """
         *team_ai* maps team numbers to AI controllers.  Teams **not** present
@@ -323,12 +325,31 @@ class Game:
         self._player_colors: dict[int, int] | None = player_colors
         if player_colors:
             self._apply_player_colors()
+        else:
+            # Even without lobby overrides, publish resolved team colours so
+            # MetalSpots don't pick up stale data from a previous game.
+            MetalSpot.team_colors = {t: self._team_color(t) for t in self.all_teams}
 
         self._apply_selectability()
         self._bind_and_start_ais()
 
         self._has_human = len(self.human_players) > 0
         self._is_multiplayer = is_multiplayer
+
+        # -- spectator state --------------------------------------------------
+        # Players who joined the lobby as spectators (not in player_team).
+        self.spectator_players: set[int] = set(spectator_players or ())
+        # Local viewer is a spectator when explicitly flagged, or when an
+        # all-bot singleplayer game is being watched (no humans at all).
+        self._is_spectator_view: bool = bool(is_spectator_view) or (
+            not headless and not server_mode and len(self.human_players) == 0
+        )
+        # Team-view cycle: 0 = "All Teams" (no fog), 1..N = specific team_id.
+        # Built from all_teams so spectators can restrict vision to one team.
+        self._team_view: int = 0
+        self._team_view_options: list[tuple[int, str]] = [(0, "All Teams")]
+        for _tid in sorted(self.all_teams):
+            self._team_view_options.append((_tid, f"Team {_tid}"))
         self._dragging = False
         self._drag_start: tuple[int, int] = (0, 0)
         self._drag_end: tuple[int, int] = (0, 0)
@@ -354,16 +375,28 @@ class Game:
             self._color_mode: str = display_config.color_mode
             self._pause_font = pygame.font.SysFont(None, 48)
 
-            # Escape menu
+            # Spectator-only team-view cycle button (mirrors replay playback).
+            self._team_view_btn: Button | None = None
+            if self._is_spectator_view:
+                self._team_view_btn = Button(200, 12, 95, 24, "All Teams",
+                                             font_size=18)
+            self._spectator_font = pygame.font.SysFont(None, 20)
+
+            # Escape menu. Spectators have no team to surrender, so the
+            # third slot becomes "Draw Game" (end the match in a draw).
             self._esc_menu_open = False
             _mbw, _mbh, _mgap = 260, 44, 12
             _mx = self._screen_width // 2 - _mbw // 2
             _total_h = 4 * _mbh + 3 * _mgap
             _my = self._screen_height // 2 - _total_h // 2 + 20
+            if self._is_spectator_view:
+                _third = ("draw_game", Button(_mx, _my + 2 * (_mbh + _mgap), _mbw, _mbh, "Draw Game"))
+            else:
+                _third = ("surrender", Button(_mx, _my + 2 * (_mbh + _mgap), _mbw, _mbh, "Surrender"))
             self._esc_menu_btns = [
                 ("resume", Button(_mx, _my, _mbw, _mbh, "Back To Game")),
                 ("settings", Button(_mx, _my + (_mbh + _mgap), _mbw, _mbh, "Settings", enabled=False)),
-                ("surrender", Button(_mx, _my + 2 * (_mbh + _mgap), _mbw, _mbh, "Surrender")),
+                _third,
                 ("lobby", Button(_mx, _my + 3 * (_mbh + _mgap), _mbw, _mbh, "Back to Lobby")),
             ]
 
@@ -700,6 +733,9 @@ class Game:
             # Update weapon laser color too (Weapon is a frozen dataclass)
             if hasattr(e, 'weapon') and e.weapon is not None:
                 e.weapon = dataclasses.replace(e.weapon, laser_color=new_color)
+        # Resolve team colours for MetalSpot (owner circle and capture arcs)
+        # so the spot underneath an extractor matches the player-selected colour.
+        MetalSpot.team_colors = {t: self._team_color(t) for t in self.all_teams}
 
     def _apply_color_mode(self) -> None:
         """Recolor all units based on current color mode (player or team)."""
@@ -768,7 +804,11 @@ class Game:
                         self._chat_input_text = ""
                         self._chat_scroll = 0
                     elif event.key == pygame.K_TAB:
-                        self._chat_mode = "team" if self._chat_mode == "all" else "all"
+                        # Spectators have no team — keep chat mode pinned to "all".
+                        if not self._is_spectator_view:
+                            self._chat_mode = (
+                                "team" if self._chat_mode == "all" else "all"
+                            )
                     elif event.key == pygame.K_BACKSPACE:
                         self._chat_input_text = self._chat_input_text[:-1]
                     elif event.unicode and event.unicode.isprintable():
@@ -811,6 +851,11 @@ class Game:
                                 my_teams = self._selectable_teams
                                 other = self.all_teams - my_teams
                                 self._winner = next(iter(other)) if other else -1
+                            self._set_mouse_grab(False)
+                            self.running = False
+                        elif action == "draw_game":
+                            if self._winner == 0:
+                                self._winner = -1
                             self._set_mouse_grab(False)
                             self.running = False
                         elif action == "lobby":
@@ -862,6 +907,15 @@ class Game:
                 self._color_mode_btn.label = new_mode.title()
                 display_config.set_color_mode(new_mode)
                 self._apply_color_mode()
+                continue
+
+            # Spectator: cycle through "All Teams / Team 1 / Team 2 / ..."
+            if self._team_view_btn is not None and self._team_view_btn.handle_event(event):
+                n_opts = len(self._team_view_options)
+                if n_opts > 1:
+                    self._team_view = (self._team_view + 1) % n_opts
+                    _, label = self._team_view_options[self._team_view]
+                    self._team_view_btn.label = label
                 continue
 
             if not self._has_human:
@@ -1778,8 +1832,12 @@ class Game:
             self._render_explode()
         else:
             # Normal playing render
-            if self._fog_of_war and self._has_human:
+            if self._should_apply_fog():
                 los = self._collect_los_circles()
+                # Pre-pass: FOV arcs render behind unit sprites
+                for entity in self.entities:
+                    if hasattr(entity, "draw_fov") and self._is_visible(entity.x, entity.y, los):
+                        entity.draw_fov(ws)
                 for entity in self.entities:
                     if isinstance(entity, (MetalExtractor, CommandCenter)):
                         if self._is_visible(entity.x, entity.y, los):
@@ -1793,6 +1851,9 @@ class Game:
                             entity.draw(ws)
                 self._los_cache = los
             else:
+                for entity in self.entities:
+                    if hasattr(entity, "draw_fov"):
+                        entity.draw_fov(ws)
                 for entity in self.entities:
                     entity.draw(ws)
                 self._los_cache = None
@@ -1880,10 +1941,19 @@ class Game:
         self._pause_btn.draw(self.screen)
         self._reset_cam_btn.draw(self.screen)
         self._color_mode_btn.draw(self.screen)
+        if self._team_view_btn is not None:
+            self._team_view_btn.draw(self.screen)
         self._speed_slider.draw(self.screen)
         fps_val = self.clock.get_fps()
         fps_surf = self._fps_font.render(f"FPS: {fps_val:.0f}", True, (200, 200, 200))
         self.screen.blit(fps_surf, (4, 12))
+
+        # "SPECTATING" tag for spectator viewers
+        if self._is_spectator_view:
+            tag = self._spectator_font.render("SPECTATING", True, (230, 200, 90))
+            # Place it just right of the team-view button (or where it would be).
+            tag_x = 305 if self._team_view_btn is not None else 200
+            self.screen.blit(tag, (tag_x, 14))
 
         # Game area: tiled background (covers beyond-map dead space) then camera projection
         from core.background import blit_screen_background
@@ -1922,7 +1992,7 @@ class Game:
                 bonus_pct = entity.get_total_bonus_percent()
                 if bonus_pct > 0:
                     name = f"{name} (+{bonus_pct}%)"
-                label_color = PLAYER_COLORS[(entity.player_id - 1) % len(PLAYER_COLORS)]
+                label_color = self._player_color(entity.player_id)
                 name_surf = zfont.render(name, True, label_color)
                 sx, sy = cam.world_to_screen(entity.x, entity.y - 40)
                 self.screen.blit(name_surf, (int(sx) + ga.x - name_surf.get_width() // 2,
@@ -2129,19 +2199,33 @@ class Game:
         return build_background(width, height)
 
     def _collect_los_circles(self) -> list[tuple[int, int, int]]:
-        """Collect LOS circles from all human-team entities."""
+        """Collect LOS circles from the viewer's team(s).
+
+        Spectators with a specific team selected see through that team's vision;
+        players see their own team's vision (union across human teams).
+        """
+        if self._is_spectator_view and self._team_view > 0:
+            view_teams = {self._team_view_options[self._team_view][0]}
+        else:
+            view_teams = self.human_teams
         circles: list[tuple[int, int, int]] = []
         for entity in self.entities:
             if not entity.alive:
                 continue
             if not hasattr(entity, "line_of_sight") or not hasattr(entity, "team"):
                 continue
-            if entity.team not in self.human_teams:
+            if entity.team not in view_teams:
                 continue
             r = int(entity.line_of_sight)
             if r > 0:
                 circles.append((int(entity.x), int(entity.y), r))
         return circles
+
+    def _should_apply_fog(self) -> bool:
+        """True when entity visibility should be gated by LOS for rendering."""
+        if self._is_spectator_view:
+            return self._team_view > 0
+        return self._fog_of_war and self._has_human
 
     @staticmethod
     def _is_visible(px: float, py: float,
@@ -2167,19 +2251,28 @@ class Game:
         surface.blit(temp, (int(ox - margin), int(oy - margin)))
 
     def _draw_fog(self):
-        """Draw fog of war overlay — only when a human is playing.
+        """Draw fog of war overlay — only when a viewer has a bounded view.
 
         Fog is skipped entirely in local games where humans play on multiple teams
         (useful for debugging / local co-op/vs). Online multiplayer always keeps fog.
+        Spectators see fog only when they've selected a specific team to view;
+        index 0 ("All Teams") reveals everything.
         """
-        if not self._has_human:
-            return
-        # Local game with humans on both teams → no fog (full visibility)
-        if not self._is_multiplayer and len(self.human_teams) > 1:
-            return
+        if self._is_spectator_view:
+            if self._team_view == 0:
+                return
+            spectator_fog = True
+        else:
+            if not self._has_human:
+                return
+            # Local game with humans on both teams → no fog (full visibility)
+            if not self._is_multiplayer and len(self.human_teams) > 1:
+                return
+            spectator_fog = False
 
-        # 70% bg dimmed to ~30% → alpha ≈ 146; classic mode keeps heavier fog
-        FOG_ALPHA = 146 if self._fog_of_war else 200
+        # 70% bg dimmed to ~30% → alpha ≈ 146; classic mode keeps heavier fog.
+        # Spectator fog uses hard fog (alpha 200 with border) to match replay view.
+        FOG_ALPHA = 146 if (self._fog_of_war and not spectator_fog) else 200
         self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
 
         # Reuse cached LOS circles if available, otherwise collect fresh
@@ -2195,8 +2288,8 @@ class Game:
             self._fog_surface.blit(cutout, (ex - r, ey - r),
                                    special_flags=pygame.BLEND_RGBA_SUB)
 
-        # Blur the fog edges for a softer look when fog_of_war is active
-        if self._fog_of_war:
+        # Blur the fog edges for a softer look when soft fog_of_war is active
+        if self._fog_of_war and not spectator_fog:
             w, h = self._fog_surface.get_size()
             small = pygame.transform.smoothscale(self._fog_surface,
                                                  (max(1, w // 4), max(1, h // 4)))
@@ -2206,7 +2299,7 @@ class Game:
         self._world_surface.blit(self._fog_surface, (0, 0))
 
         # Border at the fog edge — outline of the union (no venn diagram)
-        if not self._fog_of_war:
+        if not self._fog_of_war or spectator_fog:
             self._fog_border.fill((0, 0, 0))
             for ex, ey, r in los_circles:
                 pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)
@@ -2223,7 +2316,7 @@ class Game:
         scale = t * (2.0 - t)  # ease-out curve
 
         # Draw all non-CC entities, applying fog visibility when enabled
-        if self._fog_of_war and self._has_human:
+        if self._should_apply_fog():
             los = self._collect_los_circles()
             self._los_cache = los
             for entity in self.entities:
@@ -2382,7 +2475,7 @@ class Game:
         """Render explode phase: surviving entities normal, fragments fly out."""
         ws = self._world_surface
         # Draw all surviving entities (with fog visibility when enabled)
-        if self._fog_of_war and self._has_human:
+        if self._should_apply_fog():
             los = self._collect_los_circles()
             self._los_cache = los
             for entity in self.entities:
@@ -2633,6 +2726,7 @@ class Game:
             "team_names": team_names,
             "player_names": player_names,
             "player_team": dict(self.player_team),
+            "was_spectator": self._is_spectator_view,
         }
 
         if self._owns_pygame:
