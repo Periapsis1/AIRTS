@@ -58,6 +58,13 @@ _DIVIDER = (50, 50, 65)
 _BUILD_BTN_SIZE = 38
 _BUILD_BTN_GAP = 4
 
+# Hotkeys for CC build panel — QWERTY row maps to unit types by position.
+_CC_BUILD_HOTKEYS: dict[int, int] = {
+    pygame.K_q: 0, pygame.K_w: 1, pygame.K_e: 2, pygame.K_r: 3,
+    pygame.K_t: 4, pygame.K_y: 5, pygame.K_u: 6, pygame.K_i: 7,
+    pygame.K_o: 8, pygame.K_p: 9,
+}
+
 # Metallic border colours (matching game.py)
 _BORDER_OUTER = (160, 165, 175)
 _BORDER_MID = (100, 105, 115)
@@ -529,6 +536,24 @@ class ClientGameScreen(BaseScreen):
                                     "mode": new_mode,
                                 },
                             ))
+                    elif event.key in _CC_BUILD_HOTKEYS:
+                        # CC build panel: pick the unit type at this list position.
+                        has_own_cc = any(
+                            ent.get("t") == "CC"
+                            and ent.get("tm") == self._my_team
+                            and ent.get("id") in self._selected_ids
+                            for ent in self._entities
+                        )
+                        if has_own_cc:
+                            spawnable = list(get_spawnable_types().keys())
+                            idx = _CC_BUILD_HOTKEYS[event.key]
+                            if idx < len(spawnable):
+                                self._client.send_command(GameCommand(
+                                    type="set_spawn_type",
+                                    player_id=self._my_team,
+                                    tick=self._tick,
+                                    data={"unit_type": spawnable[idx]},
+                                ))
 
                 # Spectator: cycle through "All Teams / Team 1 / Team 2 / ..."
                 if self._team_view_btn is not None and self._team_view_btn.handle_event(event):

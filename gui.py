@@ -41,6 +41,10 @@ _GROUP_BOX_SIZE = 26
 _GROUP_BOX_GAP = 2
 _GROUP_HP_H = 3
 
+# CC build panel hotkey letters (QWERTY row) — must match
+# _CC_BUILD_HOTKEYS in screens/client_game.py.
+_BUILD_HOTKEY_LETTERS = ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"]
+
 # ── tooltip ──────────────────────────────────────────────────────────
 _TT_BG = (22, 22, 34)
 _TT_BORDER = (70, 70, 100)
@@ -650,7 +654,8 @@ def _draw_actions(screen: pygame.Surface, r: pygame.Rect,
         screen.blit(ts, (r.left + 8, r.top + 6))
         cc_team_t2 = (t2_upgrades or {}).get(cc.team, set()) if enable_t2 else set()
 
-        for br, ut in _build_btn_rects(r):
+        hf = _font(12)
+        for i, (br, ut) in enumerate(_build_btn_rects(r)):
             is_sel = cc.spawn_type == ut
             is_hov = br.collidepoint(mx, my)
             if is_hov:
@@ -674,6 +679,11 @@ def _draw_actions(screen: pygame.Surface, r: pygame.Rect,
             else:
                 pygame.draw.circle(screen, cc_color, (cx, cy), 7)
                 pygame.draw.circle(screen, cc_color, (cx, cy), 7, 1)
+
+            # Hotkey letter (QWERTY row) in top-left corner
+            if i < len(_BUILD_HOTKEY_LETTERS):
+                ht = hf.render(_BUILD_HOTKEY_LETTERS[i], True, (255, 255, 255))
+                screen.blit(ht, (br.left + 2, br.top + 1))
 
             # T2 chevron indicator
             if ut in cc_team_t2:
