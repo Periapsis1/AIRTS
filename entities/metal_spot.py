@@ -10,6 +10,11 @@ from datetime import datetime
 import math
 
 class MetalSpot(CircleEntity, Damageable):
+    # Populated by Game after lobby player-colour selection is resolved, so
+    # the owner circle and capture arcs match the CC/extractor triangle when
+    # a player picks a non-default colour. Falls back to TEAM_COLORS.
+    team_colors: dict[int, tuple] = {}
+
     def __init__(self, x: float = 0, y: float = 0):
         super().__init__(x, y, METAL_SPOT_RADIUS)
         self.color = METAL_SPOT_COLOR
@@ -93,7 +98,8 @@ class MetalSpot(CircleEntity, Damageable):
         if self.owner is None:
             color = self.color
         else:
-            color = TEAM_COLORS.get(self.owner, self.color)
+            color = self.team_colors.get(self.owner,
+                                         TEAM_COLORS.get(self.owner, self.color))
         pygame.draw.circle(surface, color, self.center(), self.radius)
 
         if self.owner is not None:
@@ -112,7 +118,7 @@ class MetalSpot(CircleEntity, Damageable):
             prog = self.capture_progress[tid]
             if abs(prog) < 0.01:
                 continue
-            tc = TEAM_COLORS.get(tid, (200, 200, 60))
+            tc = self.team_colors.get(tid, TEAM_COLORS.get(tid, (200, 200, 60)))
             # Each team's arc starts at an offset so they don't overlap
             base_angle = math.pi / 2 + (2 * math.pi * i / max(n, 1))
             end_angle = base_angle + prog * (2 * math.pi / max(n, 1))

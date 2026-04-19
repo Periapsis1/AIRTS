@@ -108,6 +108,7 @@ class InternalServer:
         enable_t2: bool = False,
         fog_of_war: bool = False,
         save_replay: bool = True,
+        spectators: "set[int] | list[int] | None" = None,
     ) -> None:
         """Spawn a background thread to run a game with the given parameters.
 
@@ -128,6 +129,7 @@ class InternalServer:
             "enable_t2": enable_t2,
             "fog_of_war": fog_of_war,
             "save_replay": save_replay,
+            "spectators": set(spectators or ()),
         }
         self._stop_requested.clear()
         self._done_event.clear()
@@ -185,6 +187,7 @@ class InternalServer:
             server_mode=True,
             save_replay=p["save_replay"],
             replay_config=p["replay_config"],
+            spectator_players=p.get("spectators", set()),
         )
         self._game = game
 
@@ -208,6 +211,15 @@ class InternalServer:
                 player_names[pid] = game.player_ai[pid].ai_name
             else:
                 player_names[pid] = p["player_name"]
+        # Spectators aren't in all_players, but still need a display name
+        # for chat / HUD rendering on clients.
+        for sp_pid in p.get("spectators", set()):
+            if sp_pid in player_names:
+                continue
+            if sp_pid in client_names and client_names[sp_pid]:
+                player_names[sp_pid] = client_names[sp_pid]
+            else:
+                player_names[sp_pid] = p["player_name"]
 
         # Build team_colors from game's resolved colors
         team_colors: dict[int, list[int]] = {}
@@ -223,6 +235,7 @@ class InternalServer:
             player_team=dict(game.player_team),
             player_names=player_names,
             team_colors=team_colors,
+            spectators=p.get("spectators", set()),
         )
 
         # Run simulation with networked callbacks

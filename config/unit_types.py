@@ -90,7 +90,7 @@ UNIT_TYPES = {
     "machine_gunner": {
         "hp": 70, "speed": 40, "radius": 5,
         "symbol": MACHINE_GUNNER_SYMBOL, "can_attack": True,
-        "fov": 180, "turn_rate": 25, "los": 90,
+        "fov": 60, "turn_rate": 15, "los": 80,
         "weapon": {"name": "Laser", "damage": 4, "range": 50, "cooldown": 0.4, "laser_flash_duration": 0.1},
     },
     "scout": {
@@ -181,10 +181,10 @@ UNIT_TYPES = {
         "is_t2": True,
     },
     "machine_gunner_t2": {
-        "hp": 80, "speed": 30, "radius": 6,
+        "hp": 80, "speed": 40, "radius": 6,
         "symbol": MACHINE_GUNNER_SYMBOL, "can_attack": True,
-        "fov": 180, "turn_rate": 25, "los": 100,
-        "weapon": {"name": "Laser", "damage": 12, "range": 75, "cooldown": 0.4, "laser_flash_duration": 0.1},
+        "fov": 60, "turn_rate": 15, "los": 100,
+        "weapon": {"name": "Laser", "damage": 6, "range": 60, "cooldown": 0.4, "laser_flash_duration": 0.1},
         "is_t2": True,
     },
     "scout_t2": {

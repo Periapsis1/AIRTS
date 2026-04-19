@@ -115,6 +115,8 @@ class DedicatedServer:
         raw_ai = config.get("player_ai_ids", {})
         raw_team = config.get("player_team", {})
         raw_colors = config.get("player_colors", {})
+        raw_spectators = config.get("spectators", []) or []
+        spectators: set[int] = {int(p) for p in raw_spectators}
         for k, v in raw_ai.items():
             player_ai_ids[int(k)] = v
         for k, v in raw_team.items():
@@ -160,6 +162,7 @@ class DedicatedServer:
             enable_t2=enable_t2,
             fog_of_war=fog_of_war,
             server_mode=True,
+            spectator_players=spectators,
         )
         self._game = game
 
@@ -176,6 +179,14 @@ class DedicatedServer:
                 player_names[pid] = game.player_ai[pid].ai_name
             else:
                 player_names[pid] = self._host_name
+        # Spectators aren't in all_players but still need display names.
+        for sp_pid in spectators:
+            if sp_pid in player_names:
+                continue
+            if sp_pid in client_names and client_names[sp_pid]:
+                player_names[sp_pid] = client_names[sp_pid]
+            else:
+                player_names[sp_pid] = self._host_name
 
         # Build team_colors from game's resolved colors
         team_colors: dict[int, list[int]] = {}
@@ -191,6 +202,7 @@ class DedicatedServer:
             player_team=dict(game.player_team),
             player_names=player_names,
             team_colors=team_colors,
+            spectators=spectators,
         )
 
         print("[Server] Game started!")

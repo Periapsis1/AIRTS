@@ -116,7 +116,8 @@ class App:
                                  player_names=player_names,
                                  player_team=player_team,
                                  source_screen=source_screen,
-                                 lobby_data=lobby_data).run()
+                                 lobby_data=lobby_data,
+                                 was_spectator=data.get("was_spectator", False)).run()
 
         elif name == "debug":
             return DebugScreen(self._screen, self._clock,
@@ -180,6 +181,7 @@ class App:
         )
         player_team: dict[int, int] | None = data.get("player_team")
         player_colors: dict[int, int] | None = data.get("player_colors")
+        spectators: set[int] = set(data.get("spectators", ()) or ())
 
         # Build AI instances from registry
         player_ai: dict = {}
@@ -236,6 +238,9 @@ class App:
                 screen_height=screen_h,
                 enable_t2=enable_t2,
                 fog_of_war=fog_of_war,
+                spectator_players=spectators,
+                # All-bot SP: auto spectator view so the user can watch.
+                is_spectator_view=len(human_pids) == 0 and not headless,
             )
 
             try:
@@ -254,6 +259,7 @@ class App:
                 "team_names": result.get("team_names", {}),
                 "player_names": result.get("player_names", {}),
                 "player_team": result.get("player_team", {}),
+                "was_spectator": result.get("was_spectator", False),
                 "source_screen": "create_lobby",
             })
 
@@ -286,6 +292,7 @@ class App:
                 max_ticks=max_ticks,
                 enable_t2=enable_t2,
                 fog_of_war=fog_of_war,
+                spectators=spectators,
             )
 
             client = GameClient("127.0.0.1", port=server.port, player_name=player_name)
@@ -323,6 +330,7 @@ class App:
                 "team_names": srv_result.get("team_names", result.data.get("team_names", {})),
                 "player_names": srv_result.get("player_names", result.data.get("player_names", {})),
                 "player_team": srv_result.get("player_team", result.data.get("player_team", {})),
+                "was_spectator": result.data.get("was_spectator", False),
                 "source_screen": "create_lobby",
                 "lobby_data": {"server": server},
             }

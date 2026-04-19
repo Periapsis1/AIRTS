@@ -705,6 +705,12 @@ class ReplayPlaybackScreen(BaseScreen):
         order = {"MS": 0, "ME": 1, "CC": 2, "U": 3}
         entities.sort(key=lambda e: order.get(e.get("t", ""), 4))
 
+        # FOV arcs drawn first so they stay behind unit sprites
+        for ent in entities:
+            t = ent.get("t")
+            if t in ("U", "CC", "ME"):
+                self._draw_fov_arc(ent)
+
         for ent in entities:
             t = ent.get("t")
             if t == "MS":
@@ -716,11 +722,10 @@ class ReplayPlaybackScreen(BaseScreen):
             elif t == "U":
                 self._draw_unit(ent)
 
-        # FOV arcs and selection rings (drawn on top of entities)
+        # Selection rings (drawn on top so selection is always visible)
         for ent in entities:
             t = ent.get("t")
             if t in ("U", "CC", "ME"):
-                self._draw_fov_arc(ent)
                 eid = ent.get("id")
                 if eid in self._selected_ids:
                     ex = ent.get("x", 0)

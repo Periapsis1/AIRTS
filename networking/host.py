@@ -383,6 +383,7 @@ class GameHost:
         player_team: dict[int, int] | None = None,
         player_names: dict[int, str] | None = None,
         team_colors: dict[int, list[int]] | None = None,
+        spectators: "set[int] | list[int] | None" = None,
     ) -> None:
         """Send the initial game_start message with obstacle data."""
         obstacles = []
@@ -404,6 +405,8 @@ class GameHost:
             msg["player_names"] = {str(k): v for k, v in player_names.items()}
         if team_colors is not None:
             msg["team_colors"] = {str(k): v for k, v in team_colors.items()}
+        if spectators:
+            msg["spectators"] = sorted(int(p) for p in spectators)
         with self._clients_lock:
             for c in self._clients.values():
                 c.outbound.put(msg)

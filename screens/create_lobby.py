@@ -100,6 +100,23 @@ class _Slot:
     online_pid: int = 0  # server-assigned player_id for connected online players
 
 
+@dataclass
+class _Spectator:
+    """A player who opted out of a team and will watch the game instead."""
+    name: str = ""
+    online_pid: int = 0   # 0 = local offline spectator; otherwise server-assigned pid
+    color_idx: int = 0    # remembered so rejoining restores the slot's look
+    original_team: int = 1  # team to restore when rejoining
+
+# Spectator sub-panel layout
+_SPEC_GAP          = 10   # px gap between slot list and spectators panel
+_SPEC_PANEL_PAD    = 8    # inner padding of the spectators sub-panel
+_SPEC_ROW_H        = 26   # height per spectator row
+_SPEC_HDR_H        = 22   # header strip height
+_SPEC_BTN_H        = 26   # Join Spectator button
+_SPEC_NEUTRAL_DOT  = (140, 140, 155)
+
+
 class CreateLobbyScreen(BaseScreen):
     """Configure game format, AIs, and map settings, then start."""
 
@@ -173,9 +190,15 @@ class CreateLobbyScreen(BaseScreen):
             first_ai = self._ai_choices[0][0] if self._ai_choices else "human"
             self._slots.append(self._make_slot(2, first_ai, 2, 1))
 
-        # "+ Add Player" button
+        # Spectator state — players who opted out of playing.
+        self._spectators: list[_Spectator] = []
+
+        # "+ Add Player" button (relabels to "Join Game" while local is spectator)
         self._add_btn = Button(self._label_x, 0, 150, 28, "+ Add Player",
                                font_size=14)
+        # "Join Spectator" button lives in the spectators sub-panel.
+        self._spec_btn = Button(self._label_x, 0, 140, _SPEC_BTN_H,
+                                "Join Spectator", font_size=14)
 
         # Map size preset toggle
         saved_map = saved.get("map_size", "small")
@@ -330,12 +353,104 @@ class CreateLobbyScreen(BaseScreen):
         add_y = _SLOT_Y_START + n * _SLOT_ROW_H + 5
         self._add_btn.rect.y = add_y
         self._add_btn.rect.x = self._ai_dd_x
-        self._add_btn.enabled = n < _MAX_SLOTS
+        # While local viewer is a spectator, the button becomes "Join Game".
+        if self._is_local_spectator():
+            self._add_btn.label = "Join Game"
+            self._add_btn.enabled = n < _MAX_SLOTS
+        else:
+            self._add_btn.label = "+ Add Player"
+            self._add_btn.enabled = n < _MAX_SLOTS
+
+        # Spectators sub-panel sits below the add-player button.
+        spec_y = add_y + 28 + _SPEC_GAP
+        self._spec_panel_rect = self._compute_spec_panel_rect(spec_y)
+        self._spec_btn.rect.x = self._spec_panel_rect.x + _SPEC_PANEL_PAD
+        self._spec_btn.rect.y = (self._spec_panel_rect.bottom
+                                 - _SPEC_BTN_H - _SPEC_PANEL_PAD)
+        # Only offer "Join Spectator" when the local viewer is still playing.
+        self._spec_btn.enabled = not self._is_local_spectator()
 
         has_human = any(s.ai_dd.value == "human" for s in self._slots)
         self._headless_cb.enabled = not has_human
         if has_human:
             self._headless_cb.checked = False
+
+    def _compute_spec_panel_rect(self, top_y: int) -> pygame.Rect:
+        """Rect for the Spectators sub-panel (header + list + Join button)."""
+        list_h = max(1, len(self._spectators)) * _SPEC_ROW_H
+        height = _SPEC_HDR_H + list_h + _SPEC_BTN_H + _SPEC_PANEL_PAD * 3
+        # Indent slightly inside the left panel.
+        x = self._lp_x + 10
+        w = self._lp_w - 20
+        return pygame.Rect(x, top_y, w, height)
+
+    # ── spectator helpers ─────────────────────────────────────────────────────
+
+    def _local_online_pid(self) -> int:
+        """online_pid of the local client (or 0 in offline mode)."""
+        if self._online_client:
+            return int(self._online_client.player_id)
+        return 0
+
+    def _is_local_spectator(self) -> bool:
+        if self._online_client:
+            local_pid = self._local_online_pid()
+            return any(sp.online_pid == local_pid for sp in self._spectators)
+        return any(sp.online_pid == 0 for sp in self._spectators)
+
+    def _join_spectator(self) -> None:
+        """Move the local user from their slot into the Spectators list."""
+        if self._is_local_spectator():
+            return
+        if self._online_client:
+            local_pid = self._local_online_pid()
+            for slot in list(self._slots):
+                if slot.online_pid == local_pid:
+                    self._spectators.append(_Spectator(
+                        name=slot.name_input.text if slot.name_input else "",
+                        online_pid=local_pid,
+                        color_idx=slot.color_idx,
+                        original_team=int(slot.team_dd.value),
+                    ))
+                    self._slots.remove(slot)
+                    break
+        else:
+            # Offline: move the first human slot (local viewer).
+            # Keep at least one playable slot so the game is startable.
+            if sum(1 for s in self._slots) <= 1:
+                return
+            for slot in list(self._slots):
+                if slot.ai_dd.value == "human":
+                    self._spectators.append(_Spectator(
+                        name=slot.name_input.text if slot.name_input else "",
+                        online_pid=0,
+                        color_idx=slot.color_idx,
+                        original_team=int(slot.team_dd.value),
+                    ))
+                    self._slots.remove(slot)
+                    break
+        for i, s in enumerate(self._slots):
+            s.pid = i + 1
+        self._rebuild_slot_positions()
+
+    def _rejoin_from_spectator(self) -> None:
+        """Move the local spectator back into a playing slot."""
+        if self._online_client:
+            local_pid = self._local_online_pid()
+            sp = next((s for s in self._spectators
+                       if s.online_pid == local_pid), None)
+        else:
+            sp = next((s for s in self._spectators if s.online_pid == 0), None)
+        if sp is None or len(self._slots) >= _MAX_SLOTS:
+            return
+        self._spectators.remove(sp)
+        idx = len(self._slots)
+        slot = self._make_slot(idx + 1, "human", sp.original_team, idx,
+                               color_idx=sp.color_idx, name=sp.name)
+        if sp.online_pid:
+            slot.online_pid = sp.online_pid
+        self._slots.append(slot)
+        self._rebuild_slot_positions()
 
     def _load_slots(self, saved: dict):
         first_ai = self._ai_choices[0][0] if self._ai_choices else "human"
@@ -420,10 +535,16 @@ class CreateLobbyScreen(BaseScreen):
             connected[local_pid] = self._online_client._player_name
 
         current_online = {s.online_pid for s in self._slots if s.online_pid}
+        spectator_online_pids = {
+            sp.online_pid for sp in self._spectators if sp.online_pid
+        }
         changed = False
 
-        # Add new connected players as locked Human slots
+        # Add new connected players as locked Human slots, unless they're
+        # already tracked as a spectator on this host.
         for pid in sorted(connected.keys()):
+            if pid in spectator_online_pids:
+                continue
             if pid not in current_online:
                 cidx = self._next_free_color()
                 name = connected[pid]
@@ -535,7 +656,15 @@ class CreateLobbyScreen(BaseScreen):
                         continue
 
                 if self._add_btn.handle_event(event):
-                    self._add_slot()
+                    # "Join Game" when local is spectator, otherwise "+ Add Player".
+                    if self._is_local_spectator():
+                        self._rejoin_from_spectator()
+                    else:
+                        self._add_slot()
+                    continue
+
+                if self._spec_btn.handle_event(event):
+                    self._join_spectator()
                     continue
 
                 removed = None
@@ -598,6 +727,11 @@ class CreateLobbyScreen(BaseScreen):
                     "team": int(slot.team_dd.value),
                     "color_idx": slot.color_idx,
                 })
+        spectators = [
+            {"online_pid": sp.online_pid, "name": sp.name,
+             "color_idx": sp.color_idx, "original_team": sp.original_team}
+            for sp in self._spectators
+        ]
         return {
             "map_size": self._map_size.value,
             "obstacles": self._sl_obstacles.value,
@@ -608,6 +742,7 @@ class CreateLobbyScreen(BaseScreen):
             "ai_slots": ai_slots,
             "player_teams": player_teams,
             "player_colors": player_colors,
+            "spectators": spectators,
         }
 
     def _apply_lobby_config(self, config: dict) -> None:
@@ -665,6 +800,27 @@ class CreateLobbyScreen(BaseScreen):
                             break
                 if pt_key in player_colors:
                     slot.color_idx = int(player_colors[pt_key])
+
+        # Spectators sync — rebuild list from host-authoritative config.
+        raw_spectators = config.get("spectators")
+        if raw_spectators is not None:
+            self._spectators = [
+                _Spectator(
+                    name=entry.get("name", ""),
+                    online_pid=int(entry.get("online_pid", 0)),
+                    color_idx=int(entry.get("color_idx", 0)),
+                    original_team=int(entry.get("original_team", 1)),
+                )
+                for entry in raw_spectators
+            ]
+            # Remove any slot whose online_pid is now a spectator.
+            spec_pids = {sp.online_pid for sp in self._spectators
+                         if sp.online_pid}
+            self._slots = [s for s in self._slots
+                           if not s.online_pid or s.online_pid not in spec_pids]
+            for i, s in enumerate(self._slots):
+                s.pid = i + 1
+            self._rebuild_slot_positions()
 
     def _maybe_broadcast_config(self) -> None:
         """If online and config changed since last broadcast, send to server."""
@@ -732,13 +888,32 @@ class CreateLobbyScreen(BaseScreen):
             if slot.ai_dd.value != "human":
                 player_ai_ids[pid] = slot.ai_dd.value
 
-        # Use first human slot's name, or fallback
+        # Spectators get player_ids after the last playing slot so they are
+        # unique across the lobby. Offline lobbies don't route through a
+        # server so any unique id is fine.
+        spectators: list[int] = []
+        spectator_names: dict[int, str] = {}
+        next_pid = len(self._slots) + 1
+        for sp in self._spectators:
+            sp_pid = sp.online_pid or next_pid
+            if not sp.online_pid:
+                next_pid += 1
+            spectators.append(sp_pid)
+            if sp.name:
+                spectator_names[sp_pid] = sp.name
+
+        # Use first human slot's name, or first spectator's name, or fallback.
         player_name = "Unnamed Player"
         for slot in self._slots:
             if slot.ai_dd.value == "human" and slot.name_input:
                 n = slot.name_input.text.strip()
                 if n:
                     player_name = n
+                    break
+        else:
+            for sp in self._spectators:
+                if sp.name:
+                    player_name = sp.name
                     break
 
         map_w, map_h = _MAP_SIZES[self._map_size.value]
@@ -754,6 +929,8 @@ class CreateLobbyScreen(BaseScreen):
             "player_team":   player_team,
             "player_colors": player_colors,
             "player_name":   player_name,
+            "spectators":    spectators,
+            "spectator_names": spectator_names,
             "width":         map_w,
             "height":        map_h,
             "obstacle_count": (obs_val, obs_val),
@@ -774,14 +951,20 @@ class CreateLobbyScreen(BaseScreen):
 
         client = self._online_client
 
+        # Collect spectator online_pids so we can exclude them from player_team.
+        spectator_pids: set[int] = {
+            sp.online_pid for sp in self._spectators if sp.online_pid
+        }
+
         # Step 1: Add all connected players (from online slots) as humans
         # Each online slot has the real server-assigned player_id.
         for slot in self._slots:
             if slot.online_pid:
                 player_team[slot.online_pid] = int(slot.team_dd.value)
 
-        # Ensure local player is always included
-        if client and client.player_id not in player_team:
+        # Ensure local player is included if not a spectator.
+        if (client and client.player_id not in player_team
+                and client.player_id not in spectator_pids):
             first_team = int(self._slots[0].team_dd.value) if self._slots else 1
             player_team[client.player_id] = first_team
 
@@ -827,6 +1010,7 @@ class CreateLobbyScreen(BaseScreen):
             "player_ai_ids": {str(k): v for k, v in player_ai_ids.items()},
             "player_team":   {str(k): v for k, v in player_team.items()},
             "player_colors": {str(k): v for k, v in player_colors.items()},
+            "spectators":    sorted(spectator_pids),
             "width":         map_w,
             "height":        map_h,
             "obstacle_count": self._sl_obstacles.value,
@@ -839,6 +1023,39 @@ class CreateLobbyScreen(BaseScreen):
         client.send_start_game(config)
 
     # ── rendering ─────────────────────────────────────────────────────────────
+
+    def _draw_spectators_panel(self, font_small, font_tiny, mx: int, my: int):
+        """Draw the Spectators sub-panel below the player slot list."""
+        rect = getattr(self, "_spec_panel_rect", None)
+        if rect is None:
+            return
+        pygame.draw.rect(self.screen, _PANEL_BG, rect, border_radius=6)
+        pygame.draw.rect(self.screen, _PANEL_BORDER, rect, 1, border_radius=6)
+
+        # Header
+        hdr = font_tiny.render(
+            f"Spectators ({len(self._spectators)})", True, _HDR_COLOR,
+        )
+        self.screen.blit(hdr, (rect.x + _SPEC_PANEL_PAD,
+                               rect.y + _SPEC_PANEL_PAD))
+
+        # List
+        list_y = rect.y + _SPEC_PANEL_PAD + _SPEC_HDR_H
+        for i, sp in enumerate(self._spectators):
+            row_y = list_y + i * _SPEC_ROW_H
+            dot_cx = rect.x + _SPEC_PANEL_PAD + 6
+            dot_cy = row_y + _SPEC_ROW_H // 2
+            pygame.draw.circle(self.screen, _SPEC_NEUTRAL_DOT,
+                               (dot_cx, dot_cy), 5)
+            label = sp.name or "Spectator"
+            label_surf = font_small.render(label, True, CONTENT_TEXT)
+            self.screen.blit(label_surf,
+                             (dot_cx + 12,
+                              row_y + (_SPEC_ROW_H - label_surf.get_height()) // 2))
+
+        # Button (if viewer is not already a spectator)
+        if not self._is_local_spectator():
+            self._spec_btn.draw(self.screen)
 
     def _draw(self):
         self.screen.fill(MENU_BG)
@@ -915,9 +1132,12 @@ class CreateLobbyScreen(BaseScreen):
                     slot.name_input.draw(self.screen)
 
 
-        # Add player button (inline after last slot)
-        if len(self._slots) < _MAX_SLOTS:
+        # Add player / Join Game button (inline after last slot)
+        if self._is_local_spectator() or len(self._slots) < _MAX_SLOTS:
             self._add_btn.draw(self.screen)
+
+        # ── spectators sub-panel ─────────────────────────────────────────────
+        self._draw_spectators_panel(small, tiny, mx, my)
 
         # ── right panel: Settings ─────────────────────────────────────────────
         settings_hdr = font.render("Settings", True, CONTENT_TEXT)
