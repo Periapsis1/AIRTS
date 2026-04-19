@@ -181,6 +181,7 @@ class App:
         )
         player_team: dict[int, int] | None = data.get("player_team")
         player_colors: dict[int, int] | None = data.get("player_colors")
+        player_handicaps: dict[int, int] | None = data.get("player_handicaps")
         spectators: set[int] = set(data.get("spectators", ()) or ())
 
         # Build AI instances from registry
@@ -227,6 +228,7 @@ class App:
                 player_ai=player_ai,
                 player_team=player_team,
                 player_colors=player_colors,
+                player_handicaps=player_handicaps,
                 screen=self._screen,
                 clock=self._clock,
                 replay_config=replay_config,
@@ -287,6 +289,7 @@ class App:
                 player_ai=player_ai,
                 player_team=player_team,
                 player_colors=player_colors,
+                player_handicaps=player_handicaps,
                 replay_config=replay_config,
                 player_name=player_name,
                 max_ticks=max_ticks,

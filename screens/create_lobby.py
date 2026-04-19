@@ -50,10 +50,15 @@ _MAX_SLOTS = 8
 _MIN_SLOTS = 2
 
 # Slot row dimensions
-_SLOT_ROW_H   = 38   # height per player row
-_AI_DD_W      = 155  # AI / Human dropdown width
-_TEAM_DD_W    = 72   # Team dropdown width
-_REMOVE_BTN_W = 26   # × button size
+_SLOT_ROW_H    = 38   # height per player row
+_AI_DD_W       = 155  # AI / Human dropdown width
+_TEAM_DD_W     = 72   # Team dropdown width
+_REMOVE_BTN_W  = 26   # × button size
+_HANDICAP_BTN_W = 92  # Add Handicap button width
+
+# Handicap preset cycle — percent modifier applied to metal-extractor spawn
+# bonus. -100% nullifies the bonus; +100% doubles it; +200% triples it.
+_HANDICAP_STEPS = [-100, -75, -50, -25, 0, 25, 50, 75, 100, 150, 200]
 
 # Panel visual constants
 _PANEL_BG     = (18, 18, 28)
@@ -95,9 +100,11 @@ class _Slot:
     ai_dd: Dropdown
     team_dd: Dropdown
     remove_btn: Button
+    handicap_btn: Button
     color_idx: int = 0
     name_input: TextInput | None = None  # only for human players
     online_pid: int = 0  # server-assigned player_id for connected online players
+    handicap: int = 0    # percent modifier on metal-extractor spawn bonus
 
 
 @dataclass
@@ -159,12 +166,13 @@ class CreateLobbyScreen(BaseScreen):
         self._rp_w = self.width - self._rp_x - max(16, int(self.width * 0.03))
 
         # Slot row element x-positions (within left panel)
-        self._label_x   = self._lp_x + 14             # dot + P# label
-        self._ai_dd_x   = self._label_x + 44          # AI / Human dropdown
-        self._team_dd_x = self._ai_dd_x + _AI_DD_W + 8
-        self._remove_x  = self._team_dd_x + _TEAM_DD_W + 6
-        self._name_x    = self._remove_x + _REMOVE_BTN_W + 6  # inline name input
-        self._name_w    = max(80, (self._lp_x + self._lp_w - 10) - self._name_x)
+        self._label_x    = self._lp_x + 14             # dot + P# label
+        self._ai_dd_x    = self._label_x + 44          # AI / Human dropdown
+        self._team_dd_x  = self._ai_dd_x + _AI_DD_W + 8
+        self._remove_x   = self._team_dd_x + _TEAM_DD_W + 6
+        self._handicap_x = self._remove_x + _REMOVE_BTN_W + 6  # handicap button
+        self._name_x     = self._handicap_x + _HANDICAP_BTN_W + 6  # inline name input
+        self._name_w     = max(60, (self._lp_x + self._lp_w - 10) - self._name_x)
 
         # Right panel content starts here
         self._rx = self._rp_x + 14
@@ -313,7 +321,8 @@ class CreateLobbyScreen(BaseScreen):
         return _SLOT_Y_START + idx * _SLOT_ROW_H
 
     def _make_slot(self, pid: int, ai_id: str, team_id: int, idx: int,
-                   color_idx: int = -1, name: str = "") -> _Slot:
+                   color_idx: int = -1, name: str = "",
+                   handicap: int = 0) -> _Slot:
         y = self._slot_y(idx)
         choices = self._dropdown_choices_for(ai_id)
         ai_idx = self._find_ai_index(ai_id, choices, 0)
@@ -325,14 +334,39 @@ class CreateLobbyScreen(BaseScreen):
             y + (DD_HEIGHT - _REMOVE_BTN_W) // 2,
             _REMOVE_BTN_W, _REMOVE_BTN_W, "×",
         )
+        handicap_btn = Button(
+            self._handicap_x, y, _HANDICAP_BTN_W, DD_HEIGHT,
+            self._handicap_label(handicap), font_size=14,
+        )
         cidx = color_idx if color_idx >= 0 else idx % len(_PLAYER_COLORS)
-        # Per-human name input (inline, same row after × button)
+        # Per-human name input (inline, same row after handicap button)
         name_input = TextInput(
             self._name_x, y, self._name_w,
             text=name, placeholder="Name", max_len=24,
         )
         return _Slot(pid=pid, ai_dd=ai_dd, team_dd=team_dd,
-                     remove_btn=remove_btn, color_idx=cidx, name_input=name_input)
+                     remove_btn=remove_btn, handicap_btn=handicap_btn,
+                     color_idx=cidx, name_input=name_input,
+                     handicap=int(handicap))
+
+    @staticmethod
+    def _handicap_label(pct: int) -> str:
+        if pct == 0:
+            return "Handicap"
+        sign = "+" if pct > 0 else ""
+        return f"Hcp {sign}{pct}%"
+
+    @staticmethod
+    def _cycle_handicap(current: int) -> int:
+        # Snap current value to the nearest step, then advance.
+        try:
+            i = _HANDICAP_STEPS.index(current)
+        except ValueError:
+            # Nearest step if current doesn't match one (e.g. legacy value)
+            i = min(range(len(_HANDICAP_STEPS)),
+                    key=lambda j: abs(_HANDICAP_STEPS[j] - current))
+        i = (i + 1) % len(_HANDICAP_STEPS)
+        return _HANDICAP_STEPS[i]
 
     def _rebuild_slot_positions(self):
         for idx, slot in enumerate(self._slots):
@@ -343,7 +377,10 @@ class CreateLobbyScreen(BaseScreen):
             slot.team_dd.y = y
             slot.remove_btn.rect.x = self._remove_x
             slot.remove_btn.rect.y = y + (DD_HEIGHT - _REMOVE_BTN_W) // 2
-            # Inline name input (same row, after × button)
+            slot.handicap_btn.rect.x = self._handicap_x
+            slot.handicap_btn.rect.y = y
+            slot.handicap_btn.label = self._handicap_label(slot.handicap)
+            # Inline name input (same row, after handicap button)
             if slot.name_input:
                 slot.name_input.rect.x = self._name_x
                 slot.name_input.rect.y = y
@@ -461,8 +498,11 @@ class CreateLobbyScreen(BaseScreen):
                 team_id = int(entry.get("team", 1 if i == 0 else 2))
                 color_idx = entry.get("color", i % len(_PLAYER_COLORS))
                 name = entry.get("name", "")
+                handicap = int(entry.get("handicap", 0))
                 self._slots.append(self._make_slot(i + 1, ai_id, team_id, i,
-                                                   color_idx=color_idx, name=name))
+                                                   color_idx=color_idx,
+                                                   name=name,
+                                                   handicap=handicap))
         else:
             # Legacy fallback
             fmt = saved.get("format", "1v1")
@@ -676,6 +716,17 @@ class CreateLobbyScreen(BaseScreen):
                     self._remove_slot(removed)
                     continue
 
+                # Handicap button click — cycle this slot's handicap value.
+                handicap_clicked = False
+                for slot in self._slots:
+                    if slot.handicap_btn.handle_event(event):
+                        slot.handicap = self._cycle_handicap(slot.handicap)
+                        slot.handicap_btn.label = self._handicap_label(slot.handicap)
+                        handicap_clicked = True
+                        break
+                if handicap_clicked:
+                    continue
+
                 self._map_size.handle_event(event)
                 self._sl_obstacles.handle_event(event)
                 self._sl_metal_spots.handle_event(event)
@@ -717,15 +768,18 @@ class CreateLobbyScreen(BaseScreen):
         ai_slots = []
         player_teams: dict[str, int] = {}
         player_colors: dict[str, int] = {}
+        player_handicaps: dict[str, int] = {}
         for slot in self._slots:
             if slot.online_pid:
                 player_teams[str(slot.online_pid)] = int(slot.team_dd.value)
                 player_colors[str(slot.online_pid)] = slot.color_idx
+                player_handicaps[str(slot.online_pid)] = int(slot.handicap)
             else:
                 ai_slots.append({
                     "ai_id": slot.ai_dd.value,
                     "team": int(slot.team_dd.value),
                     "color_idx": slot.color_idx,
+                    "handicap": int(slot.handicap),
                 })
         spectators = [
             {"online_pid": sp.online_pid, "name": sp.name,
@@ -742,6 +796,7 @@ class CreateLobbyScreen(BaseScreen):
             "ai_slots": ai_slots,
             "player_teams": player_teams,
             "player_colors": player_colors,
+            "player_handicaps": player_handicaps,
             "spectators": spectators,
         }
 
@@ -780,15 +835,18 @@ class CreateLobbyScreen(BaseScreen):
                 cidx = entry.get("color_idx", self._next_free_color())
                 ai_id = entry.get("ai_id", "human")
                 team = int(entry.get("team", 2))
-                slot = self._make_slot(idx + 1, ai_id, team, idx, color_idx=cidx)
+                handicap = int(entry.get("handicap", 0))
+                slot = self._make_slot(idx + 1, ai_id, team, idx,
+                                       color_idx=cidx, handicap=handicap)
                 self._slots.append(slot)
             for i, s in enumerate(self._slots):
                 s.pid = i + 1
             self._rebuild_slot_positions()
 
-        # Player team and color assignments (for online slots)
+        # Player team, color, and handicap assignments (for online slots)
         player_teams = config.get("player_teams", {})
         player_colors = config.get("player_colors", {})
+        player_handicaps = config.get("player_handicaps", {})
         for slot in self._slots:
             if slot.online_pid:
                 pt_key = str(slot.online_pid)
@@ -800,6 +858,9 @@ class CreateLobbyScreen(BaseScreen):
                             break
                 if pt_key in player_colors:
                     slot.color_idx = int(player_colors[pt_key])
+                if pt_key in player_handicaps:
+                    slot.handicap = int(player_handicaps[pt_key])
+                    slot.handicap_btn.label = self._handicap_label(slot.handicap)
 
         # Spectators sync — rebuild list from host-authoritative config.
         raw_spectators = config.get("spectators")
@@ -852,6 +913,7 @@ class CreateLobbyScreen(BaseScreen):
                 "team": int(s.team_dd.value),
                 "color": s.color_idx,
                 "name": s.name_input.text.strip() if s.name_input else "",
+                "handicap": int(s.handicap),
             }
             for s in self._slots
         ]
@@ -882,9 +944,11 @@ class CreateLobbyScreen(BaseScreen):
     def _build_result(self) -> ScreenResult:
         player_ai_ids: dict[int, str] = {}
         player_team:   dict[int, int] = {}
+        player_handicaps: dict[int, int] = {}
         for i, slot in enumerate(self._slots):
             pid = i + 1
             player_team[pid] = int(slot.team_dd.value)
+            player_handicaps[pid] = int(slot.handicap)
             if slot.ai_dd.value != "human":
                 player_ai_ids[pid] = slot.ai_dd.value
 
@@ -928,6 +992,7 @@ class CreateLobbyScreen(BaseScreen):
             "player_ai_ids": player_ai_ids,
             "player_team":   player_team,
             "player_colors": player_colors,
+            "player_handicaps": player_handicaps,
             "player_name":   player_name,
             "spectators":    spectators,
             "spectator_names": spectator_names,
@@ -958,9 +1023,11 @@ class CreateLobbyScreen(BaseScreen):
 
         # Step 1: Add all connected players (from online slots) as humans
         # Each online slot has the real server-assigned player_id.
+        player_handicaps: dict[int, int] = {}
         for slot in self._slots:
             if slot.online_pid:
                 player_team[slot.online_pid] = int(slot.team_dd.value)
+                player_handicaps[slot.online_pid] = int(slot.handicap)
 
         # Ensure local player is included if not a spectator.
         if (client and client.player_id not in player_team
@@ -980,6 +1047,7 @@ class CreateLobbyScreen(BaseScreen):
                 next_pid += 1
             player_team[next_pid] = int(slot.team_dd.value)
             player_ai_ids[next_pid] = slot.ai_dd.value
+            player_handicaps[next_pid] = int(slot.handicap)
             used_pids.add(next_pid)
             next_pid += 1
 
@@ -1010,6 +1078,7 @@ class CreateLobbyScreen(BaseScreen):
             "player_ai_ids": {str(k): v for k, v in player_ai_ids.items()},
             "player_team":   {str(k): v for k, v in player_team.items()},
             "player_colors": {str(k): v for k, v in player_colors.items()},
+            "player_handicaps": {str(k): v for k, v in player_handicaps.items()},
             "spectators":    sorted(spectator_pids),
             "width":         map_w,
             "height":        map_h,
@@ -1127,9 +1196,12 @@ class CreateLobbyScreen(BaseScreen):
                 # Regular slot: show remove button and name input
                 if len(self._slots) > _MIN_SLOTS:
                     slot.remove_btn.draw(self.screen)
-                # Per-human name input (inline, same row after x button)
+                # Per-human name input (inline, same row after handicap button)
                 if slot.ai_dd.value == "human" and slot.name_input:
                     slot.name_input.draw(self.screen)
+
+            # Handicap button (shown for every slot, online or AI)
+            slot.handicap_btn.draw(self.screen)
 
 
         # Add player / Join Game button (inline after last slot)

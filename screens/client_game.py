@@ -26,6 +26,7 @@ from config.settings import (
     RANGE_COLOR, MEDIC_HEAL_COLOR, CC_LASER_RANGE,
     REACTIVE_ARMOR_COLOR, ELECTRIC_ARMOR_COLOR,
     OUTPOST_LOS,
+    FIXED_DT,
 )
 from core.camera import Camera
 from config import audio
@@ -138,6 +139,8 @@ class ClientGameScreen(BaseScreen):
 
         # Movement extrapolation state
         self._last_server_positions: dict[int, tuple[float, float]] = {}
+        self._last_server_targets: dict[int, tuple] = {}
+        self._last_extrap_tick: int = 0
         self._unit_velocities: dict[int, tuple[float, float]] = {}
         self._extrap_dt: float = 0.0
 
@@ -1167,9 +1170,23 @@ class ClientGameScreen(BaseScreen):
         self._t2_researching = t2_wip
 
     def _update_extrapolation(self, entities: list[dict]) -> None:
-        """Recompute velocity predictions from the latest server frame."""
+        """Recompute velocity predictions from the latest server frame.
+
+        Hybrid: use actual position delta when we have a prior sample and the
+        command hasn't just changed — this naturally yields zero velocity for
+        units stuck in clumps, against obstacles, fight-paused with an enemy
+        in range, or artillery locked while charging. Fall back to
+        target-direction velocity on the first frame after a new command (or
+        for a freshly-seen unit) so newly-issued moves feel responsive.
+        """
+        prev_positions = self._last_server_positions
+        prev_targets = self._last_server_targets
+        tick_delta = self._tick - self._last_extrap_tick
+        frame_dt = tick_delta * FIXED_DT if tick_delta > 0 else 0.0
+
         positions: dict[int, tuple[float, float]] = {}
         velocities: dict[int, tuple[float, float]] = {}
+        targets: dict[int, tuple] = {}
         for ent in entities:
             if ent.get("t") != "U":
                 continue
@@ -1179,22 +1196,51 @@ class ClientGameScreen(BaseScreen):
             ex = ent.get("x", 0.0)
             ey = ent.get("y", 0.0)
             positions[eid] = (ex, ey)
-            # Determine movement target: move target first, then attack target
+
+            # Effective direction target: move target first, then attack target
             tx = ent.get("tx")
             ty = ent.get("ty")
             if tx is None or ty is None:
                 tx = ent.get("atx")
                 ty = ent.get("aty")
-            if tx is not None and ty is not None:
+
+            # Track move target + presence of attack target for command-change
+            # detection. atx/aty shifts with moving enemies, so we key on its
+            # existence rather than its value to avoid spurious "new command"
+            # triggers every frame while following a moving target.
+            cur_target_key = (ent.get("tx"), ent.get("ty"),
+                              ent.get("atx") is not None)
+            targets[eid] = cur_target_key
+
+            prev_pos = prev_positions.get(eid)
+            prev_target_key = prev_targets.get(eid)
+            new_command = (prev_target_key is not None
+                           and prev_target_key != cur_target_key)
+
+            if prev_pos is not None and frame_dt > 0.0 and not new_command:
+                # Position-delta velocity: honours server-side blocking,
+                # fight-pause, and charge-lock automatically.
+                vx = (ex - prev_pos[0]) / frame_dt
+                vy = (ey - prev_pos[1]) / frame_dt
+                velocities[eid] = (vx, vy)
+            elif tx is not None and ty is not None:
+                # First frame after a new command (or brand-new entity):
+                # aim straight at the target so the unit starts moving now
+                # instead of waiting a full frame for the delta to catch up.
                 dx = tx - ex
                 dy = ty - ey
                 dist = math.hypot(dx, dy)
                 if dist > 0.5:
                     speed = self._effective_speed(ent)
                     velocities[eid] = (dx / dist * speed, dy / dist * speed)
-                    continue
-            velocities[eid] = (0.0, 0.0)
+                else:
+                    velocities[eid] = (0.0, 0.0)
+            else:
+                velocities[eid] = (0.0, 0.0)
+
         self._last_server_positions = positions
+        self._last_server_targets = targets
+        self._last_extrap_tick = self._tick
         self._unit_velocities = velocities
         self._extrap_dt = 0.0
 

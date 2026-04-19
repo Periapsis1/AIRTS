@@ -39,11 +39,18 @@ class CommandCenter(Unit):
         self.rally_point: tuple[float, float] | None = None
         self.spawn_type: str = "soldier"
         self.metal_extractors: list = []
+        # Handicap is a percent modifier on the metal-extractor spawn bonus.
+        # -100 zeroes the bonus; +100 doubles it; +200 triples it.
+        self.handicap: int = 0
+
+    def _handicap_mult(self) -> float:
+        return 1.0 + self.handicap / 100.0
 
     def update(self, dt: float):
         super().update(dt)  # laser cooldown, no movement (is_building)
         self.metal_extractors = [me for me in self.metal_extractors if me.alive]
         bonus = sum(me.get_spawn_bonus() for me in self.metal_extractors)
+        bonus *= self._handicap_mult()
         self._spawn_timer += dt * (1.0 + bonus)
 
     def on_death(self) -> dict | None:
@@ -54,6 +61,7 @@ class CommandCenter(Unit):
     def get_total_bonus_percent(self) -> int:
         """Return total spawn bonus as an integer percentage (e.g. 32 for +32%)."""
         bonus = sum(me.get_spawn_bonus() for me in self.metal_extractors)
+        bonus *= self._handicap_mult()
         return round(bonus * 100)
 
     def spawn_ready(self) -> bool:
@@ -128,6 +136,7 @@ class CommandCenter(Unit):
             "spawn_type": self.spawn_type,
             "rally_point": list(self.rally_point) if self.rally_point else None,
             "metal_extractor_ids": [me.entity_id for me in self.metal_extractors if me.alive],
+            "handicap": int(self.handicap),
         })
         return d
 
@@ -149,6 +158,7 @@ class CommandCenter(Unit):
         cc._bounds = tuple(data["_bounds"])
         cc._spawn_timer = data["_spawn_timer"]
         cc.spawn_type = data["spawn_type"]
+        cc.handicap = int(data.get("handicap", 0))
         cc.rally_point = tuple(data["rally_point"]) if data.get("rally_point") else None
         cc.target = tuple(data["target"]) if data.get("target") else None
         cc._stop_dist = data.get("_stop_dist", 0.0)

@@ -103,6 +103,7 @@ class Game:
         player_ai: dict[int, BaseAI] | None = None,
         player_team: dict[int, int] | None = None,
         player_colors: dict[int, int] | None = None,
+        player_handicaps: dict[int, int] | None = None,
         team_ai: dict[int, BaseAI] | None = None,  # legacy alias for player_ai
         screen: pygame.Surface | None = None,
         clock: pygame.time.Clock | None = None,
@@ -329,6 +330,17 @@ class Game:
             # Even without lobby overrides, publish resolved team colours so
             # MetalSpots don't pick up stale data from a previous game.
             MetalSpot.team_colors = {t: self._team_color(t) for t in self.all_teams}
+
+        # Per-player spawn-bonus handicap: percent modifier applied to each
+        # player's metal-extractor spawn bonus. Stash on the CC so the bonus
+        # calc in CommandCenter.update() uses the right multiplier.
+        self._player_handicaps: dict[int, int] = {
+            int(pid): int(pct)
+            for pid, pct in (player_handicaps or {}).items()
+        }
+        if self._player_handicaps:
+            for cc in self.command_centers:
+                cc.handicap = self._player_handicaps.get(cc.player_id, 0)
 
         self._apply_selectability()
         self._bind_and_start_ais()

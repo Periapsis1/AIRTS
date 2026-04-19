@@ -107,14 +107,16 @@ class DedicatedServer:
         fog_of_war: bool = config.get("fog_of_war", False)
         max_ticks = time_limit * 60 * 60 if time_limit > 0 else self._max_ticks_default
 
-        # Build player_ai, player_team, and player_colors from config
+        # Build player_ai, player_team, player_colors, player_handicaps from config
         player_ai_ids: dict[int, str] = {}
         player_team: dict[int, int] = {}
         player_colors: dict[int, int] = {}
+        player_handicaps: dict[int, int] = {}
 
         raw_ai = config.get("player_ai_ids", {})
         raw_team = config.get("player_team", {})
         raw_colors = config.get("player_colors", {})
+        raw_handicaps = config.get("player_handicaps", {})
         raw_spectators = config.get("spectators", []) or []
         spectators: set[int] = {int(p) for p in raw_spectators}
         for k, v in raw_ai.items():
@@ -123,6 +125,8 @@ class DedicatedServer:
             player_team[int(k)] = int(v)
         for k, v in raw_colors.items():
             player_colors[int(k)] = int(v)
+        for k, v in raw_handicaps.items():
+            player_handicaps[int(k)] = int(v)
 
         # Fallback: if no player_team, default to 1v1
         if not player_team:
@@ -154,6 +158,7 @@ class DedicatedServer:
             player_ai=player_ai,
             player_team=player_team,
             player_colors=player_colors or None,
+            player_handicaps=player_handicaps or None,
             player_name=self._host_name,
             headless=True,
             max_ticks=max_ticks,
