@@ -34,3 +34,4 @@ ais/perigee_ai.py
 lobby_settings.json
 display_settings.json
 .*.txt
+ais/peri.py
