@@ -1938,7 +1938,9 @@ class ClientGameScreen(BaseScreen):
         weapon = stats.get("weapon")
         if not weapon:
             return
-        r = int(weapon.get("range", 50))
+        # Prefer the live per-entity attack_range (includes sweeper aura bonus)
+        # over the static weapon.range from UNIT_TYPES.
+        r = int(ent.get("rng", weapon.get("range", 50)))
         if r <= 0:
             return
         is_healer = weapon.get("hits_only_friendly", False)
@@ -2336,7 +2338,9 @@ class ClientGameScreen(BaseScreen):
                 continue
             ut = ent.get("ut", "soldier")
             stats = UNIT_TYPES.get(ut, {})
-            los = int(stats.get("los", 100))
+            # Prefer the server-sent live LOS (includes sweeper aura stacking)
+            # over the static base from UNIT_TYPES.
+            los = int(ent.get("los", stats.get("los", 100)))
             # Outpost upgrade grants extended vision
             if ut == "metal_extractor" and ent.get("us") == "outpost":
                 los = int(OUTPOST_LOS)

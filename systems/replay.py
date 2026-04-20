@@ -17,6 +17,7 @@ from entities.metal_spot import MetalSpot
 from entities.laser import LaserFlash, SplashEffect
 from entities.shapes import RectEntity, CircleEntity
 from config.settings import CC_SPAWN_INTERVAL, OUTPOST_UPGRADE_DURATION, RESEARCH_LAB_UPGRADE_DURATION
+from config.unit_types import UNIT_TYPES
 
 # How many game ticks between recorded frames (60 FPS game / 6 = ~10 FPS replay)
 RECORD_INTERVAL = 6
@@ -126,6 +127,17 @@ def _entity_visual(e: Entity) -> dict | None:
             # Non-building units
             d["fa"] = _q2(e.facing_angle)
             d["t2"] = e.is_t2
+            # Detection-aura state: send only when deviating from the static
+            # base so clients can show (+bonus) and grow the range arc.
+            _ut_stats = UNIT_TYPES.get(e.unit_type, {})
+            _base_los = int(_ut_stats.get("los", 0))
+            if int(e.line_of_sight) != _base_los:
+                d["los"] = int(e.line_of_sight)
+            _wpn = _ut_stats.get("weapon")
+            if _wpn is not None:
+                _base_rng = int(_wpn.get("range", 0))
+                if int(e.attack_range) != _base_rng:
+                    d["rng"] = int(e.attack_range)
             if e.fire_mode == "hold_fire":
                 d["hf"] = True
             # Charge beam

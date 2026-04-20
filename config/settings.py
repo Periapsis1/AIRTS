@@ -100,6 +100,14 @@ OVERCLOCK_REGEN_T2 = 2.0        # HP/s for Mechanic
 OVERCLOCK_BONUS_T2 = 0.03       # +3% for Mechanic
 OVERCLOCK_COLOR = (255, 180, 60)
 
+# -- detection (sweeper passive) -----------------------------------------------
+DETECTION_AURA_RANGE = 50.0     # px — matches sweeper dummy laser range
+DETECTION_LOS_PER_STACK = 50.0  # LOS gained per additional allied sweeper in range
+DETECTION_LOS_MAX_BONUS = 200.0 # cap on the LOS bonus (4 stacks)
+DETECTION_RANGE_PER_STACK = 5.0 # attack_range granted to each ally per sweeper
+DETECTION_RANGE_MAX_BONUS = 20.0
+DETECTION_COLOR = (180, 220, 255)
+
 
 # -- metal spot -------------------------------------------------------------
 METAL_SPOT_COLOR = (255, 200, 60)

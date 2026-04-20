@@ -20,6 +20,7 @@ from config.settings import (
 )
 from config.unit_types import UNIT_TYPES, get_spawnable_types, get_t2_name
 from core.helpers import hexagon_points
+from systems.abilities import ABILITY_REGISTRY
 
 # ── colours ──────────────────────────────────────────────────────────
 _SECTION_BG = (22, 22, 30)
@@ -415,13 +416,30 @@ def _draw_single_info(screen: pygame.Surface, r: pygame.Rect, unit,
         rows.append(("Speed", str(int(unit.speed))))
     if unit.weapon:
         w = unit.weapon
-        if w.damage < 0:
-            rows.append(("Heal", str(abs(w.damage))))
+        if getattr(unit, "can_attack", True):
+            if w.damage < 0:
+                rows.append(("Heal", str(abs(w.damage))))
+            else:
+                rows.append(("Dmg", str(w.damage)))
+        # Range: live attack_range with (+bonus) when sweeper aura is applied.
+        base_range = int(w.range)
+        live_range = int(getattr(unit, "attack_range", w.range))
+        range_bonus = live_range - base_range
+        if range_bonus > 0:
+            rows.append(("Range", f"{base_range} (+{range_bonus})"))
         else:
-            rows.append(("Dmg", str(w.damage)))
-        rows.append(("Range", str(int(w.range))))
+            rows.append(("Range", str(base_range)))
         cd = w.cooldown
         rows.append(("CD", f"{cd:.1f}s" if cd != int(cd) else f"{int(cd)}s"))
+    # LOS: live line_of_sight with (+bonus) from stacked sweepers.
+    los_live = int(getattr(unit, "line_of_sight", 0))
+    los_base = int(getattr(unit, "_base_line_of_sight", los_live))
+    if los_live > 0:
+        los_bonus = los_live - los_base
+        if los_bonus > 0:
+            rows.append(("LOS", f"{los_base} (+{los_bonus})"))
+        else:
+            rows.append(("LOS", str(los_base)))
     if _is_cc(unit):
         bp = unit.get_total_bonus_percent()
         if bp > 0:
@@ -704,6 +722,7 @@ def _draw_actions(screen: pygame.Surface, r: pygame.Rect,
         ts = tf.render("Actions", True, _TITLE_COLOR)
         screen.blit(ts, (r.left + 8, r.top + 6))
 
+        action_btn_bottom = r.top
         for br, aid, key in _action_btn_rects(r):
             is_hov = br.collidepoint(mx, my)
             bg = GUI_BTN_HOVER if is_hov else GUI_BTN_NORMAL
@@ -720,6 +739,98 @@ def _draw_actions(screen: pygame.Surface, r: pygame.Rect,
             lt = _font(12).render(label, True, _STAT_LABEL)
             screen.blit(lt, (br.centerx - lt.get_width() // 2,
                              br.bottom + 2))
+            action_btn_bottom = max(action_btn_bottom, br.bottom + 16)
+
+        # Abilities list — one entry per ability with name + wrapped desc.
+        unit = selected[0] if len(selected) == 1 else None
+        if unit is not None:
+            _draw_abilities_panel(screen, r, unit, action_btn_bottom + 6,
+                                  mx, my)
+
+
+def _ability_description(ability) -> str:
+    """Best-effort lookup of an ability's description string."""
+    # Real PassiveAbility objects expose `description` directly
+    desc = getattr(ability, "description", "")
+    if desc:
+        return desc
+    # Network/proxy abilities carry only `name`; look up the class description
+    cls = ABILITY_REGISTRY.get(getattr(ability, "name", ""), None)
+    return getattr(cls, "description", "") if cls else ""
+
+
+def _wrap_text(text: str, font: pygame.font.Font, max_w: int) -> list[str]:
+    """Greedy word-wrap of *text* to lines fitting within *max_w* pixels."""
+    lines: list[str] = []
+    cur = ""
+    for word in text.split():
+        test = (cur + " " + word).strip()
+        if font.size(test)[0] <= max_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _draw_abilities_panel(screen: pygame.Surface, r: pygame.Rect,
+                          unit, y: int, mx: int, my: int) -> None:
+    """Render the selected unit's abilities below the action buttons."""
+    abilities = getattr(unit, "abilities", None) or []
+    # Reinforce is shown via the plating bar on extractors, not here
+    abilities = [a for a in abilities
+                 if not (_is_me(unit) and getattr(a, "name", "") == "reinforce")]
+    if not abilities:
+        return
+
+    pad = 8
+    inner_w = r.width - pad * 2
+    if y + 18 > r.bottom:
+        return  # no room at all
+
+    title_font = _font(14)
+    name_font = _font(14)
+    desc_font = _font(12)
+
+    ts = title_font.render("Abilities", True, _TITLE_COLOR)
+    screen.blit(ts, (r.left + pad, y))
+    y += ts.get_height() + 3
+
+    for ab in abilities:
+        if y >= r.bottom - 4:
+            break
+        ab_name = getattr(ab, "name", "").replace("_", " ").title() or "Ability"
+        status = ""
+        if getattr(ab, "active", False):
+            status = " - Active"
+        elif hasattr(ab, "stacks") and hasattr(ab, "max_stacks"):
+            status = f" - {ab.stacks}/{ab.max_stacks}"
+        elif hasattr(ab, "timer") and getattr(ab, "timer", 0) > 0:
+            status = f" - {ab.timer:.1f}s"
+
+        name_surf = name_font.render(ab_name + status, True, _STAT_VALUE)
+        screen.blit(name_surf, (r.left + pad, y))
+        name_rect = pygame.Rect(r.left + pad, y,
+                                name_surf.get_width(), name_surf.get_height())
+        y += name_surf.get_height() + 1
+
+        # Wrap the description across as many lines as fit within the panel.
+        desc = _ability_description(ab)
+        if desc:
+            for line in _wrap_text(desc, desc_font, inner_w):
+                if y + desc_font.get_height() > r.bottom - 2:
+                    break
+                ls = desc_font.render(line, True, _STAT_LABEL)
+                screen.blit(ls, (r.left + pad, y))
+                y += desc_font.get_height()
+        y += 4  # spacer between abilities
+
+        # Hover highlight on the name line (purely visual cue)
+        if name_rect.collidepoint(mx, my):
+            pygame.draw.rect(screen, _TITLE_COLOR, name_rect, 1)
 
 
 def _draw_extractor_actions(screen: pygame.Surface, r: pygame.Rect,

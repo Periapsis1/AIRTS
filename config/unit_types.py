@@ -132,6 +132,12 @@ UNIT_TYPES = {
         "weapon": {"name": "Laser", "damage": 3, "range": 70, "cooldown": 1.0,
                    "laser_flash_duration": 0.1},
     },
+    "sweeper": {
+        "hp": 30, "speed": 30, "radius": 3,
+        "symbol": None, "can_attack": False, "hollow": True,
+        "fov": 360, "turn_rate": 90, "los": 50,
+        "weapon": {"name": "Laser", "damage": 0, "range": 50, "cooldown": 1.0},
+    },
     "command_center": {
         "hp": 1000, "speed": 0, "radius": 10,
         "symbol": None, "can_attack": True,

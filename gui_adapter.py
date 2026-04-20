@@ -29,6 +29,11 @@ def _make_proxy(d: dict, selected_ids: set[int]) -> _EntityProxy:
         stats = UNIT_TYPES.get(ut, {})
         mhp = stats.get("hp", 100)
 
+    ut_stats = UNIT_TYPES.get(ut, {})
+    base_los = ut_stats.get("los", 0)
+    wpn_stats = ut_stats.get("weapon") or {}
+    base_rng = wpn_stats.get("range", 0)
+
     p = _EntityProxy(
         entity_id=eid,
         unit_type=ut,
@@ -44,11 +49,16 @@ def _make_proxy(d: dict, selected_ids: set[int]) -> _EntityProxy:
         selected=eid in selected_ids,
         selectable=True,
         is_building=(t in ("CC", "ME")),
-        speed=UNIT_TYPES.get(ut, {}).get("speed", 0),
+        speed=ut_stats.get("speed", 0),
         alive=True,
         ghost=d.get("ghost", False),
         facing_angle=d.get("fa", 0.0),
         is_t2=d.get("t2", False),
+        line_of_sight=d.get("los", base_los),
+        _base_line_of_sight=base_los,
+        attack_range=d.get("rng", base_rng),
+        _base_attack_range=base_rng,
+        can_attack=ut_stats.get("can_attack", True),
         abilities=[],  # populated below from "abs" field
     )
 

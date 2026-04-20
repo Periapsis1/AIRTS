@@ -21,6 +21,12 @@ from config.settings import (
     OVERCLOCK_REGEN_T2,
     OVERCLOCK_BONUS_T2,
     OVERCLOCK_COLOR,
+    DETECTION_AURA_RANGE,
+    DETECTION_LOS_PER_STACK,
+    DETECTION_LOS_MAX_BONUS,
+    DETECTION_RANGE_PER_STACK,
+    DETECTION_RANGE_MAX_BONUS,
+    DETECTION_COLOR,
 )
 import pygame
 
@@ -415,6 +421,88 @@ class Overclock(PassiveAbility):
         return obj
 
 
+class Detection(PassiveAbility):
+    """Sweeper passive — stacks LOS from nearby allied sweepers and grants
+    allies inside the aura bonus attack range.
+
+    LOS scales with *other* sweepers on the same team within aura range:
+    +DETECTION_LOS_PER_STACK per sweeper, capped at DETECTION_LOS_MAX_BONUS.
+    Each allied unit in range (including other sweepers) receives
+    +DETECTION_RANGE_PER_STACK attack_range per sweeper covering it, capped
+    at DETECTION_RANGE_MAX_BONUS (the per-unit cap is enforced by the
+    receiver when flushing `_detection_range_pending`).
+    """
+    name = "detection"
+    description = (
+        "Nearby allied sweepers stack LOS (+50 per sweeper, max +200). "
+        "Allied units in range gain +5 attack range per sweeper (max +20)."
+    )
+
+    # Set by Game each tick — live sweeper list (all teams) and unit list.
+    all_sweepers: tuple = ()
+    all_units: tuple = ()
+
+    def __init__(self, aura_range: float = DETECTION_AURA_RANGE):
+        super().__init__()
+        self.aura_range: float = aura_range
+
+    def update(self, entity, dt: float) -> None:
+        range_sq = self.aura_range * self.aura_range
+
+        # -- LOS bonus: count other allied sweepers within aura --------------
+        nearby = 0
+        for sw in Detection.all_sweepers:
+            if sw is entity or not sw.alive or sw.team != entity.team:
+                continue
+            dx = sw.x - entity.x
+            dy = sw.y - entity.y
+            if dx * dx + dy * dy <= range_sq:
+                nearby += 1
+        los_bonus = min(nearby * DETECTION_LOS_PER_STACK, DETECTION_LOS_MAX_BONUS)
+        base_los = getattr(entity, "_base_line_of_sight", None)
+        if base_los is None:
+            base_los = entity.line_of_sight
+            entity._base_line_of_sight = base_los
+        entity.line_of_sight = base_los + los_bonus
+
+        # -- Range aura: stack +5 on each allied unit in range ---------------
+        for u in Detection.all_units:
+            if not u.alive or u.team != entity.team:
+                continue
+            dx = u.x - entity.x
+            dy = u.y - entity.y
+            if dx * dx + dy * dy > range_sq:
+                continue
+            pending = getattr(u, "_detection_range_pending", 0.0)
+            u._detection_range_pending = min(
+                pending + DETECTION_RANGE_PER_STACK,
+                DETECTION_RANGE_MAX_BONUS,
+            )
+        self.active = True
+
+    def draw(self, entity, surface: pygame.Surface) -> None:
+        if not getattr(entity, "selected", False):
+            return
+        r = int(self.aura_range)
+        if r <= 0:
+            return
+        ix, iy = int(round(entity.x)), int(round(entity.y))
+        ring = pygame.Surface((r * 2 + 4, r * 2 + 4), pygame.SRCALPHA)
+        pygame.draw.circle(ring, (*DETECTION_COLOR, 60), (r + 2, r + 2), r, 1)
+        surface.blit(ring, (ix - r - 2, iy - r - 2))
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["aura_range"] = self.aura_range
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Detection:
+        obj = cls(aura_range=data.get("aura_range", DETECTION_AURA_RANGE))
+        obj.active = data.get("active", False)
+        return obj
+
+
 ABILITY_REGISTRY: dict[str, type[PassiveAbility]] = {
     "reinforce": Reinforce,
     "reactive_armor": ReactiveArmor,
@@ -422,6 +510,7 @@ ABILITY_REGISTRY: dict[str, type[PassiveAbility]] = {
     "electric_armor": ElectricArmor,
     "combat_stim": CombatStim,
     "overclock": Overclock,
+    "detection": Detection,
 }
 
 

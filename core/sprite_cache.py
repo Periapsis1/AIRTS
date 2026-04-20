@@ -23,11 +23,14 @@ def _render(unit_type: str, color: tuple, radius: int) -> pygame.Surface:
     surf = pygame.Surface((size, size), pygame.SRCALPHA)
     cx = cy = size // 2
 
-    # Circle body
-    pygame.draw.circle(surf, color, (cx, cy), radius)
+    # Circle body — hollow ring for detector-style units, solid disc otherwise.
+    stats = UNIT_TYPES.get(unit_type, {})
+    if stats.get("hollow"):
+        pygame.draw.circle(surf, color, (cx, cy), radius, max(1, radius // 2))
+    else:
+        pygame.draw.circle(surf, color, (cx, cy), radius)
 
     # Symbol (if any)
-    stats = UNIT_TYPES.get(unit_type, {})
     symbol = stats.get("symbol")
     if symbol:
         scale = radius / 16.0

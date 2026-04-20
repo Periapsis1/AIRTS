@@ -13,7 +13,8 @@ from config.settings import (
 from config.unit_types import UNIT_TYPES
 from core.helpers import angle_diff
 from systems.abilities import (
-    ReactiveArmor, ElectricArmor, Focus, CombatStim, Overclock, ability_from_dict,
+    ReactiveArmor, ElectricArmor, Focus, CombatStim, Overclock, Detection,
+    ability_from_dict,
 )
 
 # fire-mode constants
@@ -153,6 +154,18 @@ class Unit(CircleEntity, Damageable):
             self.abilities = [Overclock(regen=OVERCLOCK_REGEN, bonus=OVERCLOCK_BONUS)]
         elif unit_type == "engineer_t2":
             self.abilities = [Overclock(regen=OVERCLOCK_REGEN_T2, bonus=OVERCLOCK_BONUS_T2)]
+        elif unit_type == "sweeper":
+            self.abilities = [Detection()]
+
+        # -- detection aura receive state ---------------------------------------
+        # Sweepers stack attack_range on allies within their aura; each Unit
+        # accumulates contributions into _detection_range_pending during the
+        # tick, then flushes into _detection_range_bonus at the top of its own
+        # update() (same one-tick-latency pattern as Overclock extractors).
+        self._base_attack_range: float = 0.0
+        self._detection_range_bonus: float = 0.0
+        self._detection_range_pending: float = 0.0
+        self._base_line_of_sight: float = self.line_of_sight
 
     # -- damage -------------------------------------------------------------
 
@@ -274,6 +287,19 @@ class Unit(CircleEntity, Damageable):
 
     def update(self, dt: float):
         self.laser_cooldown = max(0.0, self.laser_cooldown - dt)
+
+        # Capture the unmodified attack_range on the first update so bonuses
+        # always resolve against a stable base (subclasses like CommandCenter
+        # overwrite attack_range after Unit.__init__ runs).
+        if self._base_attack_range == 0.0 and self.attack_range > 0.0:
+            self._base_attack_range = self.attack_range
+
+        # Flush sweeper range aura contributions from the previous tick.
+        self._detection_range_bonus = self._detection_range_pending
+        self._detection_range_pending = 0.0
+        if self._base_attack_range > 0.0:
+            self.attack_range = self._base_attack_range + self._detection_range_bonus
+            self.attack_range_sq = self.attack_range * self.attack_range
 
         if self.abilities:
             for ability in self.abilities:

@@ -529,10 +529,15 @@ class Game:
         )
         Unit._steer_obstacles = self._static_steer + bldg
         # Engineer overclock aura needs the live extractor list each tick.
-        from systems.abilities import Overclock
+        from systems.abilities import Overclock, Detection
         Overclock.all_metal_extractors = tuple(
             me for me in self.metal_extractors if me.alive
         )
+        # Sweeper detection aura needs live sweeper + ally-target lists.
+        Detection.all_sweepers = tuple(
+            u for u in self.units if u.alive and u.unit_type == "sweeper"
+        )
+        Detection.all_units = tuple(u for u in self.units if u.alive)
 
     # -- selection helpers --------------------------------------------------
 
