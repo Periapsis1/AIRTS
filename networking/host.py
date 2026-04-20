@@ -523,9 +523,11 @@ class GameHost:
             for c in clients:
                 if not c.connected.is_set():
                     continue
-                # If a previous ping was never answered, treat the client as
-                # very high-latency until a fresh response arrives.
-                if c.last_ping_sent > 0 and c.last_ping_id != 0:
+                # If the previous ping is still outstanding (no pong arrived
+                # before we send the next one), surface the elapsed time as a
+                # lower bound on latency. A pong clears last_ping_sent to 0,
+                # so a healthy roundtrip skips this branch.
+                if c.last_ping_sent > 0:
                     elapsed_ms = int((now - c.last_ping_sent) * 1000)
                     if elapsed_ms > c.ping_ms:
                         c.ping_ms = elapsed_ms
@@ -658,10 +660,15 @@ class GameHost:
                 pong_id = msg.get("id", -1)
                 with self._clients_lock:
                     c = self._clients.get(player_id)
-                    if c is not None and c.last_ping_id == pong_id:
+                    if (c is not None
+                            and c.last_ping_id == pong_id
+                            and c.last_ping_sent > 0):
                         c.ping_ms = int(
                             (time.monotonic() - c.last_ping_sent) * 1000
                         )
+                        # Mark "no outstanding ping" so the next loop tick
+                        # doesn't mistake a healthy connection for a stall.
+                        c.last_ping_sent = 0.0
 
     async def _send_loop(self, writer: asyncio.StreamWriter, outbound: queue.Queue) -> None:
         """Send queued state frames to a specific client."""
