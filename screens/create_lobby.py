@@ -187,7 +187,10 @@ class CreateLobbyScreen(BaseScreen):
         self._slots: list[_Slot] = []
         self._load_slots(saved)
 
-        # In online mode, replace slots with online-appropriate layout
+        # In online mode, replace slots with online-appropriate layout.
+        # Start with only the local player's slot — joining the lobby must
+        # not auto-add AI/extra slots, otherwise broadcasting our default
+        # state would overwrite settings other players have configured.
         if self._online_client:
             self._slots.clear()
             local_pid = self._online_client.player_id
@@ -195,8 +198,6 @@ class CreateLobbyScreen(BaseScreen):
             slot = self._make_slot(1, "human", 1, 0, name=local_name)
             slot.online_pid = local_pid
             self._slots.append(slot)
-            first_ai = self._ai_choices[0][0] if self._ai_choices else "human"
-            self._slots.append(self._make_slot(2, first_ai, 2, 1))
 
         # Spectator state — players who opted out of playing.
         self._spectators: list[_Spectator] = []
@@ -428,6 +429,25 @@ class CreateLobbyScreen(BaseScreen):
         if self._online_client:
             return int(self._online_client.player_id)
         return 0
+
+    def _ping_for(self, online_pid: int) -> int | None:
+        """Latency in ms for a connected player, or None if not yet measured."""
+        if not self._online_client:
+            return None
+        ms = self._online_client.pings.get(int(online_pid))
+        if ms is None or ms <= 0:
+            return None
+        return ms
+
+    @staticmethod
+    def _format_ping(ms: int) -> tuple[str, tuple[int, int, int]]:
+        if ms < 60:
+            color = (110, 220, 130)   # green
+        elif ms < 150:
+            color = (220, 200, 110)   # yellow
+        else:
+            color = (220, 110, 110)   # red
+        return f"{ms} ms", color
 
     def _is_local_spectator(self) -> bool:
         if self._online_client:
@@ -748,6 +768,13 @@ class CreateLobbyScreen(BaseScreen):
 
             # Online mode: sync connected players, settings, and check game start
             if self._online_client is not None:
+                # Detect connection loss while sitting in the lobby.
+                if (self._online_client.error
+                        or not self._online_client.connected):
+                    self._online_client.stop()
+                    self._online_client = None
+                    return ScreenResult("multiplayer_lobby",
+                                        data={"lost_connection": True})
                 self._sync_online_slots()
                 self._maybe_apply_received_config()
                 self._maybe_broadcast_config()
@@ -887,6 +914,19 @@ class CreateLobbyScreen(BaseScreen):
         """If online and config changed since last broadcast, send to server."""
         if not self._online_client or not self._online_client.connected:
             return
+        # If other players are already in the lobby and we haven't received
+        # their settings yet, hold off. Broadcasting our default state would
+        # overwrite the AI slots / handicaps / map options they configured.
+        if self._last_received_config is None:
+            lobby = self._online_client.lobby_status
+            if lobby:
+                local_pid = self._online_client.player_id
+                others = [
+                    pid_str for pid_str in lobby.get("players", {})
+                    if int(pid_str) != local_pid
+                ]
+                if others:
+                    return
         config = self._gather_lobby_config()
         if config != self._last_lobby_config:
             self._last_lobby_config = config
@@ -1192,6 +1232,16 @@ class CreateLobbyScreen(BaseScreen):
                 self.screen.blit(name_surf,
                                  (self._ai_dd_x + 4,
                                   y + (DD_HEIGHT - name_surf.get_height()) // 2))
+                # Latency indicator (right-aligned next to the name).
+                ping_ms = self._ping_for(slot.online_pid)
+                if ping_ms is not None:
+                    ping_text, ping_color = self._format_ping(ping_ms)
+                    ping_surf = tiny.render(ping_text, True, ping_color)
+                    self.screen.blit(
+                        ping_surf,
+                        (self._ai_dd_x + 4 + name_surf.get_width() + 8,
+                         y + (DD_HEIGHT - ping_surf.get_height()) // 2),
+                    )
             else:
                 # Regular slot: show remove button and name input
                 if len(self._slots) > _MIN_SLOTS:

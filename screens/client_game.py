@@ -370,8 +370,15 @@ class ClientGameScreen(BaseScreen):
             self._game_time += dt
 
             # Check for disconnect or game over
-            if self._client.error and not self._is_local:
-                return self._build_result()
+            if not self._is_local:
+                lost = bool(self._client.error) or not self._client.connected
+                if lost and self._winner == 0:
+                    # Mid-game disconnect — kick back to lobby with a message.
+                    self._client.stop()
+                    return ScreenResult("multiplayer_lobby",
+                                        data={"lost_connection": True})
+                if lost:
+                    return self._build_result()
             if self._phase == "explode" and self._anim_timer >= 3.0:
                 return self._build_result()
 
@@ -1614,6 +1621,26 @@ class ClientGameScreen(BaseScreen):
         if self._reset_cam_btn:
             fps_x = self._reset_cam_btn.rect.right + 10
         self.screen.blit(fps_surf, (fps_x, 12))
+
+        # Latency table (multiplayer only): "Name: 32 ms" for each connected
+        # player, stacked top-down just below the header bar.
+        if not self._is_local and self._client.pings:
+            ping_font = _get_font(15)
+            row_y = self._header_h + 4
+            for pid in sorted(self._client.pings.keys()):
+                ms = self._client.pings[pid]
+                if ms <= 0:
+                    continue  # not yet measured
+                name = self._player_names.get(pid, f"P{pid}")
+                if ms < 60:
+                    color = (110, 220, 130)
+                elif ms < 150:
+                    color = (220, 200, 110)
+                else:
+                    color = (220, 110, 110)
+                line = ping_font.render(f"{name}: {ms} ms", True, color)
+                self.screen.blit(line, (self.width - line.get_width() - 10, row_y))
+                row_y += line.get_height() + 1
 
         # Local game controls in header
         if self._is_local:

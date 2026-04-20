@@ -140,10 +140,12 @@ class App:
         elif name == "multiplayer_lobby":
             returning_host = data.get("host") if data else None
             returning_client = data.get("client") if data else None
+            lost_connection = bool(data.get("lost_connection")) if data else False
             return MultiplayerLobbyScreen(
                 self._screen, self._clock,
                 returning_host=returning_host,
                 returning_client=returning_client,
+                lost_connection=lost_connection,
             ).run()
 
         elif name == "mp_client_game":

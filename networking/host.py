@@ -16,6 +16,7 @@ import dataclasses
 import queue
 import socket
 import threading
+import time
 from typing import Any
 
 from networking.protocol import send_message, recv_message, DEFAULT_PORT
@@ -37,6 +38,10 @@ class ClientConnection:
     outbound: queue.Queue = dataclasses.field(default_factory=queue.Queue)
     connected: threading.Event = dataclasses.field(default_factory=threading.Event)
     ready: threading.Event = dataclasses.field(default_factory=threading.Event)
+    # Latency tracking — server pings clients and measures RTT.
+    last_ping_id: int = 0
+    last_ping_sent: float = 0.0
+    ping_ms: int = 0
 
 
 class GameHost:
@@ -490,10 +495,54 @@ class GameHost:
             self._bound_port = self._port
         self._bound_event.set()
 
+        ping_task = asyncio.ensure_future(self._ping_loop())
+
         async with server:
             # Keep running until stopped
             while self._running:
                 await asyncio.sleep(0.05)
+
+        ping_task.cancel()
+        try:
+            await ping_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _ping_loop(self) -> None:
+        """Periodically ping each client to measure RTT and broadcast a
+        ping table so every client can see everyone's latency."""
+        while self._running:
+            try:
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                return
+            now = time.monotonic()
+            # Send a ping to every connected client.
+            with self._clients_lock:
+                clients = list(self._clients.values())
+            for c in clients:
+                if not c.connected.is_set():
+                    continue
+                # If a previous ping was never answered, treat the client as
+                # very high-latency until a fresh response arrives.
+                if c.last_ping_sent > 0 and c.last_ping_id != 0:
+                    elapsed_ms = int((now - c.last_ping_sent) * 1000)
+                    if elapsed_ms > c.ping_ms:
+                        c.ping_ms = elapsed_ms
+                c.last_ping_id += 1
+                c.last_ping_sent = now
+                c.outbound.put({"msg": "ping", "id": c.last_ping_id})
+            # Broadcast the current ping table to everyone.
+            with self._clients_lock:
+                pings = {
+                    str(pid): c.ping_ms
+                    for pid, c in self._clients.items()
+                    if c.connected.is_set()
+                }
+                msg = {"msg": "pings", "pings": pings}
+                for c in self._clients.values():
+                    if c.connected.is_set():
+                        c.outbound.put(msg)
 
     async def _handle_client(
         self,
@@ -605,6 +654,14 @@ class GameHost:
                     for pid, c in self._clients.items():
                         if pid != player_id and c.connected.is_set():
                             c.outbound.put(relay_msg)
+            elif msg_type == "pong":
+                pong_id = msg.get("id", -1)
+                with self._clients_lock:
+                    c = self._clients.get(player_id)
+                    if c is not None and c.last_ping_id == pong_id:
+                        c.ping_ms = int(
+                            (time.monotonic() - c.last_ping_sent) * 1000
+                        )
 
     async def _send_loop(self, writer: asyncio.StreamWriter, outbound: queue.Queue) -> None:
         """Send queued state frames to a specific client."""

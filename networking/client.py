@@ -60,6 +60,9 @@ class GameClient:
         self._lobby_lock = threading.Lock()
         self.opponent_name: str = ""
 
+        # Latency table (player_id -> ping_ms) populated by server "pings" msgs.
+        self.pings: dict[int, int] = {}
+
     @property
     def client_team(self) -> int:
         """Team this client belongs to, derived from player_team mapping.
@@ -258,6 +261,14 @@ class GameClient:
             elif msg_type == "lobby_settings":
                 with self._lobby_lock:
                     self._lobby_settings = msg
+            elif msg_type == "ping":
+                # Echo immediately so the server can compute RTT.
+                self._outbound_messages.put({
+                    "msg": "pong", "id": msg.get("id", 0),
+                })
+            elif msg_type == "pings":
+                raw = msg.get("pings", {})
+                self.pings = {int(k): int(v) for k, v in raw.items()}
             elif msg_type == "return_to_lobby":
                 self._game_started.clear()
                 self._inbound.put(msg)

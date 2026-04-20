@@ -107,7 +107,7 @@ UNIT_TYPES = {
         "fov": 360, "turn_rate": 180, "los": 80,
         "weapon": {
             "name": "ChainLaser", "damage": 8, "range": 60, "cooldown": 3.5,
-            "chain_range": 60.0, "chain_delay": 0.15,
+            "chain_range": 40.0, "chain_delay": 0.1,
             "laser_flash_duration": 0.5,
         },
     },
@@ -166,7 +166,7 @@ UNIT_TYPES = {
         "is_t2": True,
     },
     "tank_t2": {
-        "hp": 350, "speed": 20, "radius": 9,
+        "hp": 400, "speed": 20, "radius": 9,
         "symbol": TANK_SYMBOL, "can_attack": True,
         "fov": 150, "turn_rate": 50, "los": 80,
         "weapon": {"name": "Laser", "damage": 10, "range": 50, "cooldown": 2.0},
@@ -201,8 +201,8 @@ UNIT_TYPES = {
         "symbol": SHOCKWAVE_SYMBOL, "can_attack": True,
         "fov": 360, "turn_rate": 180, "los": 100,
         "weapon": {
-            "name": "ChainLaser", "damage": 15, "range": 90, "cooldown": 3.0,
-            "chain_range": 50.0, "chain_delay": 0.1,
+            "name": "ChainLaser", "damage": 15, "range": 80, "cooldown": 3.0,
+            "chain_range": 40.0, "chain_delay": 0.1,
         },
         "is_t2": True,
     },
@@ -222,10 +222,10 @@ UNIT_TYPES = {
         "is_t2": True,
     },
     "engineer_t2": {
-        "hp": 75, "speed": 50, "radius": 6,
+        "hp": 65, "speed": 50, "radius": 6,
         "symbol": ENGINEER_SYMBOL, "can_attack": True,
         "fov": 360, "turn_rate": 90, "los": 110,
-        "weapon": {"name": "Laser", "damage": 8, "range": 70, "cooldown": 1.0,
+        "weapon": {"name": "Laser", "damage": 7, "range": 70, "cooldown": 1.0,
                    "laser_flash_duration": 0.1},
         "is_t2": True,
     },

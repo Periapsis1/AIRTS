@@ -52,7 +52,8 @@ class MultiplayerLobbyScreen(BaseScreen):
     """Host/Join/Play Online flow for multiplayer games."""
 
     def __init__(self, screen: pygame.Surface, clock: pygame.time.Clock,
-                 returning_host=None, returning_client=None):
+                 returning_host=None, returning_client=None,
+                 lost_connection: bool = False):
         super().__init__(screen, clock)
         cx = self.width // 2
 
@@ -142,6 +143,12 @@ class MultiplayerLobbyScreen(BaseScreen):
             self._mode = "join"
             self._client_obj = returning_client
             self._join_status = f"Connected to {returning_client.host_name}. Waiting for host to start..."
+
+        # Surface a "Lost Connection" message when we were kicked here from
+        # an in-progress game / lobby because the server connection dropped.
+        if lost_connection:
+            self._online_error = "Lost Connection"
+            self._join_error = "Lost Connection"
 
     def run(self) -> ScreenResult:
         from systems import music
