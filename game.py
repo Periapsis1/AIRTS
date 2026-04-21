@@ -2807,12 +2807,18 @@ class Game:
         next_tick = time.perf_counter()
 
         # Server performance metrics — rolling window of the last ~1 second
-        # of ticks. Published as self._server_tick_ms (mean step duration)
-        # and self._server_tps (actual ticks per real second). Clients read
-        # these via the state-frame broadcast.
+        # of ticks. Published as self._server_tick_ms (mean wall-clock step
+        # duration), self._server_tick_cpu_ms (mean CPU-time step
+        # duration — thread_time), and self._server_tps (actual ticks per
+        # real second). Clients read these via the state-frame broadcast.
+        # If wall >> CPU, the server thread is being starved of CPU by GIL
+        # contention from the client (or other threads); if wall ≈ CPU,
+        # the step is genuinely doing that much computation.
         tick_ms_buf: deque[float] = deque(maxlen=60)
+        tick_cpu_ms_buf: deque[float] = deque(maxlen=60)
         tick_ts_buf: deque[float] = deque(maxlen=61)
         self._server_tick_ms = 0.0
+        self._server_tick_cpu_ms = 0.0
         self._server_tps = 0.0
 
         try:
@@ -2858,12 +2864,18 @@ class Game:
                 next_tick += effective_interval
 
                 step_start = time.perf_counter()
+                step_start_cpu = time.thread_time()
                 self.step(FIXED_DT)
+                step_end_cpu = time.thread_time()
                 step_end = time.perf_counter()
 
                 tick_ms_buf.append((step_end - step_start) * 1000.0)
+                tick_cpu_ms_buf.append((step_end_cpu - step_start_cpu) * 1000.0)
                 tick_ts_buf.append(step_end)
                 self._server_tick_ms = sum(tick_ms_buf) / len(tick_ms_buf)
+                self._server_tick_cpu_ms = (
+                    sum(tick_cpu_ms_buf) / len(tick_cpu_ms_buf)
+                )
                 if len(tick_ts_buf) >= 2:
                     span = tick_ts_buf[-1] - tick_ts_buf[0]
                     if span > 0:

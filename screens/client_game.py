@@ -290,6 +290,7 @@ class ClientGameScreen(BaseScreen):
 
         # Server performance metrics (reported via state frames)
         self._server_tick_ms: float = 0.0
+        self._server_tick_cpu_ms: float = 0.0
         self._server_tps: float = 0.0
 
         # Client frame-time breakdown (F3 toggles the overlay)
@@ -460,6 +461,7 @@ class ClientGameScreen(BaseScreen):
                         self._tick = frame.get("tick", 0)
                         self._winner = frame.get("winner", 0)
                         self._server_tick_ms = frame.get("srv_ms", 0.0)
+                        self._server_tick_cpu_ms = frame.get("srv_cpu_ms", 0.0)
                         self._server_tps = frame.get("srv_tps", 0.0)
                         self._disconnect_timer = 0.0
                         # Play sounds from server events
@@ -2194,6 +2196,7 @@ class ClientGameScreen(BaseScreen):
 
         if self._server_tps > 0.0:
             tick_ms = self._server_tick_ms
+            cpu_ms = self._server_tick_cpu_ms
             if tick_ms < 5.0:
                 srv_color = (110, 220, 130)
             elif tick_ms < 10.0:
@@ -2202,7 +2205,14 @@ class ClientGameScreen(BaseScreen):
                 srv_color = (220, 150, 90)
             else:
                 srv_color = (220, 110, 110)
-            srv_text = f"SRV: {self._server_tps:.0f} TPS / {tick_ms:.1f} ms"
+            # Display wall / CPU so the ratio is visible at a glance. If
+            # wall ≫ CPU, the server thread is being starved (GIL /
+            # scheduling); if wall ≈ CPU, the step is genuinely doing
+            # that much computation.
+            srv_text = (
+                f"SRV: {self._server_tps:.0f} TPS / {tick_ms:.1f} ms "
+                f"(cpu {cpu_ms:.1f})"
+            )
             srv_surf = fps_font.render(srv_text, True, srv_color)
             self.screen.blit(srv_surf, (fps_x + fps_surf.get_width() + 12, 12))
 
