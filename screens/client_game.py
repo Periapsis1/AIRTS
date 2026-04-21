@@ -144,11 +144,12 @@ class ClientGameScreen(BaseScreen):
             self._fx_tex = _ctx.streaming_texture(ga_size)
             self._arc_tex = _ctx.streaming_texture(ga_size)
             # Alpha blending on textures that get drawn as overlays so
-            # their transparency composes correctly.
-            from pygame._sdl2 import video as _sdl2_video
+            # their transparency composes correctly. BLENDMODE_BLEND is
+            # exposed on the pygame top-level module, not on
+            # pygame._sdl2.video.
             for _t in (self._scratch_tex, self._fog_tex,
                        self._fx_tex, self._arc_tex):
-                _t.blend_mode = _sdl2_video.BLENDMODE_BLEND
+                _t.blend_mode = pygame.BLENDMODE_BLEND
 
         # World surface and camera
         self._world_surface = pygame.Surface((mw, mh))
