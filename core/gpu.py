@@ -62,10 +62,21 @@ class GpuContext:
         self,
         size: tuple[int, int],
         title: str = "AIRTS",
-        vsync: bool = True,
+        vsync: bool = False,
         accelerated: bool = True,
         borderless: bool = False,
     ) -> None:
+        # vsync default is False: `pygame._sdl2.Renderer.present()` with
+        # vsync=True blocks the calling thread on monitor refresh for up
+        # to ~16 ms, and pygame's _sdl2 wrapper does NOT release the GIL
+        # during that wait. That starves the server thread in local-host
+        # games (server step wall-clock inflates to 20–30 ms while its
+        # actual CPU work is ~2 ms). We rely on pygame.time.Clock.tick(60)
+        # in screen loops to cap frame rate via `time.sleep`, which does
+        # release the GIL — so the server thread gets fair CPU time even
+        # though the client is "ticking at 60 FPS". The downside is
+        # possible screen tearing if frames complete very close to
+        # refresh boundaries; callers who want vsync can pass True.
         # Establish a pygame display format so Surface.convert() /
         # pygame.image.load(...).convert() keep working. The SDL2 Window
         # below is separate from pygame's display window and doesn't set
