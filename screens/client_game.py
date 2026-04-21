@@ -1530,13 +1530,18 @@ class ClientGameScreen(BaseScreen):
         # at the extreme zoom-out corners on large maps; most play time
         # the world fills the game area so it's invisible anyway.
 
-        # 2. Scaled world via GPU
-        self._ws_tex.update(self._world_surface)
+        # 2. Scaled world via GPU. Upload only the viewport region of
+        # world_surface to ws_tex (the texture retains stale pixels
+        # outside the viewport, but we only draw the viewport region so
+        # those never appear on screen). This halves upload cost on
+        # large maps where the viewport is a fraction of map area.
         vp = self._camera.get_world_viewport_rect()
-        # Clip source rect to the world surface bounds.
         ws_rect = self._world_surface.get_rect()
         src = vp.clip(ws_rect)
         if src.w > 0 and src.h > 0:
+            self._ws_tex.update(
+                self._world_surface.subsurface(src), area=src,
+            )
             # Compute dst sub-rect when the clipped source doesn't cover
             # the full viewport (e.g. panned past the map edge).
             dst_x = ga.x + int((src.x - vp.x) * self._camera.zoom)
@@ -1559,7 +1564,11 @@ class ClientGameScreen(BaseScreen):
             self._fx_tex.update(self._fx_surface)
             self._fx_tex.draw(dstrect=ga_dst)
         if self._fog_ready:
-            self._fog_tex.update(self._fog_surface)
+            # Upload only when the fog surface was rebuilt this frame.
+            # On a cache hit, the texture still holds the correct content
+            # from the last rebuild — just redraw it.
+            if self._fog_tex_dirty:
+                self._fog_tex.update(self._fog_surface)
             self._fog_tex.draw(dstrect=ga_dst)
 
         # 4. Chrome scratch on top (alpha-blended).
@@ -1575,6 +1584,12 @@ class ClientGameScreen(BaseScreen):
         self._fog_ready = False
         self._fx_ready = False
         self._arc_ready = False
+        # `_fog_tex_dirty` tracks whether the fog surface was rebuilt this
+        # frame. In GPU mode we skip `fog_tex.update(...)` when the fog
+        # cache hit — the texture still holds last frame's content which
+        # is still correct. Huge win during static-camera play where fog
+        # cache hits every frame.
+        self._fog_tex_dirty = False
         with self._frame_stats.scope("bg"):
             # Obstacles are baked into `_bg_surface`. Restore only the regions
             # that were drawn on last frame (entities + command arrows), not
@@ -3091,3 +3106,5 @@ class ClientGameScreen(BaseScreen):
 
         self._fog_cache_key = cache_key
         self._fog_ready = True
+        # Surface was rebuilt — the GPU texture (if any) needs re-uploading.
+        self._fog_tex_dirty = True
