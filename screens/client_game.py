@@ -171,6 +171,27 @@ class ClientGameScreen(BaseScreen):
             # the scratch surface which would keep it dirty every frame).
             self._border_rect: pygame.Rect | None = None
 
+            # HUD bar gets its own SRCALPHA surface + streaming texture.
+            # gui.draw_hud targets _hud_surface instead of the scratch,
+            # and we only re-render + re-upload when proxies or selection
+            # actually change (≈10 Hz state-frame rate, not every render
+            # frame). Minimap camera-viewport rect updates at this rate
+            # too — acceptable lag during camera pan.
+            self._hud_surface = pygame.Surface(
+                (self.width, self._hud_h), pygame.SRCALPHA,
+            )
+            self._hud_tex = _ctx.streaming_texture(
+                (self.width, self._hud_h),
+            )
+            self._hud_tex.blend_mode = pygame.BLENDMODE_BLEND
+            # Initially dirty so the first frame draws the HUD.
+            self._hud_surface_dirty: bool = True
+            # Set True when a full-screen overlay draws on the scratch in
+            # the HUD strip (ESC menu mostly) — forces the HUD strip to
+            # also upload from the main scratch so the overlay pixels
+            # composite correctly on top of _hud_tex.
+            self._scratch_overlay_covers_hud: bool = False
+
         # World surface and camera
         self._world_surface = pygame.Surface((mw, mh))
         self._bg_surface, self._bg_tile = self._build_background(mw, mh)
@@ -1688,22 +1709,34 @@ class ClientGameScreen(BaseScreen):
                 renderer.draw_color = (col[0], col[1], col[2], 255)
                 renderer.draw_rect(r2)
 
-        # 5. Chrome scratch on top (alpha-blended). Upload only the rects
-        # that changed this frame: header strip, HUD strip, and the
-        # game-area chrome bbox (union with last frame's bbox so stale
-        # pixels like moved labels get cleared). Full-game fallback when
-        # a large overlay is active.
+        # 5. HUD texture. Rendered onto _hud_surface by _draw_hud only
+        # when proxies/selection changed, so most frames just re-draw
+        # the existing texture without re-uploading.
+        if self._hud_surface_dirty:
+            self._hud_tex.update(self._hud_surface)
+            self._hud_surface_dirty = False
+        self._hud_tex.draw(dstrect=self._hud_strip)
+
+        # 6. Chrome scratch on top (alpha-blended). Upload only the rects
+        # that changed this frame: header strip + game-area bbox + (HUD
+        # strip when a full-screen scratch overlay like the ESC menu
+        # darkens the HUD area). Full-game fallback when a large overlay
+        # is active is baked into `_compute_scratch_game_bbox`.
         bbox_game = self._compute_scratch_game_bbox()
-        # Upload chrome strips (header + HUD) — they always change
-        # (FPS counter, timers, build bars, etc.).
+        # Header strip — always changes (FPS / timer / ping / slider).
         self._scratch_tex.update(
             self.screen.subsurface(self._header_strip),
             area=self._header_strip,
         )
-        self._scratch_tex.update(
-            self.screen.subsurface(self._hud_strip),
-            area=self._hud_strip,
-        )
+        # Full-screen overlays (ESC menu, etc.) also darken the HUD
+        # strip on the scratch. In that case upload it too so the
+        # darkening composites over the HUD texture. Otherwise the HUD
+        # strip on scratch is transparent and doesn't need uploading.
+        if self._scratch_overlay_covers_hud or self._esc_menu_open:
+            self._scratch_tex.update(
+                self.screen.subsurface(self._hud_strip),
+                area=self._hud_strip,
+            )
         # Upload the game-area bbox (this frame ∪ previous frame).
         upload_bbox: pygame.Rect | None = None
         if bbox_game is not None:
@@ -2286,11 +2319,15 @@ class ClientGameScreen(BaseScreen):
         _labels_scope.__exit__(None, None, None)
         _panel_scope = self._frame_stats.scope("panel")
         _panel_scope.__enter__()
-        # HUD area
-        pygame.draw.rect(self.screen, (20, 20, 30), self._hud_rect)
-        pygame.draw.line(self.screen, (40, 40, 55),
-                         (0, self._hud_rect.top),
-                         (self.width, self._hud_rect.top))
+        # HUD area. In GPU mode the bg rect + divider are baked into
+        # _hud_surface (drawn inside _draw_hud) so we skip them on the
+        # scratch — that way the scratch HUD strip stays clean and we
+        # don't need to upload it every frame.
+        if not self._gpu_mode:
+            pygame.draw.rect(self.screen, (20, 20, 30), self._hud_rect)
+            pygame.draw.line(self.screen, (40, 40, 55),
+                             (0, self._hud_rect.top),
+                             (self.width, self._hud_rect.top))
         self._draw_hud()
         _panel_scope.__exit__(None, None, None)
 
@@ -2541,34 +2578,74 @@ class ClientGameScreen(BaseScreen):
     def _draw_hud(self) -> None:
         """Draw the full HUD bar using gui.py through adapter proxies.
 
-        ``wrap_entities`` is expensive (proxy + weapon + ability namespaces for
-        every entity). The HUD only needs to reflect the server's state, which
-        swaps at ~10 Hz, so cache the wrapped list by identity of
-        ``self._entities`` and patch the ``selected`` flag in place when only
-        the local selection changes.
+        ``wrap_entities`` is expensive (proxy + weapon + ability namespaces
+        for every entity). The HUD only needs to reflect the server's
+        state, which swaps at ~10 Hz, so cache the wrapped list by
+        identity of ``self._entities`` and patch the ``selected`` flag in
+        place when only the local selection changes.
+
+        In GPU mode, the HUD renders onto ``self._hud_surface`` (a
+        dedicated SRCALPHA surface) rather than the main scratch. It's
+        only re-rendered when proxies or selection change — typically
+        once per state frame instead of every render frame — and the
+        resulting texture is uploaded correspondingly.
         """
         entities = self._entities
         selected = self._selected_ids
+        proxies_changed = False
         if self._hud_proxies is None or self._hud_proxies_entities is not entities:
             self._hud_proxies = wrap_entities(entities, selected)
             self._hud_proxies_entities = entities
             self._hud_proxies_selected = set(selected)
+            proxies_changed = True
         elif self._hud_proxies_selected != selected:
             for p in self._hud_proxies:
                 p.selected = p.entity_id in selected
             self._hud_proxies_selected = set(selected)
+            proxies_changed = True
 
-        gui.draw_hud(
-            self.screen, self._hud_proxies,
-            self.width, self.height, self._hud_h,
-            enable_t2=self._enable_t2,
-            t2_upgrades=self._t2_upgrades,
-            t2_researching=self._t2_researching,
-            camera=self._camera,
-            world_w=self._map_w,
-            world_h=self._map_h,
-            obstacles=self._obstacles,
-        )
+        if self._gpu_mode:
+            # Redraw _hud_surface only when dirty (first frame, state
+            # frame, or selection change). Between redraws the existing
+            # texture still holds the correct pixels.
+            if proxies_changed or self._hud_surface_dirty:
+                self._hud_surface.fill((0, 0, 0, 0))
+                # Panel background + top divider, baked into the HUD
+                # surface so it arrives on screen with the rest.
+                pygame.draw.rect(
+                    self._hud_surface, (20, 20, 30),
+                    pygame.Rect(0, 0, self.width, self._hud_h),
+                )
+                pygame.draw.line(
+                    self._hud_surface, (40, 40, 55),
+                    (0, 0), (self.width, 0),
+                )
+                # Pass height=self._hud_h so _hud_sections positions the
+                # HUD at y=0 on the target surface.
+                gui.draw_hud(
+                    self._hud_surface, self._hud_proxies,
+                    self.width, self._hud_h, self._hud_h,
+                    enable_t2=self._enable_t2,
+                    t2_upgrades=self._t2_upgrades,
+                    t2_researching=self._t2_researching,
+                    camera=self._camera,
+                    world_w=self._map_w,
+                    world_h=self._map_h,
+                    obstacles=self._obstacles,
+                )
+                self._hud_surface_dirty = True
+        else:
+            gui.draw_hud(
+                self.screen, self._hud_proxies,
+                self.width, self.height, self._hud_h,
+                enable_t2=self._enable_t2,
+                t2_upgrades=self._t2_upgrades,
+                t2_researching=self._t2_researching,
+                camera=self._camera,
+                world_w=self._map_w,
+                world_h=self._map_h,
+                obstacles=self._obstacles,
+            )
 
     # -- entity drawing (adapted from ReplayPlaybackScreen) -----------------
 
