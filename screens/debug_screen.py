@@ -189,5 +189,5 @@ class DebugScreen(BaseScreen):
             self._graph.draw(self.screen)
             self._draw_stats_table()
             self._back.draw(self.screen)
-            pygame.display.flip()
+            self.present()
             self.clock.tick(60)

@@ -2036,7 +2036,7 @@ class ClientGameScreen(BaseScreen):
         # Hand off this frame's dirty rects to be restored next frame.
         self._last_dirty_rects = self._dirty_rects_new
         with self._frame_stats.scope("flip"):
-            pygame.display.flip()
+            self.present()
 
     # -- chat overlay / input -------------------------------------------------
 

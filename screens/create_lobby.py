@@ -1293,4 +1293,4 @@ class CreateLobbyScreen(BaseScreen):
         for dd in sorted(all_dds, key=lambda d: d.open):
             dd.draw(self.screen)
 
-        pygame.display.flip()
+        self.present()

@@ -128,4 +128,4 @@ class MainMenuScreen(BaseScreen):
         for btn, _ in self._buttons:
             btn.draw(self.screen)
 
-        pygame.display.flip()
+        self.present()

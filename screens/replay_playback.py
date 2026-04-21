@@ -893,7 +893,7 @@ class ReplayPlaybackScreen(BaseScreen):
         if self._stat_mode > 0:
             self._draw_stat_dropdown()
 
-        pygame.display.flip()
+        self.present()
 
     # -- chat overlay -----------------------------------------------------------
 
@@ -1162,7 +1162,7 @@ class ReplayPlaybackScreen(BaseScreen):
 
         self._stat_close_btn.draw(self.screen)
         self._stat_debug_btn.draw(self.screen)
-        pygame.display.flip()
+        self.present()
 
     def _draw_build_order_tab(self):
         """Draw multi-column scrollable build order within the graph area.

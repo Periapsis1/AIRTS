@@ -182,4 +182,4 @@ class OptionsScreen(BaseScreen):
         self._selection_toggle.draw(self.screen)
         self._smoothing_toggle.draw(self.screen)
 
-        pygame.display.flip()
+        self.present()

@@ -473,7 +473,7 @@ class ArenaScreen(BaseScreen):
             self.screen.blit(status, (self.width // 2 - status.get_width() // 2,
                                       self.height - 26))
 
-        pygame.display.flip()
+        self.present()
 
     def _draw_leaderboard(self) -> None:
         leaderboard = self._elo.get_leaderboard()

@@ -2082,7 +2082,7 @@ class Game:
         if self._esc_menu_open:
             self._draw_esc_menu()
 
-        pygame.display.flip()
+        display_config.present_frame()
 
     def _draw_chat_overlay(self) -> None:
         """Draw chat messages near the top-left of the game area.
@@ -2654,7 +2654,7 @@ class Game:
                     self.screen.blit(self._headless_snap_surf, (snap_x, snap_y))
                 if self._draw_game_btn is not None:
                     self._draw_game_btn.draw(self.screen)
-                pygame.display.flip()
+                display_config.present_frame()
         else:
             # Grab the mouse at game start
             self._set_mouse_grab(True)

@@ -474,4 +474,4 @@ class ReplayListScreen(BaseScreen):
                 pygame.draw.rect(self.screen, thumb_color,
                                  thumb_rect, border_radius=4)
 
-        pygame.display.flip()
+        self.present()

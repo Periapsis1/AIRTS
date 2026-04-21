@@ -493,4 +493,4 @@ class MultiplayerLobbyScreen(BaseScreen):
             if self._online_client and self._online_client.connected:
                 self._draw_lobby_settings(self._online_client, status_y + 40)
 
-        pygame.display.flip()
+        self.present()
