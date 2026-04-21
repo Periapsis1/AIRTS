@@ -307,6 +307,11 @@ class ClientGameScreen(BaseScreen):
         self._esc_menu_overlay: pygame.Surface | None = None
         self._esc_menu_title: pygame.Surface | None = None
 
+        # Cached base arc points at facing=0, keyed by (fov_deg, screen_r).
+        # Per-unit draws only do cheap numpy rotate+translate on the
+        # cached array. No facing quantization — points stay continuous.
+        self._arc_base_cache: dict[tuple, np.ndarray] = {}
+
         # Enable T2 and upgrade tracking (from game_start message)
         self._enable_t2: bool = client.enable_t2
         self._fog_of_war: bool = client.fog_of_war
@@ -1582,11 +1587,22 @@ class ClientGameScreen(BaseScreen):
 
         # Entity label region — ME bonus labels, team names above CCs.
         # Labels render above the unit sprite; include margin for label
-        # height + health bar / selection ring below.
+        # height + health bar / selection ring below. Skip entities whose
+        # world rect is entirely outside the camera viewport (they
+        # wouldn't contribute any screen pixels anyway).
         cam = self._camera
+        vp = cam.get_world_viewport_rect()
+        # Inflate the viewport slightly so a unit near the edge with an
+        # overhanging label still gets included.
+        vp_left = vp.left - 60
+        vp_right = vp.right + 60
+        vp_top = vp.top - 100
+        vp_bottom = vp.bottom + 60
         for e in self._entities:
             ex = e.get("x", 0)
             ey = e.get("y", 0)
+            if ex < vp_left or ex > vp_right or ey < vp_top or ey > vp_bottom:
+                continue
             sx, sy = cam.world_to_screen(ex, ey)
             sx += ga.x
             sy += ga.y
@@ -2741,6 +2757,25 @@ class ClientGameScreen(BaseScreen):
                     pygame.draw.circle(ws, qcolor, (qx, qy), 3, 1)
                 qpx, qpy = qx, qy
 
+    def _arc_base_points(self, fov_deg: int, r: int) -> np.ndarray:
+        """Return a cached Nx2 numpy array of arc edge points at facing=0.
+
+        Points are relative to origin; caller rotates/translates per unit.
+        Keyed by (fov_deg, r) so all units sharing the same FOV + radius
+        share one cache entry.
+        """
+        cache = self._arc_base_cache
+        key = (fov_deg, r)
+        pts = cache.get(key)
+        if pts is None:
+            fov = math.radians(fov_deg)
+            half = fov / 2.0
+            steps = max(int(fov_deg / 3), 8)
+            angles = np.linspace(-half, half, steps + 1)
+            pts = np.column_stack([np.cos(angles) * r, np.sin(angles) * r])
+            cache[key] = pts
+        return pts
+
     def _fov_arc_shape(self, ent: dict) -> tuple | None:
         """Return (kind, ix, iy, r, color[, fov_deg, fa]) for this unit's
         FOV/range arc, or None if the unit shouldn't show one.
@@ -2861,15 +2896,23 @@ class ClientGameScreen(BaseScreen):
                 pygame.draw.circle(arc, color, (sx, sy), rs, 1)
             else:  # "ARC"
                 _, sx, sy, rs, color, fov_deg, fa = shape
-                fov = math.radians(fov_deg)
-                half_fov = fov / 2.0
-                start = fa - half_fov
-                steps = max(int(fov_deg / 3), 8)
+                # Base arc points at facing=0 are cached per (fov_deg, rs).
+                # Each selected unit then only rotates + translates the
+                # cached array with numpy — orders of magnitude faster
+                # than the per-arc Python loop of cos/sin + int round.
+                base = self._arc_base_points(fov_deg, rs)
+                cos_fa = math.cos(fa)
+                sin_fa = math.sin(fa)
+                # Rotation: [x', y'] = [[cos -sin][sin cos]] @ [x, y].T
+                # Implemented as component multiplies to avoid matmul
+                # overhead for tiny arrays.
+                xs = base[:, 0] * cos_fa - base[:, 1] * sin_fa + sx
+                ys = base[:, 0] * sin_fa + base[:, 1] * cos_fa + sy
+                # Each arc starts + ends at the center so it closes to
+                # a "fan" shape (matches the previous behaviour).
                 points = [(sx, sy)]
-                for i in range(steps + 1):
-                    a = start + fov * i / steps
-                    points.append((int(round(sx + rs * math.cos(a))),
-                                   int(round(sy + rs * math.sin(a)))))
+                points.extend(zip(xs.astype(int).tolist(),
+                                  ys.astype(int).tolist()))
                 points.append((sx, sy))
                 pygame.draw.lines(arc, color, False, points, 1)
 
@@ -3292,6 +3335,7 @@ class ClientGameScreen(BaseScreen):
         cam = self._camera
         zoom = cam.zoom
         GRID = 2
+        fog_w, fog_h = self._fog_surface.get_size()
         snapped: list[tuple[int, int, int]] = []
         for ex, ey, r in los_circles:
             sx, sy = cam.world_to_screen(ex, ey)
@@ -3299,6 +3343,14 @@ class ClientGameScreen(BaseScreen):
             isx = (int(sx) // GRID) * GRID
             isy = (int(sy) // GRID) * GRID
             rs = max(1, int(r * zoom))
+            # Skip circles whose bbox is entirely off the fog viewport —
+            # they contribute no visible pixels and their presence in the
+            # cache key would invalidate the cache whenever off-screen
+            # units move.
+            if isx + rs < 0 or isx - rs > fog_w:
+                continue
+            if isy + rs < 0 or isy - rs > fog_h:
+                continue
             snapped.append((isx, isy, rs))
         snapped_tuple = tuple(snapped)
 
