@@ -1,46 +1,49 @@
 """GPU rendering foundation — wraps pygame._sdl2.video Window + Renderer.
 
-This module is the foundation for the planned GPU migration. It exposes a
-`GpuContext` that owns an SDL2 window and hardware-accelerated renderer,
-plus helpers for uploading CPU surfaces to textures and creating GPU-side
-render targets.
+This module exposes a `GpuContext` that owns an SDL2 window and
+hardware-accelerated renderer, plus helpers for uploading CPU surfaces
+to textures and creating GPU-side render targets. It also exposes
+`GpuCompatScreen`, a CPU scratch surface backed by a streaming texture
+used by the compat layer during the migration.
 
-Status: Phase 1 (foundation). Not yet used by screens. The app runs on the
-existing CPU pipeline unless `display_config.renderer_mode == "gpu"` is
-set, in which case the compat layer in `config/display.py` wires this
-context up to a scratch-surface upload flow so screens keep working
-unchanged while we incrementally migrate hot paths.
+SDL_HINT_RENDER_SCALE_QUALITY is set to "0" (nearest-neighbour) at
+import time, before any Renderer is created. This matches the default
+behaviour of `pygame.transform.scale` — linear scaling blurs unit
+sprites when zoomed, which we don't want for this game's aesthetic.
 
 API summary
 -----------
     ctx = GpuContext(size=(1920, 1080), title="AIRTS")
     ctx.clear((0, 0, 0))
     tex = ctx.texture_from_surface(surface)
-    ctx.renderer.blit(tex, dst_rect)   # or tex.draw(dstrect=...)
+    tex.draw(dstrect=...)
     ctx.present()
 
     # For render targets (draw into a texture via renderer primitives):
     target = ctx.make_target_texture(size)
     ctx.push_target(target)
     ctx.renderer.draw_line((0, 0), (100, 0))
-    ctx.pop_target()  # restore default target (the window backbuffer)
+    ctx.pop_target()   # restore default target (the window backbuffer)
 
     # For compat: streaming-updated texture backed by a CPU surface.
     tex = ctx.streaming_texture(size)
-    tex.update(my_cpu_surface)   # upload dirty pixels
+    tex.update(my_cpu_surface)   # upload pixels
 
 Design notes
 ------------
-* ``pygame._sdl2.video`` is part of pygame 2. It is marked "experimental"
-  but has been stable for major-feature use since 2.1. We pin to the
-  current pygame version in ``requirements.txt``.
+* `pygame._sdl2.video` is part of pygame 2. It's marked "experimental"
+  but has been stable for major-feature use since 2.1.
 * The renderer's built-in primitives are limited (lines, points, rects).
   Anything procedural (circles, polygons, thick lines) is either
   pre-rendered on a CPU Surface and uploaded as a Texture, or drawn via
-  many draw_line calls. The compat flow in Phase 1/2 keeps procedural
-  CPU drawing intact and only moves the final composite onto the GPU.
+  many draw_line calls. The compat flow keeps procedural CPU drawing
+  intact and only moves the final composite onto the GPU.
 """
 from __future__ import annotations
+
+import os
+# Must precede any Renderer construction. See docstring above.
+os.environ.setdefault("SDL_HINT_RENDER_SCALE_QUALITY", "0")
 
 from typing import Optional
 

@@ -1908,11 +1908,14 @@ class ClientGameScreen(BaseScreen):
 
         # Warp-in CC glow rings extend ~3× CC_RADIUS beyond entity bboxes
         # and their stale pixels would otherwise persist on world_surface.
-        # Force a viewport-wide restore next frame while warp_in is active.
+        # Force a restore of the entire map next frame while warp_in is
+        # active — viewport-only isn't enough because enemy CCs can spawn
+        # off-screen and their glow pixels linger after the user pans to
+        # them (the viewport dirty rect for the last warp_in frame didn't
+        # cover their position).
         if self._phase == "warp_in":
-            vp = self._camera.get_world_viewport_rect()
             self._dirty_rects_new.append(pygame.Rect(
-                vp.x, vp.y, vp.w, vp.h,
+                0, 0, self._map_w, self._map_h,
             ))
 
         _header_scope = self._frame_stats.scope("header")
@@ -2585,7 +2588,15 @@ class ClientGameScreen(BaseScreen):
         if bb_w <= 0 or bb_h <= 0:
             return
         bb_rect = pygame.Rect(bb_x, bb_y, bb_w, bb_h)
-        arc.fill((0, 0, 0, 0), rect=bb_rect)
+        # In GPU mode the whole surface is uploaded as a texture each
+        # frame — stale pixels outside the current bb would become
+        # visible trails on the screen. Full-fill to clear those.
+        # In CPU mode we only blit bb to the screen, so a bb-only fill
+        # is sufficient.
+        if self._gpu_mode:
+            arc.fill((0, 0, 0, 0))
+        else:
+            arc.fill((0, 0, 0, 0), rect=bb_rect)
 
         # Pass 2: draw arcs at screen coords on `_arc_surface`.
         for shape in shapes:
