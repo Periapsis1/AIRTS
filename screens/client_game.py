@@ -151,6 +151,26 @@ class ClientGameScreen(BaseScreen):
                        self._fx_tex, self._arc_tex):
                 _t.blend_mode = pygame.BLENDMODE_BLEND
 
+            # Scratch upload optimization state. Rather than uploading the
+            # full-screen SRCALPHA scratch every frame we compute a dirty
+            # bbox for game-area chrome (labels, floating chats, overlays)
+            # and upload only header + HUD strips + that bbox. Union with
+            # the previous frame's bbox ensures stale pixels get cleared.
+            self._header_strip = pygame.Rect(0, 0, self.width, self._header_h)
+            self._hud_strip = pygame.Rect(
+                0, self.height - self._hud_h,
+                self.width, self._hud_h,
+            )
+            self._scratch_game_bbox: pygame.Rect | None = None
+            self._last_scratch_game_bbox: pygame.Rect | None = None
+            # Set to True when a full-screen overlay is active and scratch
+            # content outside the normal bbox needs uploading.
+            self._scratch_needs_full_game: bool = False
+            # Stores the metallic border rect each frame so present() can
+            # draw it directly via renderer primitives (avoiding a draw on
+            # the scratch surface which would keep it dirty every frame).
+            self._border_rect: pygame.Rect | None = None
+
         # World surface and camera
         self._world_surface = pygame.Surface((mw, mh))
         self._bg_surface, self._bg_tile = self._build_background(mw, mh)
@@ -1486,6 +1506,89 @@ class ClientGameScreen(BaseScreen):
 
     # -- rendering ----------------------------------------------------------
 
+    def _mark_scratch_dirty(self, rect: pygame.Rect) -> None:
+        """Union *rect* into this frame's scratch game-area dirty bbox.
+
+        GPU-mode only; no-op in CPU mode. Callers pass rects in screen
+        coordinates; the rect is clipped to `_game_area` and unioned with
+        the running bbox.
+        """
+        if not self._gpu_mode:
+            return
+        clipped = rect.clip(self._game_area)
+        if clipped.w <= 0 or clipped.h <= 0:
+            return
+        if self._scratch_game_bbox is None:
+            self._scratch_game_bbox = clipped.copy()
+        else:
+            self._scratch_game_bbox.union_ip(clipped)
+
+    def _compute_scratch_game_bbox(self) -> pygame.Rect | None:
+        """Return the bbox (in screen coords) of scratch chrome inside
+        the game area this frame, or None if nothing was drawn there.
+
+        When a full-screen overlay is active (warp-in countdown, winner,
+        paused, chat input, ESC menu, perf overlay) fall back to the
+        full game_area — those overlays can cover arbitrary regions.
+        Otherwise derive the bbox conservatively from entity label
+        positions + floating chat trajectories + chat-log strip.
+
+        This is GPU-mode-only; `present()` uses the result to pick how
+        much of the scratch surface to upload to the GPU texture.
+        """
+        ga = self._game_area
+
+        # Fullscreen-ish overlays: upload the whole game_area.
+        if (self._phase == "warp_in"
+                or self._winner != 0
+                or (self._paused and self._is_local and not self._esc_menu_open)
+                or self._chat_input_active
+                or self._esc_menu_open
+                or self._show_perf):
+            return ga.copy()
+
+        bbox: pygame.Rect | None = None
+
+        def _u(r: pygame.Rect) -> None:
+            nonlocal bbox
+            c = r.clip(ga)
+            if c.w <= 0 or c.h <= 0:
+                return
+            if bbox is None:
+                bbox = c.copy()
+            else:
+                bbox.union_ip(c)
+
+        # Entity label region — ME bonus labels, team names above CCs.
+        # Labels render above the unit sprite; include margin for label
+        # height + health bar / selection ring below.
+        cam = self._camera
+        for e in self._entities:
+            ex = e.get("x", 0)
+            ey = e.get("y", 0)
+            sx, sy = cam.world_to_screen(ex, ey)
+            sx += ga.x
+            sy += ga.y
+            r = e.get("r", 20)
+            _u(pygame.Rect(
+                int(sx - r - 24), int(sy - r - 64),
+                int(r * 2 + 48), int(r * 2 + 84),
+            ))
+
+        # Floating chat text rises ~200 px from source.
+        for fc in self._floating_chats:
+            sx, sy = cam.world_to_screen(fc.x, fc.y)
+            sx += ga.x
+            sy += ga.y
+            _u(pygame.Rect(int(sx - 150), int(sy - 260), 300, 280))
+
+        # Chat log strip at top of game area when there are messages to
+        # fade out.
+        if self._chat_log.get_visible(self._game_time):
+            _u(pygame.Rect(ga.x + 6, ga.y + 4, 500, 140))
+
+        return bbox
+
     def present(self) -> None:
         """Present the current frame.
 
@@ -1571,8 +1674,54 @@ class ClientGameScreen(BaseScreen):
                 self._fog_tex.update(self._fog_surface)
             self._fog_tex.draw(dstrect=ga_dst)
 
-        # 4. Chrome scratch on top (alpha-blended).
-        self._scratch_tex.update(self.screen)
+        # 4. Metallic border via renderer primitives. Drawn as 3 nested
+        # 1-px rect outlines with the border colours. This lives on the
+        # renderer path so the scratch surface stays clean in the
+        # game-area border region (otherwise scratch is dirty every
+        # frame wherever the border crosses).
+        if self._border_rect is not None:
+            br = self._border_rect
+            for i, col in enumerate((_BORDER_OUTER, _BORDER_MID, _BORDER_INNER)):
+                r2 = br.inflate(-i * 2, -i * 2)
+                if r2.w <= 0 or r2.h <= 0:
+                    break
+                renderer.draw_color = (col[0], col[1], col[2], 255)
+                renderer.draw_rect(r2)
+
+        # 5. Chrome scratch on top (alpha-blended). Upload only the rects
+        # that changed this frame: header strip, HUD strip, and the
+        # game-area chrome bbox (union with last frame's bbox so stale
+        # pixels like moved labels get cleared). Full-game fallback when
+        # a large overlay is active.
+        bbox_game = self._compute_scratch_game_bbox()
+        # Upload chrome strips (header + HUD) — they always change
+        # (FPS counter, timers, build bars, etc.).
+        self._scratch_tex.update(
+            self.screen.subsurface(self._header_strip),
+            area=self._header_strip,
+        )
+        self._scratch_tex.update(
+            self.screen.subsurface(self._hud_strip),
+            area=self._hud_strip,
+        )
+        # Upload the game-area bbox (this frame ∪ previous frame).
+        upload_bbox: pygame.Rect | None = None
+        if bbox_game is not None:
+            upload_bbox = bbox_game.copy()
+        if self._last_scratch_game_bbox is not None:
+            if upload_bbox is None:
+                upload_bbox = self._last_scratch_game_bbox.copy()
+            else:
+                upload_bbox.union_ip(self._last_scratch_game_bbox)
+        if upload_bbox is not None:
+            upload_bbox = upload_bbox.clip(self._game_area)
+            if upload_bbox.w > 0 and upload_bbox.h > 0:
+                self._scratch_tex.update(
+                    self.screen.subsurface(upload_bbox),
+                    area=upload_bbox,
+                )
+        self._last_scratch_game_bbox = bbox_game
+
         self._scratch_tex.draw()
 
         ctx.present()
@@ -1590,6 +1739,13 @@ class ClientGameScreen(BaseScreen):
         # is still correct. Huge win during static-camera play where fog
         # cache hits every frame.
         self._fog_tex_dirty = False
+        if self._gpu_mode:
+            # Reset scratch upload tracking. `_last_scratch_game_bbox` is
+            # preserved from the previous frame so we can clear stale
+            # pixels (e.g. labels that moved) via the union.
+            self._scratch_game_bbox = None
+            self._scratch_needs_full_game = False
+            self._border_rect = None
         with self._frame_stats.scope("bg"):
             # Obstacles are baked into `_bg_surface`. Restore only the regions
             # that were drawn on last frame (entities + command arrows), not
@@ -2075,7 +2231,14 @@ class ClientGameScreen(BaseScreen):
         )
         clip_save = self.screen.get_clip()
         self.screen.set_clip(ga)
-        _draw_metallic_border(self.screen, border_rect, 3)
+        if self._gpu_mode:
+            # Defer border drawing to present() so it renders via renderer
+            # primitives — keeps the scratch surface clean of per-frame
+            # border strokes (which would otherwise make scratch always
+            # dirty in the game_area).
+            self._border_rect = border_rect.clip(ga)
+        else:
+            _draw_metallic_border(self.screen, border_rect, 3)
 
         _world_scope.__exit__(None, None, None)
         _labels_scope = self._frame_stats.scope("labels")
