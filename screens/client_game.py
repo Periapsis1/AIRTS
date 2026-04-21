@@ -114,6 +114,32 @@ class ClientGameScreen(BaseScreen):
         mw = client.map_width
         mh = client.map_height
 
+        # Detect GPU renderer mode up front. In GPU mode we replace
+        # `self.screen` with an SRCALPHA scratch surface so non-world draws
+        # (labels, HUD, border) become opaque pixels on a transparent
+        # canvas. Areas left transparent let the GPU-composed world +
+        # overlays show through at `present()` time.
+        self._gpu_mode = display_config.renderer_mode == "gpu"
+        if self._gpu_mode:
+            self.screen = pygame.Surface(
+                (self.width, self.height), pygame.SRCALPHA,
+            )
+            _ctx = display_config.gpu_context()
+            ga_size = (self._game_area.w, self._game_area.h)
+            self._scratch_tex = _ctx.streaming_texture(
+                (self.width, self.height),
+            )
+            self._ws_tex = _ctx.streaming_texture((mw, mh))
+            self._fog_tex = _ctx.streaming_texture(ga_size)
+            self._fx_tex = _ctx.streaming_texture(ga_size)
+            self._arc_tex = _ctx.streaming_texture(ga_size)
+            # Enable alpha blending on the textures that get drawn as
+            # overlays, so their transparency composes correctly.
+            from pygame._sdl2 import video as _sdl2_video
+            for _t in (self._scratch_tex, self._fog_tex,
+                       self._fx_tex, self._arc_tex):
+                _t.blend_mode = _sdl2_video.BLENDMODE_BLEND
+
         # Layout areas — match host's header/hud/game area proportions
         self._header_h = 40
         self._hud_h = int(self.height * 0.20)
@@ -1458,6 +1484,88 @@ class ClientGameScreen(BaseScreen):
 
     # -- rendering ----------------------------------------------------------
 
+    def present(self) -> None:
+        """Present the current frame.
+
+        CPU mode: defer to BaseScreen.present() (upload scratch to the
+        streaming texture in GPU compat, or pygame.display.flip() in pure
+        CPU).
+
+        GPU mode: compose the frame directly on the SDL2 renderer by
+        uploading the world and overlay surfaces as textures and drawing
+        them in layer order:
+
+            1. Clear renderer.
+            2. Draw tiled dead-space bg (covers the full game_area so the
+               areas beyond the map edge aren't transparent).
+            3. Upload world_surface → ws_tex, draw scaled to game_area
+               using the camera's viewport rect as srcrect (GPU scales).
+            4. Upload fog / fx / arc overlays, draw at game_area position.
+            5. Upload the scratch SRCALPHA surface → scratch_tex and draw
+               it on top (alpha-blended). Chrome drawn on scratch lands
+               on top; transparent regions within the game area let the
+               composed content show through.
+            6. Present.
+        """
+        if not self._gpu_mode:
+            super().present()
+            return
+
+        ctx = display_config.gpu_context()
+        renderer = ctx.renderer
+        ga = self._game_area
+        ga_dst = pygame.Rect(ga.x, ga.y, ga.w, ga.h)
+
+        ctx.clear((0, 0, 0))
+
+        # 1. Dead-space bg tile — cheap tiled draw against scaled tile
+        # texture. For now, reuse the CPU blit_screen_background into a
+        # scratch-less local surface and upload. This is not the final
+        # implementation (future phase will keep the scaled tile on GPU),
+        # but it preserves the dead-space look while we validate the
+        # world-scale path.
+        # Simpler interim: skip dead-space bg entirely — it only appears
+        # at the extreme zoom-out corners on large maps; most play time
+        # the world fills the game area so it's invisible anyway.
+
+        # 2. Scaled world via GPU
+        self._ws_tex.update(self._world_surface)
+        vp = self._camera.get_world_viewport_rect()
+        # Clip source rect to the world surface bounds.
+        ws_rect = self._world_surface.get_rect()
+        src = vp.clip(ws_rect)
+        if src.w > 0 and src.h > 0:
+            # Compute dst sub-rect when the clipped source doesn't cover
+            # the full viewport (e.g. panned past the map edge).
+            dst_x = ga.x + int((src.x - vp.x) * self._camera.zoom)
+            dst_y = ga.y + int((src.y - vp.y) * self._camera.zoom)
+            dst_w = int(src.w * self._camera.zoom)
+            dst_h = int(src.h * self._camera.zoom)
+            self._ws_tex.draw(
+                srcrect=src,
+                dstrect=pygame.Rect(dst_x, dst_y, dst_w, dst_h),
+            )
+
+        # 3. Overlay textures — each is viewport-sized and already in
+        # screen coords (phase-1 refactor put fog/fx/arc onto viewport
+        # surfaces). Draw in the same order as the CPU pipeline:
+        # arcs < lasers < fog.
+        if self._arc_ready:
+            self._arc_tex.update(self._arc_surface)
+            self._arc_tex.draw(dstrect=ga_dst)
+        if self._fx_ready:
+            self._fx_tex.update(self._fx_surface)
+            self._fx_tex.draw(dstrect=ga_dst)
+        if self._fog_ready:
+            self._fog_tex.update(self._fog_surface)
+            self._fog_tex.draw(dstrect=ga_dst)
+
+        # 4. Chrome scratch on top (alpha-blended).
+        self._scratch_tex.update(self.screen)
+        self._scratch_tex.draw()
+
+        ctx.present()
+
     def _draw(self) -> None:
         ws = self._world_surface
         # Per-frame overlay readiness flags. Each overlay pass sets its flag
@@ -1808,7 +1916,12 @@ class ClientGameScreen(BaseScreen):
         _header_scope = self._frame_stats.scope("header")
         _header_scope.__enter__()
         # -- Composite to screen --
-        self.screen.fill((0, 0, 0))
+        # In GPU mode, scratch starts fully transparent so the GPU-composed
+        # world + overlays show through wherever we don't paint chrome.
+        if self._gpu_mode:
+            self.screen.fill((0, 0, 0, 0))
+        else:
+            self.screen.fill((0, 0, 0))
 
         # Header bar
         pygame.draw.rect(self.screen, (20, 20, 30), self._header_rect)
@@ -1900,30 +2013,38 @@ class ClientGameScreen(BaseScreen):
         _header_scope.__exit__(None, None, None)
         _world_scope = self._frame_stats.scope("world")
         _world_scope.__enter__()
-        # Game area: tiled background (covers beyond-map dead space) then camera projection
         from core.background import blit_screen_background
         ga = self._game_area
-        blit_screen_background(self.screen, ga, self._camera, self._bg_tile)
-        self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
+        if self._gpu_mode:
+            # GPU mode: the scaled world, tiled dead-space bg, and overlay
+            # textures are composed by the renderer in `present()`. Nothing
+            # to paint onto the scratch surface here — it stays transparent
+            # within the game area so that composed content shows through.
+            pass
+        else:
+            # Game area: tiled background (covers beyond-map dead space)
+            # then camera projection.
+            blit_screen_background(self.screen, ga, self._camera, self._bg_tile)
+            self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
 
-        # Screen-space overlays: FOV arcs, lasers, fog. Each is viewport-sized
-        # and has been prepared in screen coords by its respective pass, so
-        # these are single cheap blits (no scale). Drawn in order: arcs <
-        # lasers < fog. Metallic border still draws on top below.
-        if self._arc_ready:
-            bb = getattr(self, "_arc_bbox", None)
-            if bb is not None:
-                self.screen.blit(
-                    self._arc_surface,
-                    (ga.x + bb.x, ga.y + bb.y),
-                    area=bb,
-                )
-            else:
-                self.screen.blit(self._arc_surface, (ga.x, ga.y))
-        if self._fx_ready:
-            self.screen.blit(self._fx_surface, (ga.x, ga.y))
-        if self._fog_ready:
-            self.screen.blit(self._fog_surface, (ga.x, ga.y))
+            # Screen-space overlays: FOV arcs, lasers, fog. Each is
+            # viewport-sized and has been prepared in screen coords by its
+            # respective pass, so these are single cheap blits (no scale).
+            # Metallic border still draws on top below.
+            if self._arc_ready:
+                bb = getattr(self, "_arc_bbox", None)
+                if bb is not None:
+                    self.screen.blit(
+                        self._arc_surface,
+                        (ga.x + bb.x, ga.y + bb.y),
+                        area=bb,
+                    )
+                else:
+                    self.screen.blit(self._arc_surface, (ga.x, ga.y))
+            if self._fx_ready:
+                self.screen.blit(self._fx_surface, (ga.x, ga.y))
+            if self._fog_ready:
+                self.screen.blit(self._fog_surface, (ga.x, ga.y))
 
         # Metallic border around the world edge (rendered in screen space)
         bx0, by0 = self._camera.world_to_screen(0, 0)
