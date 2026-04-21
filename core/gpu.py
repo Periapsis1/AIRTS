@@ -63,6 +63,16 @@ class GpuContext:
         accelerated: bool = True,
         borderless: bool = False,
     ) -> None:
+        # Establish a pygame display format so Surface.convert() /
+        # pygame.image.load(...).convert() keep working. The SDL2 Window
+        # below is separate from pygame's display window and doesn't set
+        # a pixel format on its own. A 1x1 hidden window is enough for
+        # pygame to pick a default format; it's never visible to the user.
+        if not pygame.display.get_init():
+            pygame.display.init()
+        hidden_flag = getattr(pygame, "HIDDEN", 0)
+        pygame.display.set_mode((1, 1), hidden_flag)
+
         self.window = _sdl2_video.Window(
             title,
             size=size,
