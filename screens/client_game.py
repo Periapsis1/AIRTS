@@ -114,11 +114,21 @@ class ClientGameScreen(BaseScreen):
         mw = client.map_width
         mh = client.map_height
 
-        # Detect GPU renderer mode up front. In GPU mode we replace
-        # `self.screen` with an SRCALPHA scratch surface so non-world draws
-        # (labels, HUD, border) become opaque pixels on a transparent
-        # canvas. Areas left transparent let the GPU-composed world +
-        # overlays show through at `present()` time.
+        # Layout areas — match host's header/hud/game area proportions
+        self._header_h = 40
+        self._hud_h = int(self.height * 0.20)
+        self._header_rect = pygame.Rect(0, 0, self.width, self._header_h)
+        self._hud_rect = pygame.Rect(0, self.height - self._hud_h,
+                                     self.width, self._hud_h)
+        self._game_area = pygame.Rect(0, self._header_h, self.width,
+                                      self.height - self._header_h - self._hud_h)
+
+        # Detect GPU renderer mode. In GPU mode we replace `self.screen`
+        # with an SRCALPHA scratch so non-world draws (labels, HUD,
+        # border) become opaque pixels on a transparent canvas. Areas
+        # left transparent let the GPU-composed world + overlays show
+        # through at `present()` time. Deferred until after the layout
+        # rects are built since texture sizing depends on game_area.
         self._gpu_mode = display_config.renderer_mode == "gpu"
         if self._gpu_mode:
             self.screen = pygame.Surface(
@@ -133,21 +143,12 @@ class ClientGameScreen(BaseScreen):
             self._fog_tex = _ctx.streaming_texture(ga_size)
             self._fx_tex = _ctx.streaming_texture(ga_size)
             self._arc_tex = _ctx.streaming_texture(ga_size)
-            # Enable alpha blending on the textures that get drawn as
-            # overlays, so their transparency composes correctly.
+            # Alpha blending on textures that get drawn as overlays so
+            # their transparency composes correctly.
             from pygame._sdl2 import video as _sdl2_video
             for _t in (self._scratch_tex, self._fog_tex,
                        self._fx_tex, self._arc_tex):
                 _t.blend_mode = _sdl2_video.BLENDMODE_BLEND
-
-        # Layout areas — match host's header/hud/game area proportions
-        self._header_h = 40
-        self._hud_h = int(self.height * 0.20)
-        self._header_rect = pygame.Rect(0, 0, self.width, self._header_h)
-        self._hud_rect = pygame.Rect(0, self.height - self._hud_h,
-                                     self.width, self._hud_h)
-        self._game_area = pygame.Rect(0, self._header_h, self.width,
-                                      self.height - self._header_h - self._hud_h)
 
         # World surface and camera
         self._world_surface = pygame.Surface((mw, mh))
