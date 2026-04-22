@@ -140,6 +140,10 @@ class ClientGameScreen(BaseScreen):
                 (self.width, self.height),
             )
             self._ws_tex = _ctx.streaming_texture((mw, mh))
+            # First-frame flag: ws_tex is uninitialized at first, so we
+            # do one full viewport upload before switching to the cheap
+            # dirty-rect upload path.
+            self._ws_tex_initialized: bool = False
             self._fog_tex = _ctx.streaming_texture(ga_size)
             self._fx_tex = _ctx.streaming_texture(ga_size)
             self._arc_tex = _ctx.streaming_texture(ga_size)
@@ -1672,18 +1676,51 @@ class ClientGameScreen(BaseScreen):
         # at the extreme zoom-out corners on large maps; most play time
         # the world fills the game area so it's invisible anyway.
 
-        # 2. Scaled world via GPU. Upload only the viewport region of
-        # world_surface to ws_tex (the texture retains stale pixels
-        # outside the viewport, but we only draw the viewport region so
-        # those never appear on screen). This halves upload cost on
-        # large maps where the viewport is a fraction of map area.
+        # 2. Scaled world via GPU. Upload only the regions of
+        # world_surface that ACTUALLY changed this frame — the union of
+        # last frame's bg-restore rects (which removed old entity
+        # pixels) and this frame's entity-draw rects. The texture
+        # retains stale pixels outside those regions, but by definition
+        # those regions didn't change so reusing them is correct.
+        # Texture.update is a synchronous CPU→GPU memcpy that holds the
+        # GIL; shrinking it directly reduces the time the server thread
+        # is starved each frame.
         vp = self._camera.get_world_viewport_rect()
         ws_rect = self._world_surface.get_rect()
         src = vp.clip(ws_rect)
         if src.w > 0 and src.h > 0:
-            self._ws_tex.update(
-                self._world_surface.subsurface(src), area=src,
-            )
+            if not self._ws_tex_initialized:
+                # First frame after init: texture is uninitialized; do a
+                # full viewport upload so subsequent dirty-rect updates
+                # have valid pixels to overlay onto.
+                self._ws_tex.update(
+                    self._world_surface.subsurface(src), area=src,
+                )
+                self._ws_tex_initialized = True
+            else:
+                # Combine last + this frame's dirty rects, clip to ws,
+                # and upload each. Each upload is a small subsurface →
+                # cheap memcpy, fast GIL release.
+                upload_rects: list[pygame.Rect] = []
+                for r_list in (self._last_dirty_rects, self._dirty_rects_new):
+                    for r in r_list:
+                        clip = r.clip(ws_rect)
+                        if clip.w > 0 and clip.h > 0:
+                            upload_rects.append(clip)
+                if upload_rects:
+                    # Union into a single rect — typically tighter than
+                    # individual rect uploads when entities cluster, and
+                    # avoids per-call SDL_LockTexture overhead. Could
+                    # split for sparse selections later.
+                    union = upload_rects[0].copy()
+                    for r in upload_rects[1:]:
+                        union.union_ip(r)
+                    union = union.clip(ws_rect)
+                    if union.w > 0 and union.h > 0:
+                        self._ws_tex.update(
+                            self._world_surface.subsurface(union),
+                            area=union,
+                        )
             # Compute dst sub-rect when the clipped source doesn't cover
             # the full viewport (e.g. panned past the map edge).
             dst_x = ga.x + int((src.x - vp.x) * self._camera.zoom)
