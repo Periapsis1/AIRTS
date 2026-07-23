@@ -1,0 +1,18 @@
+{
+  "name": "airts-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser client for AIRTS (TypeScript + Canvas2D).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11"
+  }
+}

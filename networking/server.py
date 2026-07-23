@@ -10,7 +10,8 @@ import time
 from typing import Any
 
 from networking.host import GameHost
-from networking.protocol import DEFAULT_PORT
+from networking.protocol import DEFAULT_PORT, DEFAULT_WS_PORT
+from networking.static_config import build_ai_choices, build_static_config
 from systems.commands import CommandQueue
 
 
@@ -30,12 +31,14 @@ class DedicatedServer:
         max_players: int = 8,
         max_ticks_default: int = 0,
         enable_t2_default: bool = False,
+        ws_port: int | None = DEFAULT_WS_PORT,
     ):
         self._port = port
         self._host_name = host_name
         self._max_players = max_players
         self._max_ticks_default = max_ticks_default
         self._enable_t2_default = enable_t2_default
+        self._ws_port = ws_port
 
         self._game = None
         self._host: GameHost | None = None
@@ -53,6 +56,9 @@ class DedicatedServer:
             port=self._port,
             host_name=self._host_name,
             max_players=self._max_players,
+            ws_port=self._ws_port,
+            ai_choices=build_ai_choices(registry),
+            static_config=build_static_config(),
         )
         self._host = host
         host.start()

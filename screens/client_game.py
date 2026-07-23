@@ -1632,6 +1632,22 @@ class ClientGameScreen(BaseScreen):
 
         return bbox
 
+    def _time_op(self, name: str, fn) -> None:
+        """Run *fn* and record (op_name, wall_ms, cpu_ms) for diagnostics.
+
+        Used inside present() to instrument every Texture.update / draw /
+        present call. The biggest-wall op per frame is shown on the F3
+        panel as `gil_op` so we can see which specific operation is
+        holding the GIL and starving the server thread.
+        """
+        import time as _t
+        w0 = _t.perf_counter()
+        c0 = _t.thread_time()
+        fn()
+        w_ms = (_t.perf_counter() - w0) * 1000.0
+        c_ms = (_t.thread_time() - c0) * 1000.0
+        self._present_ops.append((name, w_ms, c_ms))
+
     def present(self) -> None:
         """Present the current frame.
 
@@ -1664,7 +1680,11 @@ class ClientGameScreen(BaseScreen):
         ga = self._game_area
         ga_dst = pygame.Rect(ga.x, ga.y, ga.w, ga.h)
 
-        ctx.clear((0, 0, 0))
+        # Per-op diagnostic. Records (name, wall_ms, cpu_ms) for every
+        # texture upload / draw / present call so we can identify which
+        # operation is the GIL hog for the server thread.
+        self._present_ops: list[tuple[str, float, float]] = []
+        self._time_op("clear", lambda: ctx.clear((0, 0, 0)))
 
         # 1. Dead-space bg tile — cheap tiled draw against scaled tile
         # texture. For now, reuse the CPU blit_screen_background into a
@@ -1690,17 +1710,11 @@ class ClientGameScreen(BaseScreen):
         src = vp.clip(ws_rect)
         if src.w > 0 and src.h > 0:
             if not self._ws_tex_initialized:
-                # First frame after init: texture is uninitialized; do a
-                # full viewport upload so subsequent dirty-rect updates
-                # have valid pixels to overlay onto.
-                self._ws_tex.update(
+                self._time_op("ws_tex.update(full)", lambda: self._ws_tex.update(
                     self._world_surface.subsurface(src), area=src,
-                )
+                ))
                 self._ws_tex_initialized = True
             else:
-                # Combine last + this frame's dirty rects, clip to ws,
-                # and upload each. Each upload is a small subsurface →
-                # cheap memcpy, fast GIL release.
                 upload_rects: list[pygame.Rect] = []
                 for r_list in (self._last_dirty_rects, self._dirty_rects_new):
                     for r in r_list:
@@ -1708,54 +1722,54 @@ class ClientGameScreen(BaseScreen):
                         if clip.w > 0 and clip.h > 0:
                             upload_rects.append(clip)
                 if upload_rects:
-                    # Union into a single rect — typically tighter than
-                    # individual rect uploads when entities cluster, and
-                    # avoids per-call SDL_LockTexture overhead. Could
-                    # split for sparse selections later.
                     union = upload_rects[0].copy()
                     for r in upload_rects[1:]:
                         union.union_ip(r)
                     union = union.clip(ws_rect)
                     if union.w > 0 and union.h > 0:
-                        self._ws_tex.update(
-                            self._world_surface.subsurface(union),
-                            area=union,
+                        _u_rect = union
+                        self._time_op(
+                            f"ws_tex.update({_u_rect.w}x{_u_rect.h})",
+                            lambda r=_u_rect: self._ws_tex.update(
+                                self._world_surface.subsurface(r), area=r,
+                            ),
                         )
-            # Compute dst sub-rect when the clipped source doesn't cover
-            # the full viewport (e.g. panned past the map edge).
             dst_x = ga.x + int((src.x - vp.x) * self._camera.zoom)
             dst_y = ga.y + int((src.y - vp.y) * self._camera.zoom)
             dst_w = int(src.w * self._camera.zoom)
             dst_h = int(src.h * self._camera.zoom)
-            self._ws_tex.draw(
-                srcrect=src,
-                dstrect=pygame.Rect(dst_x, dst_y, dst_w, dst_h),
-            )
+            _dstrect = pygame.Rect(dst_x, dst_y, dst_w, dst_h)
+            self._time_op("ws_tex.draw", lambda: self._ws_tex.draw(
+                srcrect=src, dstrect=_dstrect,
+            ))
 
         # 3. Overlay textures — each is viewport-sized and already in
         # screen coords (phase-1 refactor put fog/fx/arc onto viewport
         # surfaces). Draw in the same order as the CPU pipeline:
         # arcs < lasers < fog.
         if self._arc_ready:
-            self._arc_tex.update(self._arc_surface)
-            self._arc_tex.draw(dstrect=ga_dst)
+            self._time_op("arc_tex.update",
+                          lambda: self._arc_tex.update(self._arc_surface))
+            self._time_op("arc_tex.draw",
+                          lambda: self._arc_tex.draw(dstrect=ga_dst))
         if self._fx_ready:
-            self._fx_tex.update(self._fx_surface)
-            self._fx_tex.draw(dstrect=ga_dst)
+            self._time_op("fx_tex.update",
+                          lambda: self._fx_tex.update(self._fx_surface))
+            self._time_op("fx_tex.draw",
+                          lambda: self._fx_tex.draw(dstrect=ga_dst))
         if self._fog_ready:
-            # Upload only when the fog surface was rebuilt this frame.
-            # On a cache hit, the texture still holds the correct content
-            # from the last rebuild — just redraw it.
             if self._fog_tex_dirty:
-                self._fog_tex.update(self._fog_surface)
-            self._fog_tex.draw(dstrect=ga_dst)
+                self._time_op("fog_tex.update",
+                              lambda: self._fog_tex.update(self._fog_surface))
+            self._time_op("fog_tex.draw",
+                          lambda: self._fog_tex.draw(dstrect=ga_dst))
 
         # 4. Metallic border via renderer primitives. Drawn as 3 nested
         # 1-px rect outlines with the border colours. This lives on the
         # renderer path so the scratch surface stays clean in the
         # game-area border region (otherwise scratch is dirty every
         # frame wherever the border crosses).
-        if self._border_rect is not None:
+        def _draw_border():
             br = self._border_rect
             for i, col in enumerate((_BORDER_OUTER, _BORDER_MID, _BORDER_INNER)):
                 r2 = br.inflate(-i * 2, -i * 2)
@@ -1763,14 +1777,18 @@ class ClientGameScreen(BaseScreen):
                     break
                 renderer.draw_color = (col[0], col[1], col[2], 255)
                 renderer.draw_rect(r2)
+        if self._border_rect is not None:
+            self._time_op("border", _draw_border)
 
         # 5. HUD texture. Rendered onto _hud_surface by _draw_hud only
         # when proxies/selection changed, so most frames just re-draw
         # the existing texture without re-uploading.
         if self._hud_surface_dirty:
-            self._hud_tex.update(self._hud_surface)
+            self._time_op("hud_tex.update",
+                          lambda: self._hud_tex.update(self._hud_surface))
             self._hud_surface_dirty = False
-        self._hud_tex.draw(dstrect=self._hud_strip)
+        self._time_op("hud_tex.draw",
+                      lambda: self._hud_tex.draw(dstrect=self._hud_strip))
 
         # 6. Chrome scratch on top (alpha-blended). Upload only the rects
         # that changed this frame: header strip + game-area bbox + (HUD
@@ -1778,21 +1796,21 @@ class ClientGameScreen(BaseScreen):
         # darkens the HUD area). Full-game fallback when a large overlay
         # is active is baked into `_compute_scratch_game_bbox`.
         bbox_game = self._compute_scratch_game_bbox()
-        # Header strip — always changes (FPS / timer / ping / slider).
-        self._scratch_tex.update(
-            self.screen.subsurface(self._header_strip),
-            area=self._header_strip,
+        self._time_op(
+            "scratch.update(header)",
+            lambda: self._scratch_tex.update(
+                self.screen.subsurface(self._header_strip),
+                area=self._header_strip,
+            ),
         )
-        # Full-screen overlays (ESC menu, etc.) also darken the HUD
-        # strip on the scratch. In that case upload it too so the
-        # darkening composites over the HUD texture. Otherwise the HUD
-        # strip on scratch is transparent and doesn't need uploading.
         if self._scratch_overlay_covers_hud or self._esc_menu_open:
-            self._scratch_tex.update(
-                self.screen.subsurface(self._hud_strip),
-                area=self._hud_strip,
+            self._time_op(
+                "scratch.update(hud)",
+                lambda: self._scratch_tex.update(
+                    self.screen.subsurface(self._hud_strip),
+                    area=self._hud_strip,
+                ),
             )
-        # Upload the game-area bbox (this frame ∪ previous frame).
         upload_bbox: pygame.Rect | None = None
         if bbox_game is not None:
             upload_bbox = bbox_game.copy()
@@ -1804,15 +1822,24 @@ class ClientGameScreen(BaseScreen):
         if upload_bbox is not None:
             upload_bbox = upload_bbox.clip(self._game_area)
             if upload_bbox.w > 0 and upload_bbox.h > 0:
-                self._scratch_tex.update(
-                    self.screen.subsurface(upload_bbox),
-                    area=upload_bbox,
+                _ub = upload_bbox
+                self._time_op(
+                    f"scratch.update(bbox {_ub.w}x{_ub.h})",
+                    lambda r=_ub: self._scratch_tex.update(
+                        self.screen.subsurface(r), area=r,
+                    ),
                 )
         self._last_scratch_game_bbox = bbox_game
 
-        self._scratch_tex.draw()
+        self._time_op("scratch.draw", lambda: self._scratch_tex.draw())
 
-        ctx.present()
+        self._time_op("renderer.present", lambda: ctx.present())
+
+        # Stash worst op for F3 panel display.
+        if self._present_ops:
+            self._present_worst = max(self._present_ops, key=lambda x: x[1])
+        else:
+            self._present_worst = None
 
     def _draw(self) -> None:
         ws = self._world_surface
@@ -2437,10 +2464,14 @@ class ClientGameScreen(BaseScreen):
             self._draw_perf_overlay()
 
         _overlays_scope.__exit__(None, None, None)
-        # Hand off this frame's dirty rects to be restored next frame.
-        self._last_dirty_rects = self._dirty_rects_new
+        # IMPORTANT: present() needs both `_last_dirty_rects` (previous
+        # frame, used for ws_tex upload to clear regions where we just
+        # bg-restored) AND `_dirty_rects_new` (this frame, fresh draws).
+        # Run present() FIRST so it sees both as distinct lists, then
+        # promote new → last for the next frame's bg restore.
         with self._frame_stats.scope("flip"):
             self.present()
+        self._last_dirty_rects = self._dirty_rects_new
 
     # -- chat overlay / input -------------------------------------------------
 
@@ -2557,8 +2588,11 @@ class ClientGameScreen(BaseScreen):
         font = _get_font(14)
         pad = 6
         line_h = font.get_height() + 2
-        panel_w = 190
-        panel_h = pad * 2 + line_h * (len(items) + 2)
+        panel_w = 260
+        # Base rows: header + items + total. +2 extra lines in GPU mode
+        # for the "max op" diagnostic.
+        extra_rows = 2 if getattr(self, "_gpu_mode", False) else 0
+        panel_h = pad * 2 + line_h * (len(items) + 2 + extra_rows)
 
         # Top-left, below the header bar. Ping table is top-right, so no conflict.
         x = 10
@@ -2606,6 +2640,32 @@ class ClientGameScreen(BaseScreen):
         total_value = font.render(f"{total:5.2f}", True, total_color)
         self.screen.blit(total_label, (x + pad, ry))
         self.screen.blit(total_value, (x + panel_w - pad - total_value.get_width(), ry))
+
+        # GPU-mode: show the worst per-op wall time from the last
+        # present() so we can see which texture update / draw is the
+        # biggest GIL holder.
+        worst = getattr(self, "_present_worst", None)
+        if worst is not None:
+            ry += line_h
+            op_name, op_wall, op_cpu = worst
+            gap = op_wall - op_cpu
+            gap_color = (
+                (230, 110, 110) if gap > 3.0
+                else (230, 180, 100) if gap > 1.0
+                else (140, 210, 150)
+            )
+            label_text = f"max: {op_name}"
+            if font.size(label_text)[0] > panel_w - pad * 2 - 60:
+                # Truncate long names
+                label_text = label_text[:24] + "..."
+            label = font.render(label_text, True, (210, 210, 215))
+            self.screen.blit(label, (x + pad, ry))
+            ry += line_h
+            det_label = font.render(
+                f"  wall {op_wall:.2f} / cpu {op_cpu:.2f}",
+                True, gap_color,
+            )
+            self.screen.blit(det_label, (x + pad, ry))
 
     # -- escape menu overlay ---------------------------------------------------
 

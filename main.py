@@ -32,6 +32,8 @@ def main():
                         help="Run as a dedicated server (headless, 2 remote clients)")
     parser.add_argument("--port", type=int, default=7777,
                         help="Server port (default: 7777)")
+    parser.add_argument("--ws-port", type=int, default=7778,
+                        help="WebSocket port for browser clients, 0 to disable (default: 7778)")
     parser.add_argument("--enable-t2", action="store_true",
                         help="Enable T2 units")
 
@@ -81,6 +83,7 @@ def _run_server(args):
         port=args.port,
         max_ticks_default=max_ticks,
         enable_t2_default=args.enable_t2,
+        ws_port=(args.ws_port or None),
     )
 
     try:

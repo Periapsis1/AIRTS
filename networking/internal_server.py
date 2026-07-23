@@ -39,6 +39,9 @@ class InternalServer:
         broadcast_interval: int = 2,
         first_player_id: int | None = None,
         existing_host: GameHost | None = None,
+        ws_port: int | None = None,
+        ai_choices: dict | None = None,
+        static_config: dict | None = None,
     ):
         self._host_name = host_name
         self._max_players = max_players
@@ -58,6 +61,9 @@ class InternalServer:
                 max_players=max_players,
                 broadcast_interval=broadcast_interval,
                 first_player_id=first_player_id if first_player_id is not None else (2 if max_players == 1 else 1),
+                ws_port=ws_port,
+                ai_choices=ai_choices,
+                static_config=static_config,
             )
 
         self._result: dict[str, Any] | None = None
