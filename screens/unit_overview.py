@@ -235,7 +235,7 @@ class UnitOverviewScreen(BaseScreen):
         if passives:
             self._draw_passives(passives, content_x, content_w, table_bottom + 14)
 
-        pygame.display.flip()
+        self.present()
 
     def _draw_unit_symbol(self, utype: str, stats: dict,
                           cx: float, cy: float, scale: float):

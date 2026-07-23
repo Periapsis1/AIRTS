@@ -14,12 +14,18 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import queue
+import secrets
 import socket
 import threading
 import time
-from typing import Any
+import json
+from typing import Any, Awaitable, Callable
 
-from networking.protocol import send_message, recv_message, DEFAULT_PORT
+# How long a mid-game WS client's slot survives a dropped connection before
+# it is released for reuse (browser reconnect grace period).
+RECONNECT_GRACE_SECONDS = 60.0
+
+from networking.protocol import send_message, recv_message, DEFAULT_PORT, DEFAULT_WS_PORT
 from systems.commands import GameCommand, CommandQueue
 from systems.replay import (
     _entity_visual, _laser_visual, _obstacle_visual, _splash_visual,
@@ -30,11 +36,19 @@ from systems.replay import (
 
 @dataclasses.dataclass
 class ClientConnection:
-    """State for a single connected client."""
+    """State for a single connected client.
+
+    Transport-agnostic: ``send`` serializes+writes one message dict for this
+    connection (TCP uses the length-prefixed protocol, WS uses a JSON text
+    frame), and ``close`` tears the underlying transport down. The
+    frame-building code only ever touches ``outbound`` / ``send``, so it does
+    not care which transport backs a given client.
+    """
     player_id: int
     name: str = ""
-    reader: asyncio.StreamReader | None = None
-    writer: asyncio.StreamWriter | None = None
+    transport: str = "tcp"  # "tcp" | "ws"
+    send: Callable[[dict], Awaitable[None]] | None = None
+    close: Callable[[], Awaitable[None]] | None = None
     outbound: queue.Queue = dataclasses.field(default_factory=queue.Queue)
     connected: threading.Event = dataclasses.field(default_factory=threading.Event)
     ready: threading.Event = dataclasses.field(default_factory=threading.Event)
@@ -42,6 +56,9 @@ class ClientConnection:
     last_ping_id: int = 0
     last_ping_sent: float = 0.0
     ping_ms: int = 0
+    # Browser reconnect: a secret issued on join; a new WS connection that
+    # presents it mid-game is rebound to this slot instead of a fresh one.
+    token: str = ""
 
 
 class GameHost:
@@ -60,12 +77,22 @@ class GameHost:
         max_players: int = 1,
         broadcast_interval: int = RECORD_INTERVAL,
         first_player_id: int | None = None,
+        ws_port: int | None = None,
+        ai_choices: dict | None = None,
+        static_config: dict | None = None,
     ):
         self._command_queue = command_queue
         self._port = port
         self._host_name = host_name
         self._max_players = max_players
         self._broadcast_interval = broadcast_interval
+        # WebSocket listener (browser clients). None/0 disables it.
+        self._ws_port = ws_port
+        # Browser-only handshake extras (desktop TCP clients ignore them):
+        #   ai_choices  -> lobby AI dropdowns (registry can't be enumerated in JS)
+        #   static_config -> display constants (UNIT_TYPES, colors, timings, ...)
+        self._ai_choices = ai_choices
+        self._static_config = static_config
         self._pending_sounds: list[str] = []
         self._pending_deaths: list[dict] = []
         self._pending_chats: list[dict] = []
@@ -87,6 +114,11 @@ class GameHost:
         self._running = True
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+
+        # True between game_start and game_over/return_to_lobby — gates the
+        # WS reconnect grace period (a lobby disconnect frees the slot as
+        # before; a mid-game disconnect holds it for RECONNECT_GRACE_SECONDS).
+        self._game_in_progress = False
 
         # Lobby settings (broadcast to clients when changed)
         self._lobby_settings: dict | None = None
@@ -225,6 +257,9 @@ class GameHost:
         team_visibility: dict | None = None,
         player_team: dict[int, int] | None = None,
         metal_spots: list | None = None,
+        server_tick_ms: float = 0.0,
+        server_tick_cpu_ms: float = 0.0,
+        server_tps: float = 0.0,
     ) -> None:
         """Build a visual state frame and queue it for sending (every broadcast_interval).
 
@@ -294,6 +329,9 @@ class GameHost:
                     "entities": ent_visuals,
                     "lasers": lf_list,
                     "winner": winner,
+                    "srv_ms": round(server_tick_ms, 2),
+                    "srv_cpu_ms": round(server_tick_cpu_ms, 2),
+                    "srv_tps": round(server_tps, 1),
                 }
                 if splash_list:
                     frame["splashes"] = splash_list
@@ -332,6 +370,9 @@ class GameHost:
                 "entities": ent_visuals,
                 "lasers": lf_list,
                 "winner": winner,
+                "srv_ms": round(server_tick_ms, 2),
+                "srv_cpu_ms": round(server_tick_cpu_ms, 2),
+                "srv_tps": round(server_tps, 1),
             }
             if splash_list:
                 frame["splashes"] = splash_list
@@ -412,12 +453,14 @@ class GameHost:
             msg["team_colors"] = {str(k): v for k, v in team_colors.items()}
         if spectators:
             msg["spectators"] = sorted(int(p) for p in spectators)
+        self._game_in_progress = True
         with self._clients_lock:
             for c in self._clients.values():
                 c.outbound.put(msg)
 
     def send_game_over(self, winner: int, stats: dict | None = None) -> None:
         """Send game_over notification with optional stats."""
+        self._game_in_progress = False
         msg: dict[str, Any] = {"msg": "game_over", "winner": winner}
         if stats is not None:
             msg["stats"] = stats
@@ -427,6 +470,7 @@ class GameHost:
 
     def send_return_to_lobby(self) -> None:
         """Notify clients that the server is returning to the lobby."""
+        self._game_in_progress = False
         msg = {"msg": "return_to_lobby"}
         with self._clients_lock:
             for c in self._clients.values():
@@ -440,6 +484,7 @@ class GameHost:
         stale entries are removed).  For dedicated-server / online games the
         clients stay connected, so we only drain queues.
         """
+        self._game_in_progress = False
         if clear_clients:
             self._next_player_id = self._first_player_id
             self._freed_player_ids.clear()
@@ -495,6 +540,26 @@ class GameHost:
             self._bound_port = self._port
         self._bound_event.set()
 
+        # Optional WebSocket listener for browser clients, on a separate port.
+        # Shares this event loop, _clients dict, and command/outbound queues
+        # with the TCP server above. Disabled when ws_port is None/0.
+        ws_server = None
+        if self._ws_port:
+            try:
+                import websockets
+                ws_server = await websockets.serve(
+                    self._handle_ws, "0.0.0.0", self._ws_port,
+                    max_size=10_000_000,        # mirror the TCP 10MB cap
+                    compression="deflate",       # permessage-deflate
+                    ping_interval=20, ping_timeout=20,
+                )
+                print(f"[Server] WebSocket listening on port {self._ws_port}")
+            except ImportError:
+                print("[Server] 'websockets' not installed — browser clients "
+                      "disabled. Run: pip install websockets")
+            except Exception as exc:  # noqa: BLE001 — listener is best-effort
+                print(f"[Server] Failed to start WebSocket listener: {exc}")
+
         ping_task = asyncio.ensure_future(self._ping_loop())
 
         async with server:
@@ -507,6 +572,13 @@ class GameHost:
             await ping_task
         except (asyncio.CancelledError, Exception):
             pass
+
+        if ws_server is not None:
+            ws_server.close()
+            try:
+                await ws_server.wait_closed()
+            except Exception:
+                pass
 
     async def _ping_loop(self) -> None:
         """Periodically ping each client to measure RTT and broadcast a
@@ -546,66 +618,161 @@ class GameHost:
                     if c.connected.is_set():
                         c.outbound.put(msg)
 
-    async def _handle_client(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Handle a new client connection."""
-        # Determine player_id for this client (reuse freed IDs first)
+    # -- shared connection helpers (transport-agnostic) --------------------
+
+    def _alloc_connection(self, transport: str) -> ClientConnection | None:
+        """Atomically assign a player_id and register a connection slot.
+
+        Reuses freed IDs first. Returns None if the server is already full.
+        The caller fills in ``send``/``close`` and sets ``connected`` after.
+        """
         with self._clients_lock:
             if len(self._clients) >= self._max_players:
-                # Full — reject
-                try:
-                    await send_message(writer, {"msg": "rejected", "reason": "Server full"})
-                except Exception:
-                    pass
-                writer.close()
-                await writer.wait_closed()
-                return
+                return None
             if self._freed_player_ids:
                 player_id = self._freed_player_ids.pop(0)
             else:
                 player_id = self._next_player_id
                 self._next_player_id += 1
-            conn = ClientConnection(player_id=player_id, reader=reader, writer=writer)
+            conn = ClientConnection(player_id=player_id, transport=transport)
             self._clients[player_id] = conn
+            return conn
 
+    def _release_player_id(self, player_id: int) -> None:
+        """Remove a client and free its id for reuse by a future connection.
+
+        Only frees the id if the slot was actually registered — callers can
+        race (grace-timer release vs. handler cleanup) and a double-append
+        would hand the same id to two future clients.
+        """
+        with self._clients_lock:
+            if self._clients.pop(player_id, None) is not None:
+                self._freed_player_ids.append(player_id)
+
+    def _lobby_info_msg(self, player_id: int) -> dict:
+        """First message sent to a new client. Carries ai_choices for the
+        browser lobby (desktop clients ignore the extra key)."""
+        msg = {
+            "msg": "lobby_info",
+            "client_player_id": player_id,
+            "host_name": self._host_name,
+        }
+        if self._ai_choices is not None:
+            msg["ai_choices"] = self._ai_choices
+        return msg
+
+    def _dispatch_inbound(self, msg: dict, player_id: int) -> None:
+        """Handle one decoded inbound message from a client. Shared by the TCP
+        and WebSocket recv loops so both transports behave identically."""
+        msg_type = msg.get("msg")
+        if msg_type == "command":
+            cmd_data = msg.get("command", "")
+            try:
+                cmd = GameCommand.deserialize(cmd_data)
+                # Force player_id to this client's slot for security
+                cmd.player_id = player_id
+                self._inbound_commands.put(cmd)
+            except Exception:
+                pass
+        elif msg_type == "start_game":
+            self._start_game_queue.put(msg.get("config", {}))
+        elif msg_type == "lobby_settings":
+            # Relay lobby settings to all OTHER clients (not back to sender)
+            settings = {k: v for k, v in msg.items() if k != "msg"}
+            self._lobby_settings = settings
+            relay_msg = {"msg": "lobby_settings", **settings}
+            with self._clients_lock:
+                for pid, c in self._clients.items():
+                    if pid != player_id and c.connected.is_set():
+                        c.outbound.put(relay_msg)
+        elif msg_type == "pong":
+            pong_id = msg.get("id", -1)
+            with self._clients_lock:
+                c = self._clients.get(player_id)
+                if (c is not None
+                        and c.last_ping_id == pong_id
+                        and c.last_ping_sent > 0):
+                    c.ping_ms = int(
+                        (time.monotonic() - c.last_ping_sent) * 1000
+                    )
+                    # Mark "no outstanding ping" so the next loop tick
+                    # doesn't mistake a healthy connection for a stall.
+                    c.last_ping_sent = 0.0
+
+    async def _post_join(self, conn: ClientConnection) -> None:
+        """Common steps after a client's join is received: send static config
+        (browser-only) then broadcast the updated roster + settings."""
+        if self._static_config is not None and conn.send is not None:
+            try:
+                await conn.send({"msg": "server_config", "config": self._static_config})
+            except Exception:
+                pass
+        await self._broadcast_lobby_status()
+        self.broadcast_lobby_settings()
+
+    async def _run_client_loops(
+        self, conn: ClientConnection, recv_coro: Awaitable[None],
+    ) -> None:
+        """Run a client's recv loop and the shared send loop concurrently,
+        cancelling the survivor when either exits."""
+        recv_task = asyncio.ensure_future(recv_coro)
+        send_task = asyncio.ensure_future(self._send_loop(conn))
+        try:
+            await asyncio.wait(
+                [recv_task, send_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (recv_task, send_task):
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+    # -- TCP transport -----------------------------------------------------
+
+    async def _handle_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Handle a new TCP (desktop) client connection."""
+        conn = self._alloc_connection("tcp")
+        if conn is None:
+            try:
+                await send_message(writer, {"msg": "rejected", "reason": "Server full"})
+            except Exception:
+                pass
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return
+
+        player_id = conn.player_id
+
+        async def _tcp_close() -> None:
+            writer.close()
+
+        conn.send = lambda d: send_message(writer, d)
+        conn.close = _tcp_close
         conn.connected.set()
 
         try:
-            # Send lobby info
-            await send_message(writer, {
-                "msg": "lobby_info",
-                "client_player_id": player_id,
-                "host_name": self._host_name,
-            })
+            await conn.send(self._lobby_info_msg(player_id))
 
             # Wait for join
             msg = await recv_message(reader)
             if msg and msg.get("msg") == "join":
                 conn.name = msg.get("player_name", "Client")
                 conn.ready.set()
-                print(f"[Server] Player '{conn.name}' connected (id={player_id})")
+                print(f"[Server] Player '{conn.name}' connected (id={player_id}, tcp)")
 
-            # Broadcast lobby status and settings to all clients
-            await self._broadcast_lobby_status()
-            self.broadcast_lobby_settings()
-
-            # Run send/recv concurrently — cancel the other when one exits
-            recv_task = asyncio.ensure_future(self._recv_loop(reader, player_id))
-            send_task = asyncio.ensure_future(self._send_loop(writer, conn.outbound))
-
-            done, pending = await asyncio.wait(
-                [recv_task, send_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            await self._post_join(conn)
+            await self._run_client_loops(conn, self._recv_loop(reader, player_id))
 
         except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
             pass
@@ -614,9 +781,7 @@ class GameHost:
                 print(f"[Server] Player '{conn.name}' disconnected (id={player_id})")
             conn.connected.clear()
             conn.ready.clear()
-            with self._clients_lock:
-                self._clients.pop(player_id, None)
-                self._freed_player_ids.append(player_id)
+            self._release_player_id(player_id)
             writer.close()
             # Notify remaining clients about the disconnection
             try:
@@ -625,7 +790,7 @@ class GameHost:
                 pass
 
     async def _recv_loop(self, reader: asyncio.StreamReader, player_id: int) -> None:
-        """Receive commands from a specific client."""
+        """Receive and dispatch messages from a specific TCP client."""
         while self._running:
             try:
                 msg = await asyncio.wait_for(recv_message(reader), timeout=0.5)
@@ -635,52 +800,176 @@ class GameHost:
                 break
             if msg is None:
                 break
-            msg_type = msg.get("msg")
-            if msg_type == "command":
-                cmd_data = msg.get("command", "")
-                try:
-                    cmd = GameCommand.deserialize(cmd_data)
-                    # Force player_id to this client's slot for security
-                    cmd.player_id = player_id
-                    self._inbound_commands.put(cmd)
-                except Exception:
-                    pass
-            elif msg_type == "start_game":
-                self._start_game_queue.put(msg.get("config", {}))
-            elif msg_type == "lobby_settings":
-                # Relay lobby settings to all OTHER clients (not back to sender)
-                settings = {k: v for k, v in msg.items() if k != "msg"}
-                self._lobby_settings = settings
-                relay_msg = {"msg": "lobby_settings", **settings}
-                with self._clients_lock:
-                    for pid, c in self._clients.items():
-                        if pid != player_id and c.connected.is_set():
-                            c.outbound.put(relay_msg)
-            elif msg_type == "pong":
-                pong_id = msg.get("id", -1)
-                with self._clients_lock:
-                    c = self._clients.get(player_id)
-                    if (c is not None
-                            and c.last_ping_id == pong_id
-                            and c.last_ping_sent > 0):
-                        c.ping_ms = int(
-                            (time.monotonic() - c.last_ping_sent) * 1000
-                        )
-                        # Mark "no outstanding ping" so the next loop tick
-                        # doesn't mistake a healthy connection for a stall.
-                        c.last_ping_sent = 0.0
+            self._dispatch_inbound(msg, player_id)
 
-    async def _send_loop(self, writer: asyncio.StreamWriter, outbound: queue.Queue) -> None:
-        """Send queued state frames to a specific client."""
+    # -- WebSocket transport (browser clients) -----------------------------
+
+    async def _handle_ws(self, ws, *args) -> None:
+        """Handle a new WebSocket (browser) client connection.
+
+        Mirrors _handle_client but uses JSON text frames: the WebSocket layer
+        frames messages (no 4-byte length prefix) and permessage-deflate
+        handles compression (no manual zlib/"Z"). Feeds the same _clients dict
+        and command/outbound queues as the TCP path. (``*args`` absorbs the
+        legacy ``path`` argument removed from the handler signature in
+        websockets v11.)
+        """
+        # Allocation may fail while the server is "full" only because a
+        # disconnected player's slot is being held for reconnect — so even
+        # then, give the socket a chance to present its reconnect token.
+        conn = self._alloc_connection("ws")
+        provisional_id = conn.player_id if conn is not None else 0
+
+        async def _ws_close() -> None:
+            await ws.close()
+
+        def ws_send(d: dict) -> Awaitable[None]:
+            return ws.send(json.dumps(d, separators=(",", ":")))
+
+        try:
+            await ws_send(self._lobby_info_msg(provisional_id))
+
+            # Wait for join
+            raw = await ws.recv()
+            msg = json.loads(raw)
+            if not (isinstance(msg, dict) and msg.get("msg") == "join"):
+                return  # protocol violation — cleanup in finally
+
+            # -- reconnect path: rebind this socket to the held slot --------
+            token = msg.get("reconnect_token", "")
+            old = self._find_reconnect_conn(token) if token else None
+            if old is not None:
+                if conn is not None:
+                    self._release_player_id(conn.player_id)
+                conn = old
+                conn.send = ws_send
+                conn.close = _ws_close
+                conn.connected.set()
+                conn.ready.set()
+                print(f"[Server] Player '{conn.name}' reconnected "
+                      f"(id={conn.player_id}, ws)")
+                # Re-send identity + config; the next broadcast delivers a
+                # full state frame, which is all the resync a client needs.
+                await ws_send(self._lobby_info_msg(conn.player_id))
+                await self._post_join(conn)
+                await self._run_client_loops(
+                    conn, self._recv_loop_ws(ws, conn.player_id))
+                return
+
+            # -- fresh join --------------------------------------------------
+            if conn is None:
+                await ws_send({"msg": "rejected", "reason": "Server full"})
+                return
+
+            conn.send = ws_send
+            conn.close = _ws_close
+            conn.connected.set()
+            conn.name = msg.get("player_name", "Client")
+            conn.ready.set()
+            conn.token = secrets.token_hex(16)
+            print(f"[Server] Player '{conn.name}' connected "
+                  f"(id={conn.player_id}, ws)")
+            # Browser-only: reconnect token (desktop TCP never gets one).
+            await ws_send({"msg": "session", "token": conn.token})
+
+            await self._post_join(conn)
+            await self._run_client_loops(conn, self._recv_loop_ws(ws, conn.player_id))
+
+        except Exception:
+            # ConnectionClosed / malformed JSON / etc. — fall through to cleanup.
+            pass
+        finally:
+            # Only clean up if this handler still owns the slot: after a
+            # rebind, conn.send belongs to the newer socket's handler and the
+            # old handler must not clear its state.
+            if conn is not None and conn.send is ws_send:
+                if conn.name:
+                    print(f"[Server] Player '{conn.name}' disconnected "
+                          f"(id={conn.player_id})")
+                conn.connected.clear()
+                conn.ready.clear()
+                if self._game_in_progress and conn.token:
+                    # Hold the slot so the browser can reconnect mid-game.
+                    asyncio.ensure_future(self._grace_release(conn))
+                else:
+                    self._release_player_id(conn.player_id)
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            try:
+                await self._broadcast_lobby_status()
+            except Exception:
+                pass
+
+    def _find_reconnect_conn(self, token: str) -> ClientConnection | None:
+        """Find the disconnected WS slot matching a client's reconnect token."""
+        if not token or not isinstance(token, str):
+            return None
+        with self._clients_lock:
+            for c in self._clients.values():
+                if (c.transport == "ws" and c.token
+                        and not c.connected.is_set()
+                        and secrets.compare_digest(c.token, token)):
+                    return c
+        return None
+
+    async def _grace_release(self, conn: ClientConnection) -> None:
+        """Release a held slot if its player hasn't reconnected in time."""
+        try:
+            await asyncio.sleep(RECONNECT_GRACE_SECONDS)
+        except asyncio.CancelledError:
+            return
+        if conn.connected.is_set():
+            return  # player came back
+        with self._clients_lock:
+            if self._clients.get(conn.player_id) is not conn:
+                return  # slot was already released / replaced
+        print(f"[Server] Reconnect window expired for '{conn.name}' "
+              f"(id={conn.player_id})")
+        self._release_player_id(conn.player_id)
+        try:
+            await self._broadcast_lobby_status()
+        except Exception:
+            pass
+
+    async def _recv_loop_ws(self, ws, player_id: int) -> None:
+        """Receive and dispatch messages from a WebSocket client."""
         while self._running:
             try:
-                frame = outbound.get_nowait()
+                raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break  # ConnectionClosed and friends
+            if raw is None:
+                break
+            try:
+                msg = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(msg, dict):
+                self._dispatch_inbound(msg, player_id)
+
+    # -- shared send loop --------------------------------------------------
+
+    async def _send_loop(self, conn: ClientConnection) -> None:
+        """Send queued state frames to a client over whichever transport backs
+        it (``conn.send``). Used identically by TCP and WebSocket clients."""
+        while self._running:
+            try:
+                frame = conn.outbound.get_nowait()
             except queue.Empty:
                 await asyncio.sleep(0.005)
                 continue
+            if conn.send is None:
+                break
             try:
-                await send_message(writer, frame)
-            except (ConnectionError, OSError):
+                await conn.send(frame)
+            except Exception:
+                # Any send failure means the connection is dead — exit so the
+                # handler can clean up (covers ConnectionError/OSError and the
+                # WebSocket ConnectionClosed family).
                 break
 
     async def _broadcast_lobby_status(self) -> None:
@@ -691,9 +980,9 @@ class GameHost:
                 for pid, c in self._clients.items()
                 if c.connected.is_set()
             }
-            writers = [
-                c.writer for c in self._clients.values()
-                if c.connected.is_set() and c.writer is not None
+            conns = [
+                c for c in self._clients.values()
+                if c.connected.is_set() and c.send is not None
             ]
 
         msg = {
@@ -702,9 +991,9 @@ class GameHost:
             "max_players": self._max_players,
             "host_name": self._host_name,
         }
-        for w in writers:
+        for c in conns:
             try:
-                await send_message(w, msg)
+                await c.send(msg)
             except Exception:
                 pass
 

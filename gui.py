@@ -69,6 +69,12 @@ def _display_name(unit_type: str) -> str:
 
 _T2_CHEVRON_COLOR = (255, 220, 60)
 
+# Group-grid symbol cache — one pre-rendered tile per
+# (unit_type, color, is_cc, is_t2) combination. A full army of 30 soldiers
+# collapses to one cache entry, blitted 30 times instead of 30 draw-path
+# invocations. Rebuilt lazily on demand.
+_group_symbol_cache: dict[tuple, pygame.Surface] = {}
+
 
 def _draw_t2_chevron(screen: pygame.Surface, x: int, y: int, size: int = 6):
     """Draw a small yellow upward chevron (^) at the given position."""
@@ -543,6 +549,45 @@ def _draw_single_info(screen: pygame.Surface, r: pygame.Rect, unit,
             pygame.draw.rect(screen, bar_color, (r.left, bar_y, fill_w, bar_h))
 
 
+def _get_group_symbol_tile(unit_type: str, color: tuple,
+                           is_cc: bool, is_t2: bool,
+                           bs: int) -> pygame.Surface:
+    """Return a cached (bs × bs) tile with the box, symbol, and T2 chevron.
+
+    All per-unit drawing that only depends on (unit_type, color, is_cc, is_t2)
+    is baked in. Callers just blit and then overlay a per-frame HP bar.
+    """
+    key = (unit_type, tuple(color), is_cc, is_t2, bs)
+    tile = _group_symbol_cache.get(key)
+    if tile is not None:
+        return tile
+
+    tile = pygame.Surface((bs, bs), pygame.SRCALPHA)
+    full = pygame.Rect(0, 0, bs, bs)
+    pygame.draw.rect(tile, _GROUP_BOX_BG, full)
+    pygame.draw.rect(tile, _GROUP_BOX_BORDER, full, 1)
+
+    cx, cy = bs // 2, bs // 2
+    if is_cc:
+        pts = hexagon_points(bs * 0.3)
+        tp = [(cx + px, cy + py) for px, py in pts]
+        pygame.draw.polygon(tile, color, tp)
+    else:
+        sym = UNIT_TYPES.get(unit_type, {}).get("symbol")
+        if sym is not None:
+            sc = bs / 42.0
+            pts = [(cx + px * sc, cy + py * sc) for px, py in sym]
+            pygame.draw.polygon(tile, color, pts)
+        else:
+            pygame.draw.circle(tile, color, (cx, cy), bs // 5)
+
+    if is_t2:
+        _draw_t2_chevron(tile, bs - 4, 4, size=5)
+
+    _group_symbol_cache[key] = tile
+    return tile
+
+
 def _draw_group_grid(screen: pygame.Surface, r: pygame.Rect,
                      selected: list):
     cf = _font(16)
@@ -563,31 +608,15 @@ def _draw_group_grid(screen: pygame.Surface, r: pygame.Rect,
         if by + bs > r.bottom:
             break
 
-        box = pygame.Rect(bx, by, bs, bs)
-        pygame.draw.rect(screen, _GROUP_BOX_BG, box)
-        pygame.draw.rect(screen, _GROUP_BOX_BORDER, box, 1)
-
-        cx, cy = box.centerx, box.centery
-        stats = UNIT_TYPES.get(unit.unit_type, {})
-        sym = stats.get("symbol")
         base_color = getattr(unit, "_base_color", unit.color)
+        tile = _get_group_symbol_tile(
+            unit.unit_type, base_color,
+            _is_cc(unit), getattr(unit, "is_t2", False),
+            bs,
+        )
+        screen.blit(tile, (bx, by))
 
-        if _is_cc(unit):
-            pts = hexagon_points(bs * 0.3)
-            tp = [(cx + px, cy + py) for px, py in pts]
-            pygame.draw.polygon(screen, base_color, tp)
-        elif sym is not None:
-            sc = bs / 42.0
-            pts = [(cx + px * sc, cy + py * sc) for px, py in sym]
-            pygame.draw.polygon(screen, base_color, pts)
-        else:
-            pygame.draw.circle(screen, base_color, (cx, cy), bs // 5)
-
-        # T2 chevron indicator
-        if getattr(unit, "is_t2", False):
-            _draw_t2_chevron(screen, box.right - 4, box.top + 4, size=5)
-
-        # hp bar below box
+        # hp bar below box (per-frame — HP changes every tick)
         hp = unit.hp / unit.max_hp if unit.max_hp > 0 else 0
         hy = by + bs + 1
         pygame.draw.rect(screen, HEALTH_BAR_BG, (bx, hy, bs, _GROUP_HP_H))

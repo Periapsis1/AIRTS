@@ -389,7 +389,7 @@ class ResultsScreen(BaseScreen):
         self._btn.draw(self.screen)
         self._replay_btn.draw(self.screen)
         self._debug_btn.draw(self.screen)
-        pygame.display.flip()
+        self.present()
 
     def _header_text(self) -> str:
         """Return header string: 'Draw', '{team_name} Victory', or 'Defeat'."""

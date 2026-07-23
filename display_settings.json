@@ -2,5 +2,6 @@
   "display_mode": "windowed_fullscreen",
   "color_mode": "player",
   "selection_mode": "rectangle",
-  "movement_smoothing": true
+  "movement_smoothing": true,
+  "renderer_mode": "gpu"
 }

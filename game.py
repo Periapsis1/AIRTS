@@ -5,6 +5,7 @@ import math
 import random
 import sys
 import time
+from collections import deque
 from typing import Any
 import pygame
 import pygame.sndarray
@@ -2081,7 +2082,7 @@ class Game:
         if self._esc_menu_open:
             self._draw_esc_menu()
 
-        pygame.display.flip()
+        display_config.present_frame()
 
     def _draw_chat_overlay(self) -> None:
         """Draw chat messages near the top-left of the game area.
@@ -2653,7 +2654,7 @@ class Game:
                     self.screen.blit(self._headless_snap_surf, (snap_x, snap_y))
                 if self._draw_game_btn is not None:
                     self._draw_game_btn.draw(self.screen)
-                pygame.display.flip()
+                display_config.present_frame()
         else:
             # Grab the mouse at game start
             self._set_mouse_grab(True)
@@ -2805,6 +2806,21 @@ class Game:
         tick_interval = FIXED_DT / 1.0  # ~16.67ms at 60 ticks/sec
         next_tick = time.perf_counter()
 
+        # Server performance metrics — rolling window of the last ~1 second
+        # of ticks. Published as self._server_tick_ms (mean wall-clock step
+        # duration), self._server_tick_cpu_ms (mean CPU-time step
+        # duration — thread_time), and self._server_tps (actual ticks per
+        # real second). Clients read these via the state-frame broadcast.
+        # If wall >> CPU, the server thread is being starved of CPU by GIL
+        # contention from the client (or other threads); if wall ≈ CPU,
+        # the step is genuinely doing that much computation.
+        tick_ms_buf: deque[float] = deque(maxlen=60)
+        tick_cpu_ms_buf: deque[float] = deque(maxlen=60)
+        tick_ts_buf: deque[float] = deque(maxlen=61)
+        self._server_tick_ms = 0.0
+        self._server_tick_cpu_ms = 0.0
+        self._server_tps = 0.0
+
         try:
             while self.running and self._phase == "playing":
                 now = time.perf_counter()
@@ -2847,7 +2863,23 @@ class Game:
 
                 next_tick += effective_interval
 
+                step_start = time.perf_counter()
+                step_start_cpu = time.thread_time()
                 self.step(FIXED_DT)
+                step_end_cpu = time.thread_time()
+                step_end = time.perf_counter()
+
+                tick_ms_buf.append((step_end - step_start) * 1000.0)
+                tick_cpu_ms_buf.append((step_end_cpu - step_start_cpu) * 1000.0)
+                tick_ts_buf.append(step_end)
+                self._server_tick_ms = sum(tick_ms_buf) / len(tick_ms_buf)
+                self._server_tick_cpu_ms = (
+                    sum(tick_cpu_ms_buf) / len(tick_cpu_ms_buf)
+                )
+                if len(tick_ts_buf) >= 2:
+                    span = tick_ts_buf[-1] - tick_ts_buf[0]
+                    if span > 0:
+                        self._server_tps = (len(tick_ts_buf) - 1) / span
 
                 if post_step:
                     post_step(self._iteration, self.entities,

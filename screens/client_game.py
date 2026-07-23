@@ -35,6 +35,7 @@ from ui.widgets import _get_font, Slider, Button, draw_countdown_overlay
 import gui
 from gui_adapter import wrap_entities
 from systems.replay import normalize_cp
+from systems.client_stats import ClientFrameStats
 from systems.chat import (
     ChatLog, ChatMessage, FloatingChatText,
     CHAT_DISPLAY_COUNT, CHAT_DISPLAY_DURATION, MAX_MESSAGE_LENGTH,
@@ -122,6 +123,79 @@ class ClientGameScreen(BaseScreen):
         self._game_area = pygame.Rect(0, self._header_h, self.width,
                                       self.height - self._header_h - self._hud_h)
 
+        # Detect GPU renderer mode. In GPU mode we replace `self.screen`
+        # with an SRCALPHA scratch so non-world draws (labels, HUD,
+        # border) become opaque pixels on a transparent canvas. Areas
+        # left transparent let the GPU-composed world + overlays show
+        # through at `present()` time. Deferred until after the layout
+        # rects are built since texture sizing depends on game_area.
+        self._gpu_mode = display_config.renderer_mode == "gpu"
+        if self._gpu_mode:
+            self.screen = pygame.Surface(
+                (self.width, self.height), pygame.SRCALPHA,
+            )
+            _ctx = display_config.gpu_context()
+            ga_size = (self._game_area.w, self._game_area.h)
+            self._scratch_tex = _ctx.streaming_texture(
+                (self.width, self.height),
+            )
+            self._ws_tex = _ctx.streaming_texture((mw, mh))
+            # First-frame flag: ws_tex is uninitialized at first, so we
+            # do one full viewport upload before switching to the cheap
+            # dirty-rect upload path.
+            self._ws_tex_initialized: bool = False
+            self._fog_tex = _ctx.streaming_texture(ga_size)
+            self._fx_tex = _ctx.streaming_texture(ga_size)
+            self._arc_tex = _ctx.streaming_texture(ga_size)
+            # Alpha blending on textures that get drawn as overlays so
+            # their transparency composes correctly. BLENDMODE_BLEND is
+            # exposed on the pygame top-level module, not on
+            # pygame._sdl2.video.
+            for _t in (self._scratch_tex, self._fog_tex,
+                       self._fx_tex, self._arc_tex):
+                _t.blend_mode = pygame.BLENDMODE_BLEND
+
+            # Scratch upload optimization state. Rather than uploading the
+            # full-screen SRCALPHA scratch every frame we compute a dirty
+            # bbox for game-area chrome (labels, floating chats, overlays)
+            # and upload only header + HUD strips + that bbox. Union with
+            # the previous frame's bbox ensures stale pixels get cleared.
+            self._header_strip = pygame.Rect(0, 0, self.width, self._header_h)
+            self._hud_strip = pygame.Rect(
+                0, self.height - self._hud_h,
+                self.width, self._hud_h,
+            )
+            self._scratch_game_bbox: pygame.Rect | None = None
+            self._last_scratch_game_bbox: pygame.Rect | None = None
+            # Set to True when a full-screen overlay is active and scratch
+            # content outside the normal bbox needs uploading.
+            self._scratch_needs_full_game: bool = False
+            # Stores the metallic border rect each frame so present() can
+            # draw it directly via renderer primitives (avoiding a draw on
+            # the scratch surface which would keep it dirty every frame).
+            self._border_rect: pygame.Rect | None = None
+
+            # HUD bar gets its own SRCALPHA surface + streaming texture.
+            # gui.draw_hud targets _hud_surface instead of the scratch,
+            # and we only re-render + re-upload when proxies or selection
+            # actually change (≈10 Hz state-frame rate, not every render
+            # frame). Minimap camera-viewport rect updates at this rate
+            # too — acceptable lag during camera pan.
+            self._hud_surface = pygame.Surface(
+                (self.width, self._hud_h), pygame.SRCALPHA,
+            )
+            self._hud_tex = _ctx.streaming_texture(
+                (self.width, self._hud_h),
+            )
+            self._hud_tex.blend_mode = pygame.BLENDMODE_BLEND
+            # Initially dirty so the first frame draws the HUD.
+            self._hud_surface_dirty: bool = True
+            # Set True when a full-screen overlay draws on the scratch in
+            # the HUD strip (ESC menu mostly) — forces the HUD strip to
+            # also upload from the main scratch so the overlay pixels
+            # composite correctly on top of _hud_tex.
+            self._scratch_overlay_covers_hud: bool = False
+
         # World surface and camera
         self._world_surface = pygame.Surface((mw, mh))
         self._bg_surface, self._bg_tile = self._build_background(mw, mh)
@@ -132,6 +206,22 @@ class ClientGameScreen(BaseScreen):
 
         # State from host
         self._obstacles: list[dict] = client.obstacles
+
+        # Obstacles are static for the match — bake them into the background
+        # surface once here so the per-frame `bg` pass is a single cached
+        # blit (no per-obstacle draw calls).
+        for _obs in self._obstacles:
+            _c = tuple(_obs.get("c", [120, 120, 120]))
+            if _obs["shape"] == "rect":
+                _x, _y, _w, _h = _obs["x"], _obs["y"], _obs["w"], _obs["h"]
+                pygame.draw.rect(self._bg_surface, _c, (_x, _y, _w, _h))
+                pygame.draw.rect(self._bg_surface, OBSTACLE_OUTLINE,
+                                 (_x, _y, _w, _h), 1)
+            elif _obs["shape"] == "circle":
+                _cx, _cy, _r = int(_obs["x"]), int(_obs["y"]), int(_obs["r"])
+                pygame.draw.circle(self._bg_surface, _c, (_cx, _cy), _r)
+                pygame.draw.circle(self._bg_surface, OBSTACLE_OUTLINE,
+                                   (_cx, _cy), _r, 1)
         self._entities: list[dict] = []
         self._lasers: list[list] = []
         self._tick: int = 0
@@ -164,13 +254,68 @@ class ClientGameScreen(BaseScreen):
         # Selection surface for circle draw
         self._selection_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
 
-        # Fog surfaces
-        self._fog_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
-        self._fog_border = pygame.Surface((mw, mh))
+        # Fog / effects surfaces — sized to the game area (viewport), not to
+        # the full map. Overlays render in screen coords and blit directly to
+        # self.screen after camera.apply, so world_surface never gets dirtied
+        # by fog or fx. This unlocks a much cheaper bg pass (dirty-rect
+        # restoration possible) and cuts fog cost at non-1x zoom since there
+        # is no per-frame scale of a map-sized SRCALPHA surface.
+        gaw, gah = self._game_area.w, self._game_area.h
+        self._fog_surface = pygame.Surface((gaw, gah), pygame.SRCALPHA)
+        self._fog_border = pygame.Surface((gaw, gah))
         self._fog_border.set_colorkey((0, 0, 0))
+        # Pre-baked circle brushes keyed by (screen) radius.
+        # * `_los_brushes` — opaque alpha=255 (hard fog / spectator path).
+        # * `_los_soft_brushes` — radial alpha gradient, opaque at center
+        #   fading to 0 at the edge. Used by soft fog; when blitted with
+        #   BLEND_RGBA_SUB against FOG_ALPHA fog, the soft edge produces a
+        #   smooth transition without any explicit blur pass. Replaces the
+        #   old half-res + smoothscale upsample approach.
+        self._los_brushes: dict[int, pygame.Surface] = {}
+        self._los_soft_brushes: dict[int, pygame.Surface] = {}
+        # Cache key for composited fog (snapped screen positions, etc.).
+        # Skips the full rebuild when fog inputs haven't changed.
+        self._fog_cache_key: tuple | None = None
+        # Per-frame flags: set by each overlay pass when it has content to
+        # show this frame, read by the world-scope screen-blit step.
+        self._fog_ready: bool = False
+        self._fx_ready: bool = False
+        self._arc_ready: bool = False
+
+        # Dirty-rect tracking for bg restoration. Each frame records which
+        # regions of `_world_surface` were drawn on by entities / command
+        # arrows / etc.; the next frame's bg pass restores only those rects
+        # from `_bg_surface` instead of the whole viewport. Empty list =>
+        # first frame, fall back to viewport-wide restore.
+        self._last_dirty_rects: list[pygame.Rect] = []
 
         # Disconnect tracking
         self._disconnect_timer: float = 0.0
+
+        # Server performance metrics (reported via state frames)
+        self._server_tick_ms: float = 0.0
+        self._server_tick_cpu_ms: float = 0.0
+        self._server_tps: float = 0.0
+
+        # Client frame-time breakdown (F3 toggles the overlay)
+        self._frame_stats = ClientFrameStats()
+        self._show_perf: bool = False
+
+        # HUD proxy cache — rebuild only when the state-frame entities list
+        # swaps (≈10 Hz) instead of every render frame (60 Hz). Selection-only
+        # changes are patched in place without rebuilding.
+        self._hud_proxies: list | None = None
+        self._hud_proxies_entities: list | None = None
+        self._hud_proxies_selected: set[int] = set()
+
+        # ESC menu pre-rendered surfaces (overlay tint + title).
+        self._esc_menu_overlay: pygame.Surface | None = None
+        self._esc_menu_title: pygame.Surface | None = None
+
+        # Cached base arc points at facing=0, keyed by (fov_deg, screen_r).
+        # Per-unit draws only do cheap numpy rotate+translate on the
+        # cached array. No facing quantization — points stay continuous.
+        self._arc_base_cache: dict[tuple, np.ndarray] = {}
 
         # Enable T2 and upgrade tracking (from game_start message)
         self._enable_t2: bool = client.enable_t2
@@ -185,6 +330,16 @@ class ClientGameScreen(BaseScreen):
         self._phase: str = "warp_in"  # warp_in → playing → explode
         self._anim_timer: float = 0.0
         self._anim_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
+        # Viewport-sized SRCALPHA overlay buffers. Lasers and FOV arcs each
+        # get their own buffer so they don't stomp on each other's content.
+        # Rendered in screen coords and blitted directly to self.screen after
+        # camera.apply — world_surface is never touched by these passes.
+        self._fx_surface = pygame.Surface(
+            (self._game_area.w, self._game_area.h), pygame.SRCALPHA,
+        )
+        self._arc_surface = pygame.Surface(
+            (self._game_area.w, self._game_area.h), pygame.SRCALPHA,
+        )
         self._fragments: list[dict] = []
         self._splashes: list[dict] = []
         self._death_bursts: list[DeathBurst] = []
@@ -299,47 +454,51 @@ class ClientGameScreen(BaseScreen):
                 self._extrap_dt += dt
 
             # Poll for new state from host
-            frame = self._client.poll_state()
-            if frame:
-                msg_type = frame.get("msg")
-                if msg_type == "state":
-                    self._entities = frame.get("entities", [])
-                    self._lasers = frame.get("lasers", [])
-                    self._splashes = frame.get("splashes", [])
-                    self._tick = frame.get("tick", 0)
-                    self._winner = frame.get("winner", 0)
-                    self._disconnect_timer = 0.0
-                    # Play sounds from server events
-                    self._play_sound_events(frame.get("sounds", []))
-                    # Spawn death-burst particles for units that died this tick
-                    self._spawn_death_bursts(frame.get("deaths", []))
-                    # Recompute movement extrapolation state
-                    self._update_extrapolation(self._entities)
-                    # Rebuild T2 upgrade display from entity state
-                    self._refresh_t2_display()
-                    # Process chat events
-                    for ce in frame.get("chats", []):
-                        msg = ChatMessage(
-                            player_id=ce["pid"], player_name=ce["name"],
-                            team_id=ce["tid"], message=ce["msg"],
-                            mode=ce["mode"], tick=ce.get("tick", 0),
-                            timestamp=self._game_time,
-                        )
-                        self._chat_log.add_message(msg)
-                        # Spawn floating text above sender's CC
-                        for ent in self._entities:
-                            if ent.get("t") == "CC" and ent.get("pid") == ce["pid"]:
-                                color = PLAYER_COLORS[(ce["pid"] - 1) % len(PLAYER_COLORS)]
-                                self._floating_chats.append(FloatingChatText(
-                                    x=ent["x"], y=ent["y"] - 60,
-                                    message=ce["msg"], color=color,
-                                    player_name=ce["name"],
-                                ))
-                                break
-                elif msg_type == "game_over":
-                    self._winner = frame.get("winner", 0)
-            else:
-                self._disconnect_timer += dt
+            with self._frame_stats.scope("net"):
+                frame = self._client.poll_state()
+                if frame:
+                    msg_type = frame.get("msg")
+                    if msg_type == "state":
+                        self._entities = frame.get("entities", [])
+                        self._lasers = frame.get("lasers", [])
+                        self._splashes = frame.get("splashes", [])
+                        self._tick = frame.get("tick", 0)
+                        self._winner = frame.get("winner", 0)
+                        self._server_tick_ms = frame.get("srv_ms", 0.0)
+                        self._server_tick_cpu_ms = frame.get("srv_cpu_ms", 0.0)
+                        self._server_tps = frame.get("srv_tps", 0.0)
+                        self._disconnect_timer = 0.0
+                        # Play sounds from server events
+                        self._play_sound_events(frame.get("sounds", []))
+                        # Spawn death-burst particles for units that died this tick
+                        self._spawn_death_bursts(frame.get("deaths", []))
+                        # Recompute movement extrapolation state
+                        self._update_extrapolation(self._entities)
+                        # Rebuild T2 upgrade display from entity state
+                        self._refresh_t2_display()
+                        # Process chat events
+                        for ce in frame.get("chats", []):
+                            msg = ChatMessage(
+                                player_id=ce["pid"], player_name=ce["name"],
+                                team_id=ce["tid"], message=ce["msg"],
+                                mode=ce["mode"], tick=ce.get("tick", 0),
+                                timestamp=self._game_time,
+                            )
+                            self._chat_log.add_message(msg)
+                            # Spawn floating text above sender's CC
+                            for ent in self._entities:
+                                if ent.get("t") == "CC" and ent.get("pid") == ce["pid"]:
+                                    color = PLAYER_COLORS[(ce["pid"] - 1) % len(PLAYER_COLORS)]
+                                    self._floating_chats.append(FloatingChatText(
+                                        x=ent["x"], y=ent["y"] - 60,
+                                        message=ce["msg"], color=color,
+                                        player_name=ce["name"],
+                                    ))
+                                    break
+                    elif msg_type == "game_over":
+                        self._winner = frame.get("winner", 0)
+                else:
+                    self._disconnect_timer += dt
 
             # Phase transitions
             if self._phase == "warp_in" and self._anim_timer >= 3.0:
@@ -387,6 +546,12 @@ class ClientGameScreen(BaseScreen):
                 if event.type == pygame.QUIT:
                     self._client.stop()
                     return ScreenResult("quit")
+
+                # F3 toggles the frame-time breakdown overlay. Handled at the
+                # top so it works regardless of chat/escape-menu state.
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
+                    self._show_perf = not self._show_perf
+                    continue
 
                 # -- Chat input handling (must be before ESC handler) --------
                 if self._chat_input_active:
@@ -1373,152 +1538,579 @@ class ClientGameScreen(BaseScreen):
 
     # -- rendering ----------------------------------------------------------
 
+    def _mark_scratch_dirty(self, rect: pygame.Rect) -> None:
+        """Union *rect* into this frame's scratch game-area dirty bbox.
+
+        GPU-mode only; no-op in CPU mode. Callers pass rects in screen
+        coordinates; the rect is clipped to `_game_area` and unioned with
+        the running bbox.
+        """
+        if not self._gpu_mode:
+            return
+        clipped = rect.clip(self._game_area)
+        if clipped.w <= 0 or clipped.h <= 0:
+            return
+        if self._scratch_game_bbox is None:
+            self._scratch_game_bbox = clipped.copy()
+        else:
+            self._scratch_game_bbox.union_ip(clipped)
+
+    def _compute_scratch_game_bbox(self) -> pygame.Rect | None:
+        """Return the bbox (in screen coords) of scratch chrome inside
+        the game area this frame, or None if nothing was drawn there.
+
+        When a full-screen overlay is active (warp-in countdown, winner,
+        paused, chat input, ESC menu, perf overlay) fall back to the
+        full game_area — those overlays can cover arbitrary regions.
+        Otherwise derive the bbox conservatively from entity label
+        positions + floating chat trajectories + chat-log strip.
+
+        This is GPU-mode-only; `present()` uses the result to pick how
+        much of the scratch surface to upload to the GPU texture.
+        """
+        ga = self._game_area
+
+        # Fullscreen-ish overlays: upload the whole game_area.
+        if (self._phase == "warp_in"
+                or self._winner != 0
+                or (self._paused and self._is_local and not self._esc_menu_open)
+                or self._chat_input_active
+                or self._esc_menu_open
+                or self._show_perf):
+            return ga.copy()
+
+        bbox: pygame.Rect | None = None
+
+        def _u(r: pygame.Rect) -> None:
+            nonlocal bbox
+            c = r.clip(ga)
+            if c.w <= 0 or c.h <= 0:
+                return
+            if bbox is None:
+                bbox = c.copy()
+            else:
+                bbox.union_ip(c)
+
+        # Entity label region — ME bonus labels, team names above CCs.
+        # Labels render above the unit sprite; include margin for label
+        # height + health bar / selection ring below. Skip entities whose
+        # world rect is entirely outside the camera viewport (they
+        # wouldn't contribute any screen pixels anyway).
+        cam = self._camera
+        vp = cam.get_world_viewport_rect()
+        # Inflate the viewport slightly so a unit near the edge with an
+        # overhanging label still gets included.
+        vp_left = vp.left - 60
+        vp_right = vp.right + 60
+        vp_top = vp.top - 100
+        vp_bottom = vp.bottom + 60
+        for e in self._entities:
+            ex = e.get("x", 0)
+            ey = e.get("y", 0)
+            if ex < vp_left or ex > vp_right or ey < vp_top or ey > vp_bottom:
+                continue
+            sx, sy = cam.world_to_screen(ex, ey)
+            sx += ga.x
+            sy += ga.y
+            r = e.get("r", 20)
+            _u(pygame.Rect(
+                int(sx - r - 24), int(sy - r - 64),
+                int(r * 2 + 48), int(r * 2 + 84),
+            ))
+
+        # Floating chat text rises ~200 px from source.
+        for fc in self._floating_chats:
+            sx, sy = cam.world_to_screen(fc.x, fc.y)
+            sx += ga.x
+            sy += ga.y
+            _u(pygame.Rect(int(sx - 150), int(sy - 260), 300, 280))
+
+        # Chat log strip at top of game area when there are messages to
+        # fade out.
+        if self._chat_log.get_visible(self._game_time):
+            _u(pygame.Rect(ga.x + 6, ga.y + 4, 500, 140))
+
+        return bbox
+
+    def _time_op(self, name: str, fn) -> None:
+        """Run *fn* and record (op_name, wall_ms, cpu_ms) for diagnostics.
+
+        Used inside present() to instrument every Texture.update / draw /
+        present call. The biggest-wall op per frame is shown on the F3
+        panel as `gil_op` so we can see which specific operation is
+        holding the GIL and starving the server thread.
+        """
+        import time as _t
+        w0 = _t.perf_counter()
+        c0 = _t.thread_time()
+        fn()
+        w_ms = (_t.perf_counter() - w0) * 1000.0
+        c_ms = (_t.thread_time() - c0) * 1000.0
+        self._present_ops.append((name, w_ms, c_ms))
+
+    def present(self) -> None:
+        """Present the current frame.
+
+        CPU mode: defer to BaseScreen.present() (upload scratch to the
+        streaming texture in GPU compat, or pygame.display.flip() in pure
+        CPU).
+
+        GPU mode: compose the frame directly on the SDL2 renderer by
+        uploading the world and overlay surfaces as textures and drawing
+        them in layer order:
+
+            1. Clear renderer.
+            2. Draw tiled dead-space bg (covers the full game_area so the
+               areas beyond the map edge aren't transparent).
+            3. Upload world_surface → ws_tex, draw scaled to game_area
+               using the camera's viewport rect as srcrect (GPU scales).
+            4. Upload fog / fx / arc overlays, draw at game_area position.
+            5. Upload the scratch SRCALPHA surface → scratch_tex and draw
+               it on top (alpha-blended). Chrome drawn on scratch lands
+               on top; transparent regions within the game area let the
+               composed content show through.
+            6. Present.
+        """
+        if not self._gpu_mode:
+            super().present()
+            return
+
+        ctx = display_config.gpu_context()
+        renderer = ctx.renderer
+        ga = self._game_area
+        ga_dst = pygame.Rect(ga.x, ga.y, ga.w, ga.h)
+
+        # Per-op diagnostic. Records (name, wall_ms, cpu_ms) for every
+        # texture upload / draw / present call so we can identify which
+        # operation is the GIL hog for the server thread.
+        self._present_ops: list[tuple[str, float, float]] = []
+        self._time_op("clear", lambda: ctx.clear((0, 0, 0)))
+
+        # 1. Dead-space bg tile — cheap tiled draw against scaled tile
+        # texture. For now, reuse the CPU blit_screen_background into a
+        # scratch-less local surface and upload. This is not the final
+        # implementation (future phase will keep the scaled tile on GPU),
+        # but it preserves the dead-space look while we validate the
+        # world-scale path.
+        # Simpler interim: skip dead-space bg entirely — it only appears
+        # at the extreme zoom-out corners on large maps; most play time
+        # the world fills the game area so it's invisible anyway.
+
+        # 2. Scaled world via GPU. Upload only the regions of
+        # world_surface that ACTUALLY changed this frame — the union of
+        # last frame's bg-restore rects (which removed old entity
+        # pixels) and this frame's entity-draw rects. The texture
+        # retains stale pixels outside those regions, but by definition
+        # those regions didn't change so reusing them is correct.
+        # Texture.update is a synchronous CPU→GPU memcpy that holds the
+        # GIL; shrinking it directly reduces the time the server thread
+        # is starved each frame.
+        vp = self._camera.get_world_viewport_rect()
+        ws_rect = self._world_surface.get_rect()
+        src = vp.clip(ws_rect)
+        if src.w > 0 and src.h > 0:
+            if not self._ws_tex_initialized:
+                self._time_op("ws_tex.update(full)", lambda: self._ws_tex.update(
+                    self._world_surface.subsurface(src), area=src,
+                ))
+                self._ws_tex_initialized = True
+            else:
+                upload_rects: list[pygame.Rect] = []
+                for r_list in (self._last_dirty_rects, self._dirty_rects_new):
+                    for r in r_list:
+                        clip = r.clip(ws_rect)
+                        if clip.w > 0 and clip.h > 0:
+                            upload_rects.append(clip)
+                if upload_rects:
+                    union = upload_rects[0].copy()
+                    for r in upload_rects[1:]:
+                        union.union_ip(r)
+                    union = union.clip(ws_rect)
+                    if union.w > 0 and union.h > 0:
+                        _u_rect = union
+                        self._time_op(
+                            f"ws_tex.update({_u_rect.w}x{_u_rect.h})",
+                            lambda r=_u_rect: self._ws_tex.update(
+                                self._world_surface.subsurface(r), area=r,
+                            ),
+                        )
+            dst_x = ga.x + int((src.x - vp.x) * self._camera.zoom)
+            dst_y = ga.y + int((src.y - vp.y) * self._camera.zoom)
+            dst_w = int(src.w * self._camera.zoom)
+            dst_h = int(src.h * self._camera.zoom)
+            _dstrect = pygame.Rect(dst_x, dst_y, dst_w, dst_h)
+            self._time_op("ws_tex.draw", lambda: self._ws_tex.draw(
+                srcrect=src, dstrect=_dstrect,
+            ))
+
+        # 3. Overlay textures — each is viewport-sized and already in
+        # screen coords (phase-1 refactor put fog/fx/arc onto viewport
+        # surfaces). Draw in the same order as the CPU pipeline:
+        # arcs < lasers < fog.
+        if self._arc_ready:
+            self._time_op("arc_tex.update",
+                          lambda: self._arc_tex.update(self._arc_surface))
+            self._time_op("arc_tex.draw",
+                          lambda: self._arc_tex.draw(dstrect=ga_dst))
+        if self._fx_ready:
+            self._time_op("fx_tex.update",
+                          lambda: self._fx_tex.update(self._fx_surface))
+            self._time_op("fx_tex.draw",
+                          lambda: self._fx_tex.draw(dstrect=ga_dst))
+        if self._fog_ready:
+            if self._fog_tex_dirty:
+                self._time_op("fog_tex.update",
+                              lambda: self._fog_tex.update(self._fog_surface))
+            self._time_op("fog_tex.draw",
+                          lambda: self._fog_tex.draw(dstrect=ga_dst))
+
+        # 4. Metallic border via renderer primitives. Drawn as 3 nested
+        # 1-px rect outlines with the border colours. This lives on the
+        # renderer path so the scratch surface stays clean in the
+        # game-area border region (otherwise scratch is dirty every
+        # frame wherever the border crosses).
+        def _draw_border():
+            br = self._border_rect
+            for i, col in enumerate((_BORDER_OUTER, _BORDER_MID, _BORDER_INNER)):
+                r2 = br.inflate(-i * 2, -i * 2)
+                if r2.w <= 0 or r2.h <= 0:
+                    break
+                renderer.draw_color = (col[0], col[1], col[2], 255)
+                renderer.draw_rect(r2)
+        if self._border_rect is not None:
+            self._time_op("border", _draw_border)
+
+        # 5. HUD texture. Rendered onto _hud_surface by _draw_hud only
+        # when proxies/selection changed, so most frames just re-draw
+        # the existing texture without re-uploading.
+        if self._hud_surface_dirty:
+            self._time_op("hud_tex.update",
+                          lambda: self._hud_tex.update(self._hud_surface))
+            self._hud_surface_dirty = False
+        self._time_op("hud_tex.draw",
+                      lambda: self._hud_tex.draw(dstrect=self._hud_strip))
+
+        # 6. Chrome scratch on top (alpha-blended). Upload only the rects
+        # that changed this frame: header strip + game-area bbox + (HUD
+        # strip when a full-screen scratch overlay like the ESC menu
+        # darkens the HUD area). Full-game fallback when a large overlay
+        # is active is baked into `_compute_scratch_game_bbox`.
+        bbox_game = self._compute_scratch_game_bbox()
+        self._time_op(
+            "scratch.update(header)",
+            lambda: self._scratch_tex.update(
+                self.screen.subsurface(self._header_strip),
+                area=self._header_strip,
+            ),
+        )
+        if self._scratch_overlay_covers_hud or self._esc_menu_open:
+            self._time_op(
+                "scratch.update(hud)",
+                lambda: self._scratch_tex.update(
+                    self.screen.subsurface(self._hud_strip),
+                    area=self._hud_strip,
+                ),
+            )
+        upload_bbox: pygame.Rect | None = None
+        if bbox_game is not None:
+            upload_bbox = bbox_game.copy()
+        if self._last_scratch_game_bbox is not None:
+            if upload_bbox is None:
+                upload_bbox = self._last_scratch_game_bbox.copy()
+            else:
+                upload_bbox.union_ip(self._last_scratch_game_bbox)
+        if upload_bbox is not None:
+            upload_bbox = upload_bbox.clip(self._game_area)
+            if upload_bbox.w > 0 and upload_bbox.h > 0:
+                _ub = upload_bbox
+                self._time_op(
+                    f"scratch.update(bbox {_ub.w}x{_ub.h})",
+                    lambda r=_ub: self._scratch_tex.update(
+                        self.screen.subsurface(r), area=r,
+                    ),
+                )
+        self._last_scratch_game_bbox = bbox_game
+
+        self._time_op("scratch.draw", lambda: self._scratch_tex.draw())
+
+        self._time_op("renderer.present", lambda: ctx.present())
+
+        # Stash worst op for F3 panel display.
+        if self._present_ops:
+            self._present_worst = max(self._present_ops, key=lambda x: x[1])
+        else:
+            self._present_worst = None
+
     def _draw(self) -> None:
         ws = self._world_surface
-        ws.blit(self._bg_surface, (0, 0))
+        # Per-frame overlay readiness flags. Each overlay pass sets its flag
+        # to True iff it has content to blit this frame.
+        self._fog_ready = False
+        self._fx_ready = False
+        self._arc_ready = False
+        # `_fog_tex_dirty` tracks whether the fog surface was rebuilt this
+        # frame. In GPU mode we skip `fog_tex.update(...)` when the fog
+        # cache hit — the texture still holds last frame's content which
+        # is still correct. Huge win during static-camera play where fog
+        # cache hits every frame.
+        self._fog_tex_dirty = False
+        if self._gpu_mode:
+            # Reset scratch upload tracking. `_last_scratch_game_bbox` is
+            # preserved from the previous frame so we can clear stale
+            # pixels (e.g. labels that moved) via the union.
+            self._scratch_game_bbox = None
+            self._scratch_needs_full_game = False
+            self._border_rect = None
+        with self._frame_stats.scope("bg"):
+            # Obstacles are baked into `_bg_surface`. Restore only the regions
+            # that were drawn on last frame (entities + command arrows), not
+            # the whole viewport. On the first frame `_last_dirty_rects` is
+            # empty, so fall back to a viewport-wide restore.
+            bg = self._bg_surface
+            bg_rect = bg.get_rect()
+            if self._last_dirty_rects:
+                # Also clip every restore to the current viewport — no point
+                # restoring pixels `camera.apply` never reads.
+                vp = self._camera.get_world_viewport_rect()
+                vp_clipped = vp.clip(bg_rect)
+                for dr in self._last_dirty_rects:
+                    clip = dr.clip(vp_clipped)
+                    if clip.w > 0 and clip.h > 0:
+                        ws.blit(bg, (clip.x, clip.y), area=clip)
+            else:
+                vp = self._camera.get_world_viewport_rect()
+                clipped = vp.clip(bg_rect)
+                if clipped.w > 0 and clipped.h > 0:
+                    ws.blit(bg, (clipped.x, clipped.y), area=clipped)
+        # Reset new-dirty accumulator for this frame.
+        self._dirty_rects_new: list[pygame.Rect] = []
 
-        # Obstacles
-        for obs in self._obstacles:
-            c = tuple(obs.get("c", [120, 120, 120]))
-            if obs["shape"] == "rect":
-                x, y, w, h = obs["x"], obs["y"], obs["w"], obs["h"]
-                pygame.draw.rect(ws, c, (x, y, w, h))
-                pygame.draw.rect(ws, OBSTACLE_OUTLINE, (x, y, w, h), 1)
-            elif obs["shape"] == "circle":
-                cx, cy, r = int(obs["x"]), int(obs["y"]), int(obs["r"])
-                pygame.draw.circle(ws, c, (cx, cy), r)
-                pygame.draw.circle(ws, OBSTACLE_OUTLINE, (cx, cy), r, 1)
+        with self._frame_stats.scope("entities"):
+            # Sort entities by type for layering
+            order = {"MS": 0, "ME": 1, "CC": 2, "U": 3}
+            draw_entities = self._entities
+            if display_config.movement_smoothing:
+                draw_entities = self._apply_extrapolation(draw_entities)
+            entities = sorted(draw_entities,
+                              key=lambda e: order.get(e.get("t", ""), 4))
 
-        # Sort entities by type for layering
-        order = {"MS": 0, "ME": 1, "CC": 2, "U": 3}
-        draw_entities = self._entities
-        if display_config.movement_smoothing:
-            draw_entities = self._apply_extrapolation(draw_entities)
-        entities = sorted(draw_entities,
-                          key=lambda e: order.get(e.get("t", ""), 4))
+            is_warp_in = self._phase == "warp_in"
 
-        is_warp_in = self._phase == "warp_in"
+            # Collect LOS circles for fog-of-war visibility filtering
+            if self._should_apply_fog():
+                _los = self._collect_los_circles(entities)
+                self._los_cache = _los
+            else:
+                _los = None
+                self._los_cache = None
 
-        # Collect LOS circles for fog-of-war visibility filtering
-        if self._should_apply_fog():
-            _los = self._collect_los_circles(entities)
-            self._los_cache = _los
-        else:
-            _los = None
-            self._los_cache = None
+            # Resolve selected-and-visible entities once per frame. Previously
+            # three separate passes (FOV arcs, selection rings, command
+            # arrows) each re-scanned the full entity list.
+            selected_visible: list[dict] = []
+            if self._selected_ids:
+                for ent in entities:
+                    if ent.get("id") not in self._selected_ids:
+                        continue
+                    if _los is not None:
+                        ex = ent.get("x", 0)
+                        ey = ent.get("y", 0)
+                        if not self._is_visible(ex, ey, _los):
+                            continue
+                    selected_visible.append(ent)
 
-        # FOV arcs drawn first so they stay behind unit sprites
-        if not is_warp_in:
+            # FOV arcs rendered onto viewport-sized `_arc_surface` in screen
+            # coords. The actual screen blit happens later in the world
+            # scope after camera.apply — world_surface is not touched here.
+            # Consequence: arcs now layer on top of entity sprites rather
+            # than beneath (previously drawn first on ws then covered).
+            if not is_warp_in and selected_visible:
+                self._draw_fov_arcs_batched(selected_visible)
+
             for ent in entities:
-                eid = ent.get("id")
-                if eid in self._selected_ids:
-                    ex = ent.get("x", 0)
-                    ey = ent.get("y", 0)
-                    if _los is not None and not self._is_visible(ex, ey, _los):
-                        continue
-                    self._draw_fov_arc(ent)
-
-        for ent in entities:
-            t = ent.get("t")
-            is_ghost = ent.get("ghost", False)
-            if t == "MS":
-                self._draw_metal_spot(ent)
-            elif t == "ME":
-                if is_ghost:
-                    self._draw_metal_extractor_faded(ent)
-                elif _los is not None:
-                    ex, ey = ent.get("x", 0), ent.get("y", 0)
-                    if self._is_visible(ex, ey, _los):
-                        self._draw_metal_extractor(ent)
-                    else:
-                        self._draw_metal_extractor_faded(ent)
-                else:
-                    self._draw_metal_extractor(ent)
-            elif t == "CC":
-                if not is_warp_in:
+                t = ent.get("t")
+                is_ghost = ent.get("ghost", False)
+                if t == "MS":
+                    self._draw_metal_spot(ent)
+                elif t == "ME":
                     if is_ghost:
-                        self._draw_command_center_faded(ent)
-                    elif _los is not None and not self._is_visible(
-                            ent.get("x", 0), ent.get("y", 0), _los):
-                        self._draw_command_center_faded(ent)
+                        self._draw_metal_extractor_faded(ent)
+                    elif _los is not None:
+                        ex, ey = ent.get("x", 0), ent.get("y", 0)
+                        if self._is_visible(ex, ey, _los):
+                            self._draw_metal_extractor(ent)
+                        else:
+                            self._draw_metal_extractor_faded(ent)
                     else:
-                        self._draw_command_center(ent)
-            elif t == "U":
-                if not is_warp_in:
-                    if _los is not None and not self._is_visible(
-                            ent.get("x", 0), ent.get("y", 0), _los):
-                        continue
-                    self._draw_unit(ent)
+                        self._draw_metal_extractor(ent)
+                elif t == "CC":
+                    if not is_warp_in:
+                        if is_ghost:
+                            self._draw_command_center_faded(ent)
+                        elif _los is not None and not self._is_visible(
+                                ent.get("x", 0), ent.get("y", 0), _los):
+                            self._draw_command_center_faded(ent)
+                        else:
+                            self._draw_command_center(ent)
+                elif t == "U":
+                    if not is_warp_in:
+                        if _los is not None and not self._is_visible(
+                                ent.get("x", 0), ent.get("y", 0), _los):
+                            continue
+                        self._draw_unit(ent)
 
-        # Warp-in animation overlays CCs with scale + glow
-        if is_warp_in:
-            self._render_warp_in(ws)
+            # Warp-in animation overlays CCs with scale + glow
+            if is_warp_in:
+                self._render_warp_in(ws)
 
-        # Selection rings (drawn on top so selection is always visible)
-        for ent in entities:
-            eid = ent.get("id")
-            if eid in self._selected_ids:
+            # Selection rings (drawn on top so selection is always visible).
+            # Iterates the pre-filtered selected_visible list — no full-entity
+            # scan needed.
+            for ent in selected_visible:
                 t = ent.get("t")
                 ex = ent.get("x", 0)
                 ey = ent.get("y", 0)
-                if _los is not None and not self._is_visible(ex, ey, _los):
-                    continue
                 r = CC_RADIUS + 2 if t == "CC" else ent.get("r", 5) + 2
                 pygame.draw.circle(ws, SELECTED_COLOR, (int(round(ex)), int(round(ey))), int(r), 1)
 
-        # Lasers
-        for lf in self._lasers:
-            if _los is not None and len(lf) >= 2:
-                if not self._is_visible(lf[0], lf[1], _los):
-                    continue
-            self._draw_laser(lf)
+            # Record entity bbox for next frame's bg restore. Includes a
+            # generous margin for sprites, health bars, selection rings.
+            if entities:
+                emin_x = emin_y = 10 ** 9
+                emax_x = emax_y = -(10 ** 9)
+                for e in entities:
+                    ex = e.get("x", 0)
+                    ey = e.get("y", 0)
+                    er = e.get("r", 20) + 12  # sprite + hp bar + ring
+                    if ex - er < emin_x: emin_x = ex - er
+                    if ex + er > emax_x: emax_x = ex + er
+                    if ey - er < emin_y: emin_y = ey - er
+                    if ey + er > emax_y: emax_y = ey + er
+                self._dirty_rects_new.append(pygame.Rect(
+                    int(emin_x), int(emin_y),
+                    int(emax_x - emin_x) + 1, int(emax_y - emin_y) + 1,
+                ))
 
-        # Charge beams (artillery charge preview)
-        for ent in entities:
-            chx = ent.get("chx")
-            if chx is not None:
-                ex, ey = ent.get("x", 0), ent.get("y", 0)
-                if _los is not None and not self._is_visible(ex, ey, _los):
-                    continue
-                chy = ent.get("chy", 0)
-                chp = ent.get("chp", 0)
-                orange = (255, 140, 0, int(100 + 100 * chp))
-                temp = pygame.Surface(ws.get_size(), pygame.SRCALPHA)
-                pygame.draw.line(temp, orange, (int(ex), int(ey)),
-                                 (int(chx), int(chy)), 2)
-                # Splash ring at target
-                splash_r = int(30 * chp)
-                if splash_r > 0:
-                    pygame.draw.circle(temp, (255, 100, 0, int(60 * chp)),
-                                       (int(chx), int(chy)), splash_r, 1)
-                ws.blit(temp, (0, 0))
+        with self._frame_stats.scope("cmds"):
+            self._draw_command_arrows(selected_visible)
+            # Record command-arrow bbox for next frame's bg restore. Arrows
+            # can span from selected units to distant targets and queue
+            # waypoints — include all those endpoints.
+            if selected_visible:
+                cmin_x = cmin_y = 10 ** 9
+                cmax_x = cmax_y = -(10 ** 9)
+                have_cmd = False
+                for e in selected_visible:
+                    ex = e.get("x", 0)
+                    ey = e.get("y", 0)
+                    for key_x, key_y in (("tx", "ty"), ("atx", "aty"),
+                                         ("rx", "ry")):
+                        tx = e.get(key_x)
+                        ty = e.get(key_y)
+                        if tx is None or ty is None:
+                            continue
+                        have_cmd = True
+                        if ex < cmin_x: cmin_x = ex
+                        if ex > cmax_x: cmax_x = ex
+                        if ey < cmin_y: cmin_y = ey
+                        if ey > cmax_y: cmax_y = ey
+                        if tx < cmin_x: cmin_x = tx
+                        if tx > cmax_x: cmax_x = tx
+                        if ty < cmin_y: cmin_y = ty
+                        if ty > cmax_y: cmax_y = ty
+                    for qcmd in e.get("cq", []) or []:
+                        qx = qcmd.get("x")
+                        qy = qcmd.get("y")
+                        if qx is None or qy is None:
+                            continue
+                        have_cmd = True
+                        if qx < cmin_x: cmin_x = qx
+                        if qx > cmax_x: cmax_x = qx
+                        if qy < cmin_y: cmin_y = qy
+                        if qy > cmax_y: cmax_y = qy
+                if have_cmd:
+                    # Inflate by 8 px for arrowhead polygon.
+                    self._dirty_rects_new.append(pygame.Rect(
+                        int(cmin_x) - 8, int(cmin_y) - 8,
+                        int(cmax_x - cmin_x) + 16,
+                        int(cmax_y - cmin_y) + 16,
+                    ))
 
-        # Splash effects (expanding red circles)
-        for s in self._splashes:
-            sx, sy = s.get("x", 0), s.get("y", 0)
-            if _los is not None and not self._is_visible(sx, sy, _los):
-                continue
-            sr = s.get("r", 30)
-            sp = s.get("p", 0)
-            cur_r = int(sr * sp)
-            alpha = int(180 * (1.0 - sp))
-            if cur_r > 0 and alpha > 0:
-                temp = pygame.Surface(ws.get_size(), pygame.SRCALPHA)
-                pygame.draw.circle(temp, (255, 60, 30, alpha),
-                                   (int(sx), int(sy)), cur_r, 2)
-                ws.blit(temp, (0, 0))
+        with self._frame_stats.scope("lasers"):
+            # Render lasers in screen coords on the viewport-sized
+            # `_fx_surface`; the final blit onto the screen happens in the
+            # world scope after camera.apply. World_surface is not touched.
+            if self._lasers:
+                cam = self._camera
+                zoom = cam.zoom
+                drew_any = False
+                for lf in self._lasers:
+                    if len(lf) < 6:
+                        continue
+                    if _los is not None and not self._is_visible(lf[0], lf[1], _los):
+                        continue
+                    if not drew_any:
+                        self._fx_surface.fill((0, 0, 0, 0))
+                        drew_any = True
+                    color = lf[4]
+                    sx1, sy1 = cam.world_to_screen(lf[0], lf[1])
+                    sx2, sy2 = cam.world_to_screen(lf[2], lf[3])
+                    width = max(1, int(lf[5] * zoom))
+                    pygame.draw.line(
+                        self._fx_surface,
+                        (color[0], color[1], color[2], 200),
+                        (int(sx1), int(sy1)), (int(sx2), int(sy2)), width,
+                    )
+                if drew_any:
+                    self._fx_ready = True
 
-        # Death-burst particles (drawn into the shared anim surface)
-        if self._death_bursts:
-            self._anim_surface.fill((0, 0, 0, 0))
-            drew_any = False
-            for b in self._death_bursts:
-                if _los is not None and not self._is_visible(b.x, b.y, _los):
+        with self._frame_stats.scope("effects"):
+            # Charge beams (artillery charge preview)
+            for ent in entities:
+                chx = ent.get("chx")
+                if chx is not None:
+                    ex, ey = ent.get("x", 0), ent.get("y", 0)
+                    if _los is not None and not self._is_visible(ex, ey, _los):
+                        continue
+                    chy = ent.get("chy", 0)
+                    chp = ent.get("chp", 0)
+                    orange = (255, 140, 0, int(100 + 100 * chp))
+                    temp = pygame.Surface(ws.get_size(), pygame.SRCALPHA)
+                    pygame.draw.line(temp, orange, (int(ex), int(ey)),
+                                     (int(chx), int(chy)), 2)
+                    # Splash ring at target
+                    splash_r = int(30 * chp)
+                    if splash_r > 0:
+                        pygame.draw.circle(temp, (255, 100, 0, int(60 * chp)),
+                                           (int(chx), int(chy)), splash_r, 1)
+                    ws.blit(temp, (0, 0))
+
+            # Splash effects (expanding red circles)
+            for s in self._splashes:
+                sx, sy = s.get("x", 0), s.get("y", 0)
+                if _los is not None and not self._is_visible(sx, sy, _los):
                     continue
-                b.draw(self._anim_surface)
-                drew_any = True
-            if drew_any:
-                ws.blit(self._anim_surface, (0, 0))
+                sr = s.get("r", 30)
+                sp = s.get("p", 0)
+                cur_r = int(sr * sp)
+                alpha = int(180 * (1.0 - sp))
+                if cur_r > 0 and alpha > 0:
+                    temp = pygame.Surface(ws.get_size(), pygame.SRCALPHA)
+                    pygame.draw.circle(temp, (255, 60, 30, alpha),
+                                       (int(sx), int(sy)), cur_r, 2)
+                    ws.blit(temp, (0, 0))
+
+            # Death-burst particles (drawn into the shared anim surface)
+            if self._death_bursts:
+                self._anim_surface.fill((0, 0, 0, 0))
+                drew_any = False
+                for b in self._death_bursts:
+                    if _los is not None and not self._is_visible(b.x, b.y, _los):
+                        continue
+                    b.draw(self._anim_surface)
+                    drew_any = True
+                if drew_any:
+                    ws.blit(self._anim_surface, (0, 0))
 
         # (ME bonus labels and team labels drawn in screen space after camera.apply)
         self._label_data = (entities, _los)
@@ -1540,6 +2132,9 @@ class ClientGameScreen(BaseScreen):
                     rect = pygame.Rect(int(rx), int(ry), int(rw), int(rh))
                     pygame.draw.rect(self._selection_surface, SELECTION_FILL_COLOR, rect)
                     pygame.draw.rect(self._selection_surface, SELECTION_RECT_COLOR, rect, 1)
+                    drag_bbox = pygame.Rect(
+                        int(rx) - 2, int(ry) - 2, int(rw) + 4, int(rh) + 4,
+                    )
                 else:
                     wcx, wcy = self._screen_to_world(self._drag_start)
                     w_ex, w_ey = self._screen_to_world(self._drag_end)
@@ -1548,7 +2143,12 @@ class ClientGameScreen(BaseScreen):
                                        (int(wcx), int(wcy)), int(wr))
                     pygame.draw.circle(self._selection_surface, SELECTION_RECT_COLOR,
                                        (int(wcx), int(wcy)), int(wr), 1)
+                    drag_bbox = pygame.Rect(
+                        int(wcx - wr) - 2, int(wcy - wr) - 2,
+                        int(wr) * 2 + 4, int(wr) * 2 + 4,
+                    )
                 ws.blit(self._selection_surface, (0, 0))
+                self._dirty_rects_new.append(drag_bbox)
 
         # Right-click path with unit-count dots
         if self._rdragging and len(self._rpath) > 1:
@@ -1570,16 +2170,49 @@ class ClientGameScreen(BaseScreen):
                 preview = self._resample_path(selected_count)
                 for px, py in preview:
                     pygame.draw.circle(ws, path_color, (int(px), int(py)), 3)
+            # Dirty bbox spans the full path.
+            pxs = [p[0] for p in self._rpath]
+            pys = [p[1] for p in self._rpath]
+            self._dirty_rects_new.append(pygame.Rect(
+                int(min(pxs)) - 6, int(min(pys)) - 6,
+                int(max(pxs) - min(pxs)) + 12,
+                int(max(pys) - min(pys)) + 12,
+            ))
 
-        # Fog of war
-        self._draw_fog(entities)
+        with self._frame_stats.scope("fog"):
+            # Fog of war
+            self._draw_fog(entities)
 
-        # Explosion fragments overlay
-        if self._phase == "explode":
-            self._render_explode(ws)
+            # Explosion fragments overlay. Fragments scatter — use viewport
+            # as the dirty rect for safety rather than tracking each piece.
+            if self._phase == "explode":
+                self._render_explode(ws)
+                vp = self._camera.get_world_viewport_rect()
+                self._dirty_rects_new.append(pygame.Rect(
+                    vp.x, vp.y, vp.w, vp.h,
+                ))
 
+        # Warp-in CC glow rings extend ~3× CC_RADIUS beyond entity bboxes
+        # and their stale pixels would otherwise persist on world_surface.
+        # Force a restore of the entire map next frame while warp_in is
+        # active — viewport-only isn't enough because enemy CCs can spawn
+        # off-screen and their glow pixels linger after the user pans to
+        # them (the viewport dirty rect for the last warp_in frame didn't
+        # cover their position).
+        if self._phase == "warp_in":
+            self._dirty_rects_new.append(pygame.Rect(
+                0, 0, self._map_w, self._map_h,
+            ))
+
+        _header_scope = self._frame_stats.scope("header")
+        _header_scope.__enter__()
         # -- Composite to screen --
-        self.screen.fill((0, 0, 0))
+        # In GPU mode, scratch starts fully transparent so the GPU-composed
+        # world + overlays show through wherever we don't paint chrome.
+        if self._gpu_mode:
+            self.screen.fill((0, 0, 0, 0))
+        else:
+            self.screen.fill((0, 0, 0))
 
         # Header bar
         pygame.draw.rect(self.screen, (20, 20, 30), self._header_rect)
@@ -1613,7 +2246,10 @@ class ClientGameScreen(BaseScreen):
             warn = font.render("Connection lost...", True, _DISCONNECT_COLOR)
             self.screen.blit(warn, (self.width - warn.get_width() - 10, 10))
 
-        # FPS
+        # FPS (client render rate) and server-performance counter.
+        # Server budget is 16.67 ms/tick at 60 TPS; colour the tick_ms
+        # value by headroom so the player can spot a server bottleneck
+        # that isn't visible in client FPS alone.
         fps_font = _get_font(18)
         fps_val = self.clock.get_fps()
         fps_surf = fps_font.render(f"FPS: {fps_val:.0f}", True, (200, 200, 200))
@@ -1621,6 +2257,28 @@ class ClientGameScreen(BaseScreen):
         if self._reset_cam_btn:
             fps_x = self._reset_cam_btn.rect.right + 10
         self.screen.blit(fps_surf, (fps_x, 12))
+
+        if self._server_tps > 0.0:
+            tick_ms = self._server_tick_ms
+            cpu_ms = self._server_tick_cpu_ms
+            if tick_ms < 5.0:
+                srv_color = (110, 220, 130)
+            elif tick_ms < 10.0:
+                srv_color = (220, 200, 110)
+            elif tick_ms < 16.67:
+                srv_color = (220, 150, 90)
+            else:
+                srv_color = (220, 110, 110)
+            # Display wall / CPU so the ratio is visible at a glance. If
+            # wall ≫ CPU, the server thread is being starved (GIL /
+            # scheduling); if wall ≈ CPU, the step is genuinely doing
+            # that much computation.
+            srv_text = (
+                f"SRV: {self._server_tps:.0f} TPS / {tick_ms:.1f} ms "
+                f"(cpu {cpu_ms:.1f})"
+            )
+            srv_surf = fps_font.render(srv_text, True, srv_color)
+            self.screen.blit(srv_surf, (fps_x + fps_surf.get_width() + 12, 12))
 
         # Latency table (multiplayer only): "Name: 32 ms" for each connected
         # player, stacked top-down just below the header bar.
@@ -1651,11 +2309,41 @@ class ClientGameScreen(BaseScreen):
             if self._reset_cam_btn:
                 self._reset_cam_btn.draw(self.screen)
 
-        # Game area: tiled background (covers beyond-map dead space) then camera projection
+        _header_scope.__exit__(None, None, None)
+        _world_scope = self._frame_stats.scope("world")
+        _world_scope.__enter__()
         from core.background import blit_screen_background
         ga = self._game_area
-        blit_screen_background(self.screen, ga, self._camera, self._bg_tile)
-        self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
+        if self._gpu_mode:
+            # GPU mode: the scaled world, tiled dead-space bg, and overlay
+            # textures are composed by the renderer in `present()`. Nothing
+            # to paint onto the scratch surface here — it stays transparent
+            # within the game area so that composed content shows through.
+            pass
+        else:
+            # Game area: tiled background (covers beyond-map dead space)
+            # then camera projection.
+            blit_screen_background(self.screen, ga, self._camera, self._bg_tile)
+            self._camera.apply(ws, self.screen, dest=(ga.x, ga.y))
+
+            # Screen-space overlays: FOV arcs, lasers, fog. Each is
+            # viewport-sized and has been prepared in screen coords by its
+            # respective pass, so these are single cheap blits (no scale).
+            # Metallic border still draws on top below.
+            if self._arc_ready:
+                bb = getattr(self, "_arc_bbox", None)
+                if bb is not None:
+                    self.screen.blit(
+                        self._arc_surface,
+                        (ga.x + bb.x, ga.y + bb.y),
+                        area=bb,
+                    )
+                else:
+                    self.screen.blit(self._arc_surface, (ga.x, ga.y))
+            if self._fx_ready:
+                self.screen.blit(self._fx_surface, (ga.x, ga.y))
+            if self._fog_ready:
+                self.screen.blit(self._fog_surface, (ga.x, ga.y))
 
         # Metallic border around the world edge (rendered in screen space)
         bx0, by0 = self._camera.world_to_screen(0, 0)
@@ -1666,8 +2354,18 @@ class ClientGameScreen(BaseScreen):
         )
         clip_save = self.screen.get_clip()
         self.screen.set_clip(ga)
-        _draw_metallic_border(self.screen, border_rect, 3)
+        if self._gpu_mode:
+            # Defer border drawing to present() so it renders via renderer
+            # primitives — keeps the scratch surface clean of per-frame
+            # border strokes (which would otherwise make scratch always
+            # dirty in the game_area).
+            self._border_rect = border_rect.clip(ga)
+        else:
+            _draw_metallic_border(self.screen, border_rect, 3)
 
+        _world_scope.__exit__(None, None, None)
+        _labels_scope = self._frame_stats.scope("labels")
+        _labels_scope.__enter__()
         # Screen-space labels (crisp text at any zoom)
         if hasattr(self, '_label_data'):
             entities_l, _los_l = self._label_data
@@ -1708,13 +2406,23 @@ class ClientGameScreen(BaseScreen):
 
         self.screen.set_clip(clip_save)
 
-        # HUD area
-        pygame.draw.rect(self.screen, (20, 20, 30), self._hud_rect)
-        pygame.draw.line(self.screen, (40, 40, 55),
-                         (0, self._hud_rect.top),
-                         (self.width, self._hud_rect.top))
+        _labels_scope.__exit__(None, None, None)
+        _panel_scope = self._frame_stats.scope("panel")
+        _panel_scope.__enter__()
+        # HUD area. In GPU mode the bg rect + divider are baked into
+        # _hud_surface (drawn inside _draw_hud) so we skip them on the
+        # scratch — that way the scratch HUD strip stays clean and we
+        # don't need to upload it every frame.
+        if not self._gpu_mode:
+            pygame.draw.rect(self.screen, (20, 20, 30), self._hud_rect)
+            pygame.draw.line(self.screen, (40, 40, 55),
+                             (0, self._hud_rect.top),
+                             (self.width, self._hud_rect.top))
         self._draw_hud()
+        _panel_scope.__exit__(None, None, None)
 
+        _overlays_scope = self._frame_stats.scope("overlays")
+        _overlays_scope.__enter__()
         # Game-start countdown (3, 2, 1) overlay during warp-in
         if self._phase == "warp_in":
             draw_countdown_overlay(self.screen, self._game_area, self._anim_timer)
@@ -1751,7 +2459,19 @@ class ClientGameScreen(BaseScreen):
         if self._esc_menu_open:
             self._draw_esc_menu()
 
-        pygame.display.flip()
+        # Frame-time breakdown overlay (F3 toggle)
+        if self._show_perf:
+            self._draw_perf_overlay()
+
+        _overlays_scope.__exit__(None, None, None)
+        # IMPORTANT: present() needs both `_last_dirty_rects` (previous
+        # frame, used for ws_tex upload to clear regions where we just
+        # bg-restored) AND `_dirty_rects_new` (this frame, fresh draws).
+        # Run present() FIRST so it sees both as distinct lists, then
+        # promote new → last for the next frame's bg restore.
+        with self._frame_stats.scope("flip"):
+            self.present()
+        self._last_dirty_rects = self._dirty_rects_new
 
     # -- chat overlay / input -------------------------------------------------
 
@@ -1851,17 +2571,123 @@ class ClientGameScreen(BaseScreen):
                                 True, (100, 100, 120))
         self.screen.blit(hint, (box_x, box_y - hint.get_height() - 2))
 
+    # -- perf overlay ---------------------------------------------------------
+
+    def _draw_perf_overlay(self) -> None:
+        """Top-left panel showing per-phase client frame-time breakdown.
+
+        Rolling mean over ~1 s (60 samples). Rows are colour-coded by cost
+        so a bottleneck (e.g. a 12 ms `lasers` row during chain lightning)
+        stands out at a glance. Phases are summed into a `total` row; any
+        gap vs. `1000/fps` is time spent idle or in un-instrumented work.
+        """
+        items = self._frame_stats.items()
+        if not items:
+            return
+
+        font = _get_font(14)
+        pad = 6
+        line_h = font.get_height() + 2
+        panel_w = 260
+        # Base rows: header + items + total. +2 extra lines in GPU mode
+        # for the "max op" diagnostic.
+        extra_rows = 2 if getattr(self, "_gpu_mode", False) else 0
+        panel_h = pad * 2 + line_h * (len(items) + 2 + extra_rows)
+
+        # Top-left, below the header bar. Ping table is top-right, so no conflict.
+        x = 10
+        y = self._header_h + 6
+
+        overlay = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 170))
+        self.screen.blit(overlay, (x, y))
+        pygame.draw.rect(self.screen, (80, 80, 100),
+                         (x, y, panel_w, panel_h), 1)
+
+        def _row_color(ms: float) -> tuple[int, int, int]:
+            if ms < 1.0:
+                return (140, 210, 150)
+            if ms < 3.0:
+                return (200, 210, 130)
+            if ms < 6.0:
+                return (230, 180, 100)
+            return (230, 110, 110)
+
+        total = 0.0
+        ry = y + pad
+        header = font.render("CLIENT FRAME (ms)", True, (200, 200, 220))
+        self.screen.blit(header, (x + pad, ry))
+        ry += line_h
+
+        for name, ms in items:
+            total += ms
+            label = font.render(name, True, (210, 210, 215))
+            value = font.render(f"{ms:5.2f}", True, _row_color(ms))
+            self.screen.blit(label, (x + pad, ry))
+            self.screen.blit(value, (x + panel_w - pad - value.get_width(), ry))
+            ry += line_h
+
+        # Total row is coloured by the 60 FPS frame budget (16.67 ms).
+        if total < 10.0:
+            total_color = (140, 210, 150)
+        elif total < 14.0:
+            total_color = (210, 200, 120)
+        elif total < 16.67:
+            total_color = (230, 170, 100)
+        else:
+            total_color = (230, 110, 110)
+        total_label = font.render("total", True, (230, 230, 240))
+        total_value = font.render(f"{total:5.2f}", True, total_color)
+        self.screen.blit(total_label, (x + pad, ry))
+        self.screen.blit(total_value, (x + panel_w - pad - total_value.get_width(), ry))
+
+        # GPU-mode: show the worst per-op wall time from the last
+        # present() so we can see which texture update / draw is the
+        # biggest GIL holder.
+        worst = getattr(self, "_present_worst", None)
+        if worst is not None:
+            ry += line_h
+            op_name, op_wall, op_cpu = worst
+            gap = op_wall - op_cpu
+            gap_color = (
+                (230, 110, 110) if gap > 3.0
+                else (230, 180, 100) if gap > 1.0
+                else (140, 210, 150)
+            )
+            label_text = f"max: {op_name}"
+            if font.size(label_text)[0] > panel_w - pad * 2 - 60:
+                # Truncate long names
+                label_text = label_text[:24] + "..."
+            label = font.render(label_text, True, (210, 210, 215))
+            self.screen.blit(label, (x + pad, ry))
+            ry += line_h
+            det_label = font.render(
+                f"  wall {op_wall:.2f} / cpu {op_cpu:.2f}",
+                True, gap_color,
+            )
+            self.screen.blit(det_label, (x + pad, ry))
+
     # -- escape menu overlay ---------------------------------------------------
 
     def _draw_esc_menu(self) -> None:
-        """Draw a semi-transparent overlay with pause menu buttons."""
-        overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 150))
-        self.screen.blit(overlay, (0, 0))
+        """Draw a semi-transparent overlay with pause menu buttons.
 
-        # Title above buttons
-        font = _get_font(48)
-        title_surf = font.render("MENU", True, (220, 220, 240))
+        Overlay surface and title text are static — build once on first open
+        and reuse. The previous implementation allocated a full-screen
+        SRCALPHA surface per frame, which spiked HUD time to 20+ ms while the
+        menu was open (same bug pattern as the laser flash allocation).
+        """
+        if self._esc_menu_overlay is None:
+            self._esc_menu_overlay = pygame.Surface(
+                (self.width, self.height), pygame.SRCALPHA,
+            )
+            self._esc_menu_overlay.fill((0, 0, 0, 150))
+            self._esc_menu_title = _get_font(48).render(
+                "MENU", True, (220, 220, 240),
+            )
+        self.screen.blit(self._esc_menu_overlay, (0, 0))
+
+        title_surf = self._esc_menu_title
         tx = self.width // 2 - title_surf.get_width() // 2
         first_btn_y = self._esc_menu_btns[0][1].rect.top
         ty = first_btn_y - title_surf.get_height() - 16
@@ -1873,19 +2699,76 @@ class ClientGameScreen(BaseScreen):
     # -- HUD drawing (delegated to gui.py via adapter) -----------------------
 
     def _draw_hud(self) -> None:
-        """Draw the full HUD bar using gui.py through adapter proxies."""
-        proxies = wrap_entities(self._entities, self._selected_ids)
-        gui.draw_hud(
-            self.screen, proxies,
-            self.width, self.height, self._hud_h,
-            enable_t2=self._enable_t2,
-            t2_upgrades=self._t2_upgrades,
-            t2_researching=self._t2_researching,
-            camera=self._camera,
-            world_w=self._map_w,
-            world_h=self._map_h,
-            obstacles=self._obstacles,
-        )
+        """Draw the full HUD bar using gui.py through adapter proxies.
+
+        ``wrap_entities`` is expensive (proxy + weapon + ability namespaces
+        for every entity). The HUD only needs to reflect the server's
+        state, which swaps at ~10 Hz, so cache the wrapped list by
+        identity of ``self._entities`` and patch the ``selected`` flag in
+        place when only the local selection changes.
+
+        In GPU mode, the HUD renders onto ``self._hud_surface`` (a
+        dedicated SRCALPHA surface) rather than the main scratch. It's
+        only re-rendered when proxies or selection change — typically
+        once per state frame instead of every render frame — and the
+        resulting texture is uploaded correspondingly.
+        """
+        entities = self._entities
+        selected = self._selected_ids
+        proxies_changed = False
+        if self._hud_proxies is None or self._hud_proxies_entities is not entities:
+            self._hud_proxies = wrap_entities(entities, selected)
+            self._hud_proxies_entities = entities
+            self._hud_proxies_selected = set(selected)
+            proxies_changed = True
+        elif self._hud_proxies_selected != selected:
+            for p in self._hud_proxies:
+                p.selected = p.entity_id in selected
+            self._hud_proxies_selected = set(selected)
+            proxies_changed = True
+
+        if self._gpu_mode:
+            # Redraw _hud_surface only when dirty (first frame, state
+            # frame, or selection change). Between redraws the existing
+            # texture still holds the correct pixels.
+            if proxies_changed or self._hud_surface_dirty:
+                self._hud_surface.fill((0, 0, 0, 0))
+                # Panel background + top divider, baked into the HUD
+                # surface so it arrives on screen with the rest.
+                pygame.draw.rect(
+                    self._hud_surface, (20, 20, 30),
+                    pygame.Rect(0, 0, self.width, self._hud_h),
+                )
+                pygame.draw.line(
+                    self._hud_surface, (40, 40, 55),
+                    (0, 0), (self.width, 0),
+                )
+                # Pass height=self._hud_h so _hud_sections positions the
+                # HUD at y=0 on the target surface.
+                gui.draw_hud(
+                    self._hud_surface, self._hud_proxies,
+                    self.width, self._hud_h, self._hud_h,
+                    enable_t2=self._enable_t2,
+                    t2_upgrades=self._t2_upgrades,
+                    t2_researching=self._t2_researching,
+                    camera=self._camera,
+                    world_w=self._map_w,
+                    world_h=self._map_h,
+                    obstacles=self._obstacles,
+                )
+                self._hud_surface_dirty = True
+        else:
+            gui.draw_hud(
+                self.screen, self._hud_proxies,
+                self.width, self.height, self._hud_h,
+                enable_t2=self._enable_t2,
+                t2_upgrades=self._t2_upgrades,
+                t2_researching=self._t2_researching,
+                camera=self._camera,
+                world_w=self._map_w,
+                world_h=self._map_h,
+                obstacles=self._obstacles,
+            )
 
     # -- entity drawing (adapted from ReplayPlaybackScreen) -----------------
 
@@ -1906,76 +2789,243 @@ class ClientGameScreen(BaseScreen):
         wing2 = (x2 - ux * s - px * s * 0.5, y2 - uy * s - py * s * 0.5)
         pygame.draw.polygon(ws, color, [(x2, y2), wing1, wing2])
 
-    def _draw_fov_arc(self, ent: dict) -> None:
-        """Draw FOV/range arc for a selected unit."""
-        t = ent.get("t")
-        ut = ent.get("ut", "soldier")
-        stats = UNIT_TYPES.get(ut, {})
-        fov_deg = stats.get("fov", 90)
-        fov = math.radians(fov_deg)
+    def _draw_command_arrows(self, selected_visible: list[dict]) -> None:
+        """Batched command-arrow pass for all selected units.
 
-        ws = self._world_surface
-        ex = ent.get("x", 0)
-        ey = ent.get("y", 0)
-
-        # CC: show attack range circle
-        if t == "CC":
-            atk_r = int(CC_LASER_RANGE)
-            temp = pygame.Surface((atk_r * 2, atk_r * 2), pygame.SRCALPHA)
-            pygame.draw.circle(temp, RANGE_COLOR, (atk_r, atk_r), atk_r, 1)
-            ws.blit(temp, (int(ex) - atk_r, int(ey) - atk_r))
+        Dedups arrows by (quantized_start, quantized_end, color) at an
+        8 px grid. A group of units converging on the same target
+        (a common RTS pattern) collapses to a single arrow instead of one
+        per unit. Also coalesces overlapping queued-waypoint segments.
+        The quantization is below the perceptual threshold against the
+        existing 1 px line + arrowhead.
+        """
+        if not selected_visible:
             return
+        ws = self._world_surface
+        drawn: set[tuple] = set()
+        GRID = 8
+
+        for ent in selected_visible:
+            ix, iy = int(round(ent.get("x", 0))), int(round(ent.get("y", 0)))
+
+            # Active command
+            if "atx" in ent and "aty" in ent:
+                tx, ty = int(round(ent["atx"])), int(round(ent["aty"]))
+                key = (ix // GRID, iy // GRID, tx // GRID, ty // GRID, 0)
+                if key not in drawn:
+                    drawn.add(key)
+                    self._draw_command_line(ix, iy, tx, ty, _ATTACK_CMD_COLOR)
+            elif "tx" in ent and "ty" in ent:
+                if ent.get("am"):
+                    color = _ATTACK_CMD_COLOR
+                    cid = 0
+                elif ent.get("fm"):
+                    color = _FIGHT_CMD_COLOR
+                    cid = 2
+                else:
+                    color = _MOVE_CMD_COLOR
+                    cid = 1
+                tx, ty = int(round(ent["tx"])), int(round(ent["ty"]))
+                key = (ix // GRID, iy // GRID, tx // GRID, ty // GRID, cid)
+                if key not in drawn:
+                    drawn.add(key)
+                    self._draw_command_line(ix, iy, tx, ty, color)
+
+            # Queued waypoints
+            cq = ent.get("cq")
+            if not cq:
+                continue
+            if "atx" in ent:
+                qpx, qpy = int(round(ent["atx"])), int(round(ent["aty"]))
+            elif "tx" in ent:
+                qpx, qpy = int(round(ent["tx"])), int(round(ent["ty"]))
+            else:
+                qpx, qpy = ix, iy
+            for qcmd in cq:
+                qx_val = qcmd.get("x")
+                qy_val = qcmd.get("y")
+                if qx_val is None or qy_val is None:
+                    continue
+                qx, qy = int(round(qx_val)), int(round(qy_val))
+                qt = qcmd.get("t", "move")
+                if qt == "attack_move" or qt == "attack":
+                    qcolor = _ATTACK_CMD_COLOR
+                    qcid = 0
+                elif qt == "fight":
+                    qcolor = _FIGHT_CMD_COLOR
+                    qcid = 2
+                else:
+                    qcolor = _MOVE_CMD_COLOR
+                    qcid = 1
+                key = (qpx // GRID, qpy // GRID, qx // GRID, qy // GRID, qcid)
+                if key not in drawn:
+                    drawn.add(key)
+                    self._draw_command_line(qpx, qpy, qx, qy, qcolor)
+                    pygame.draw.circle(ws, qcolor, (qx, qy), 3, 1)
+                qpx, qpy = qx, qy
+
+    def _arc_base_points(self, fov_deg: int, r: int) -> np.ndarray:
+        """Return a cached Nx2 numpy array of arc edge points at facing=0.
+
+        Points are relative to origin; caller rotates/translates per unit.
+        Keyed by (fov_deg, r) so all units sharing the same FOV + radius
+        share one cache entry.
+        """
+        cache = self._arc_base_cache
+        key = (fov_deg, r)
+        pts = cache.get(key)
+        if pts is None:
+            fov = math.radians(fov_deg)
+            half = fov / 2.0
+            steps = max(int(fov_deg / 3), 8)
+            angles = np.linspace(-half, half, steps + 1)
+            pts = np.column_stack([np.cos(angles) * r, np.sin(angles) * r])
+            cache[key] = pts
+        return pts
+
+    def _fov_arc_shape(self, ent: dict) -> tuple | None:
+        """Return (kind, ix, iy, r, color[, fov_deg, fa]) for this unit's
+        FOV/range arc, or None if the unit shouldn't show one.
+
+        `kind` is "CIRCLE" for full circles (CC, outpost, 360° FOV units)
+        and "ARC" for partial-FOV polylines.
+        """
+        t = ent.get("t")
+        ix = int(round(ent.get("x", 0)))
+        iy = int(round(ent.get("y", 0)))
+
+        if t == "CC":
+            return ("CIRCLE", ix, iy, int(CC_LASER_RANGE), RANGE_COLOR)
 
         if t == "ME":
             if ent.get("us") == "outpost":
                 from config.settings import OUTPOST_LASER_RANGE
-                atk_r = int(OUTPOST_LASER_RANGE)
-                temp = pygame.Surface((atk_r * 2, atk_r * 2), pygame.SRCALPHA)
-                pygame.draw.circle(temp, RANGE_COLOR, (atk_r, atk_r), atk_r, 1)
-                ws.blit(temp, (int(round(ex)) - atk_r, int(round(ey)) - atk_r))
-            return
+                return ("CIRCLE", ix, iy, int(OUTPOST_LASER_RANGE), RANGE_COLOR)
+            return None
 
+        ut = ent.get("ut", "soldier")
+        stats = UNIT_TYPES.get(ut, {})
         weapon = stats.get("weapon")
         if not weapon:
-            return
-        # Prefer the live per-entity attack_range (includes sweeper aura bonus)
-        # over the static weapon.range from UNIT_TYPES.
+            return None
+        # Prefer live per-entity attack_range (includes sweeper aura) over the
+        # static weapon.range from UNIT_TYPES.
         r = int(ent.get("rng", weapon.get("range", 50)))
         if r <= 0:
-            return
+            return None
+
         is_healer = weapon.get("hits_only_friendly", False)
         if ent.get("hf"):
-            color = (120, 120, 120)  # grey for hold fire
+            color = (120, 120, 120)
         elif is_healer:
             color = MEDIC_HEAL_COLOR
         else:
             color = RANGE_COLOR
-        fa = ent.get("fa", 0.0)
 
-        ix, iy = int(round(ex)), int(round(ey))
-        half_fov = fov / 2.0
-        if fov >= math.tau - 0.01:
-            temp = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
-            pygame.draw.circle(temp, color, (r, r), r, 1)
-            ws.blit(temp, (ix - r, iy - r))
+        fov_deg = stats.get("fov", 90)
+        if fov_deg >= 359:
+            return ("CIRCLE", ix, iy, r, color)
+
+        return ("ARC", ix, iy, r, color, fov_deg, ent.get("fa", 0.0))
+
+    def _draw_fov_arcs_batched(self, selected_visible: list[dict]) -> None:
+        """Render FOV/range arcs onto viewport-sized `_arc_surface` in screen
+        coords. The caller blits `_arc_surface` to the screen after
+        camera.apply; `world_surface` is never touched.
+
+        Bounding-box-clipped: only the arcs' collective bbox gets filled and
+        blitted. For tight groups this is near-free.
+        """
+        self._arc_ready = False
+        if not selected_visible:
             return
 
-        start = fa - half_fov
-        steps = max(int(math.degrees(fov) / 3), 8)
-        points = [(ix, iy)]
-        for i in range(steps + 1):
-            a = start + fov * i / steps
-            points.append((int(round(ix + r * math.cos(a))),
-                           int(round(iy + r * math.sin(a)))))
-        points.append((ix, iy))
+        cam = self._camera
+        zoom = cam.zoom
 
-        temp_size = r * 2 + 4
-        temp = pygame.Surface((temp_size, temp_size), pygame.SRCALPHA)
-        ox = temp_size // 2 - ix
-        oy = temp_size // 2 - iy
-        shifted = [(px + ox, py + oy) for px, py in points]
-        pygame.draw.lines(temp, color, False, shifted, 1)
-        ws.blit(temp, (ix - temp_size // 2, iy - temp_size // 2))
+        # Pass 1: convert each arc shape to SCREEN coords + accumulate bbox.
+        # Each entry becomes (kind, sx, sy, rs, color[, fov_deg, fa]).
+        shapes: list[tuple] = []
+        min_x = min_y = 10 ** 9
+        max_x = max_y = -(10 ** 9)
+        for ent in selected_visible:
+            shape = self._fov_arc_shape(ent)
+            if shape is None:
+                continue
+            # shape has world ix, iy, world r — convert both.
+            wix, wiy = shape[1], shape[2]
+            wr = shape[3]
+            sx, sy = cam.world_to_screen(wix, wiy)
+            isx, isy = int(sx), int(sy)
+            rs = max(1, int(wr * zoom))
+            if shape[0] == "CIRCLE":
+                shapes.append(("CIRCLE", isx, isy, rs, shape[4]))
+            else:
+                shapes.append(("ARC", isx, isy, rs, shape[4], shape[5], shape[6]))
+            if isx - rs < min_x:
+                min_x = isx - rs
+            if isx + rs > max_x:
+                max_x = isx + rs
+            if isy - rs < min_y:
+                min_y = isy - rs
+            if isy + rs > max_y:
+                max_y = isy + rs
+
+        if not shapes:
+            return
+
+        arc = self._arc_surface
+        fw, fh = arc.get_size()
+        bb_x = max(0, min_x)
+        bb_y = max(0, min_y)
+        bb_r = min(fw, max_x + 1)
+        bb_b = min(fh, max_y + 1)
+        bb_w = bb_r - bb_x
+        bb_h = bb_b - bb_y
+        if bb_w <= 0 or bb_h <= 0:
+            return
+        bb_rect = pygame.Rect(bb_x, bb_y, bb_w, bb_h)
+        # In GPU mode the whole surface is uploaded as a texture each
+        # frame — stale pixels outside the current bb would become
+        # visible trails on the screen. Full-fill to clear those.
+        # In CPU mode we only blit bb to the screen, so a bb-only fill
+        # is sufficient.
+        if self._gpu_mode:
+            arc.fill((0, 0, 0, 0))
+        else:
+            arc.fill((0, 0, 0, 0), rect=bb_rect)
+
+        # Pass 2: draw arcs at screen coords on `_arc_surface`.
+        for shape in shapes:
+            kind = shape[0]
+            if kind == "CIRCLE":
+                _, sx, sy, rs, color = shape
+                pygame.draw.circle(arc, color, (sx, sy), rs, 1)
+            else:  # "ARC"
+                _, sx, sy, rs, color, fov_deg, fa = shape
+                # Base arc points at facing=0 are cached per (fov_deg, rs).
+                # Each selected unit then only rotates + translates the
+                # cached array with numpy — orders of magnitude faster
+                # than the per-arc Python loop of cos/sin + int round.
+                base = self._arc_base_points(fov_deg, rs)
+                cos_fa = math.cos(fa)
+                sin_fa = math.sin(fa)
+                # Rotation: [x', y'] = [[cos -sin][sin cos]] @ [x, y].T
+                # Implemented as component multiplies to avoid matmul
+                # overhead for tiny arrays.
+                xs = base[:, 0] * cos_fa - base[:, 1] * sin_fa + sx
+                ys = base[:, 0] * sin_fa + base[:, 1] * cos_fa + sy
+                # Each arc starts + ends at the center so it closes to
+                # a "fan" shape (matches the previous behaviour).
+                points = [(sx, sy)]
+                points.extend(zip(xs.astype(int).tolist(),
+                                  ys.astype(int).tolist()))
+                points.append((sx, sy))
+                pygame.draw.lines(arc, color, False, points, 1)
+
+        # Stash bbox so the screen-blit step can copy only the used rect.
+        self._arc_bbox = bb_rect
+        self._arc_ready = True
 
     def _draw_unit(self, ent: dict) -> None:
         from core.sprite_cache import get_unit_sprite
@@ -1987,51 +3037,9 @@ class ClientGameScreen(BaseScreen):
         ut = ent.get("ut", "soldier")
         ix, iy = int(round(x)), int(round(y))
 
-        # Command arrows for selected units
-        eid = ent.get("id")
-        if eid in self._selected_ids:
-            if "atx" in ent and "aty" in ent:
-                self._draw_command_line(ix, iy,
-                                       int(round(ent["atx"])),
-                                       int(round(ent["aty"])),
-                                       _ATTACK_CMD_COLOR)
-            elif "tx" in ent and "ty" in ent:
-                if ent.get("am"):
-                    color = _ATTACK_CMD_COLOR
-                elif ent.get("fm"):
-                    color = _FIGHT_CMD_COLOR
-                else:
-                    color = _MOVE_CMD_COLOR
-                self._draw_command_line(ix, iy,
-                                       int(round(ent["tx"])),
-                                       int(round(ent["ty"])),
-                                       color)
-
-            # Draw queued command waypoints
-            if "cq" in ent:
-                if "atx" in ent:
-                    px, py = int(round(ent["atx"])), int(round(ent["aty"]))
-                elif "tx" in ent:
-                    px, py = int(round(ent["tx"])), int(round(ent["ty"]))
-                else:
-                    px, py = ix, iy
-                for qcmd in ent["cq"]:
-                    qx_val = qcmd.get("x")
-                    qy_val = qcmd.get("y")
-                    if qx_val is None or qy_val is None:
-                        continue
-                    qx, qy = int(round(qx_val)), int(round(qy_val))
-                    qt = qcmd.get("t", "move")
-                    if qt == "attack_move" or qt == "attack":
-                        qcolor = _ATTACK_CMD_COLOR
-                    elif qt == "fight":
-                        qcolor = _FIGHT_CMD_COLOR
-                    else:
-                        qcolor = _MOVE_CMD_COLOR
-                    self._draw_command_line(px, py, qx, qy, qcolor)
-                    pygame.draw.circle(self._world_surface, qcolor, (qx, qy), 3, 1)
-                    px, py = qx, qy
-
+        # Command arrows are drawn in a separate batched pass
+        # (see `_draw_command_arrows`) so the cost can be measured on its
+        # own and redundant overlapping arrows can dedup.
         sprite = get_unit_sprite(ut, c, r)
         hw, hh = sprite.get_width() // 2, sprite.get_height() // 2
         ws.blit(sprite, (ix - hw, iy - hh))
@@ -2203,18 +3211,6 @@ class ClientGameScreen(BaseScreen):
             self._draw_health_bar(x, y, r + HEALTH_BAR_OFFSET,
                                   hp, max_hp)
 
-    def _draw_laser(self, lf: list) -> None:
-        if len(lf) < 6:
-            return
-        ws = self._world_surface
-        x1, y1, x2, y2 = lf[0], lf[1], lf[2], lf[3]
-        color = tuple(lf[4])
-        width = lf[5]
-        temp = pygame.Surface(ws.get_size(), pygame.SRCALPHA)
-        c = (*color[:3], 200)
-        pygame.draw.line(temp, c, (x1, y1), (x2, y2), width)
-        ws.blit(temp, (0, 0))
-
     def _draw_health_bar(self, cx: float, cy: float, offset_y: float,
                          hp: float, max_hp: float,
                          bar_w: float = HEALTH_BAR_WIDTH) -> None:
@@ -2385,44 +3381,129 @@ class ClientGameScreen(BaseScreen):
         temp.set_alpha(alpha)
         saved_ws.blit(temp, (int(x - margin), int(y - margin)))
 
+    def _get_soft_brush(self, r: int) -> pygame.Surface:
+        """Return a cached SRCALPHA circle brush with a soft alpha edge.
+
+        Alpha is 255 from the center out to ``r - EDGE``, then falls linearly
+        to 0 at the outer edge. Used with ``BLEND_RGBA_SUB`` to produce
+        smoothly faded fog cut-outs without any separate blur pass.
+        """
+        brush = self._los_soft_brushes.get(r)
+        if brush is not None:
+            return brush
+        size = r * 2
+        brush = pygame.Surface((size, size), pygame.SRCALPHA)
+        EDGE = 4.0
+        # Radial distance → alpha via numpy (vectorised). 255 at center,
+        # linear ramp to 0 across the last EDGE pixels of radius r.
+        y, x = np.ogrid[:size, :size]
+        d = np.sqrt((x - r) ** 2 + (y - r) ** 2)
+        alpha = np.clip((r - d) / EDGE, 0.0, 1.0) * 255.0
+        # pygame.surfarray.pixels_alpha indexes as [x, y]; numpy produced
+        # [y, x], so transpose before assigning.
+        arr = pygame.surfarray.pixels_alpha(brush)
+        arr[:, :] = alpha.astype(np.uint8).T
+        del arr  # release the surface lock
+        self._los_soft_brushes[r] = brush
+        return brush
+
     def _draw_fog(self, entities: list[dict]) -> None:
-        """Draw fog of war — player sees own team; spectator sees selected team."""
+        """Prepare fog-of-war onto `self._fog_surface` in SCREEN coordinates.
+
+        Does NOT touch `world_surface`. The caller is responsible for
+        blitting `_fog_surface` onto the screen after `camera.apply`.
+
+        Two layers of caching:
+        * `_los_brushes` / `_los_soft_brushes` — circle brushes keyed by
+          screen radius, built once and reused. Soft brushes have a radial
+          alpha gradient baked in, so BLEND_RGBA_SUB against FOG_ALPHA fog
+          produces smoothly faded edges without any separate blur pass.
+        * `_fog_cache_key` — snapped screen positions + radii. Camera pan or
+          zoom invalidates cache, but each miss is viewport-sized work
+          (previously map-sized) so misses are much cheaper.
+        """
+        self._fog_ready = False
         if self._is_spectator and self._team_view == 0:
             return  # "All Teams" view reveals everything
 
-        spectator_fog = self._is_spectator  # forces hard fog style for spectators
+        spectator_fog = self._is_spectator
         # 70% bg dimmed to ~30% → alpha ≈ 146; classic mode keeps heavier fog
         FOG_ALPHA = 146 if (self._fog_of_war and not spectator_fog) else 200
-        self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
+        soft_fog = self._fog_of_war and not spectator_fog
+        draw_border = not soft_fog
 
-        # Reuse cached LOS circles if available, otherwise collect fresh
         los_circles = getattr(self, '_los_cache', None)
         if los_circles is None:
             los_circles = self._collect_los_circles(entities)
 
+        # Convert LOS circles from world to screen coords. `camera.world_to_screen`
+        # returns viewport-relative coords — exactly what we need since the fog
+        # surface is viewport-sized.
+        cam = self._camera
+        zoom = cam.zoom
+        GRID = 2
+        fog_w, fog_h = self._fog_surface.get_size()
+        snapped: list[tuple[int, int, int]] = []
         for ex, ey, r in los_circles:
-            size = r * 2
-            cutout = pygame.Surface((size, size), pygame.SRCALPHA)
-            pygame.draw.circle(cutout, (0, 0, 0, FOG_ALPHA), (r, r), r)
-            self._fog_surface.blit(cutout, (ex - r, ey - r),
-                                   special_flags=pygame.BLEND_RGBA_SUB)
+            sx, sy = cam.world_to_screen(ex, ey)
+            # Snap to 2 px screen grid for cache stability; radius scales by zoom.
+            isx = (int(sx) // GRID) * GRID
+            isy = (int(sy) // GRID) * GRID
+            rs = max(1, int(r * zoom))
+            # Skip circles whose bbox is entirely off the fog viewport —
+            # they contribute no visible pixels and their presence in the
+            # cache key would invalidate the cache whenever off-screen
+            # units move.
+            if isx + rs < 0 or isx - rs > fog_w:
+                continue
+            if isy + rs < 0 or isy - rs > fog_h:
+                continue
+            snapped.append((isx, isy, rs))
+        snapped_tuple = tuple(snapped)
 
-        # Blur the fog edges for a softer look when soft fog_of_war is active
-        if self._fog_of_war and not spectator_fog:
-            w, h = self._fog_surface.get_size()
-            small = pygame.transform.smoothscale(self._fog_surface,
-                                                 (max(1, w // 4), max(1, h // 4)))
-            blurred = pygame.transform.smoothscale(small, (w, h))
-            self._fog_surface.blit(blurred, (0, 0))
+        cache_key = (FOG_ALPHA, soft_fog, draw_border, snapped_tuple)
+        if cache_key == self._fog_cache_key:
+            self._fog_ready = True
+            return
 
-        ws = self._world_surface
-        ws.blit(self._fog_surface, (0, 0))
+        # -- Rebuild fog_surface (viewport-sized, screen coords). --
+        if soft_fog:
+            # Render directly at full viewport resolution using soft-edged
+            # brushes. No smoothscale, no intermediate surface — the alpha
+            # ramp in the brush IS the blur.
+            self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
+            for sx, sy, rs in snapped:
+                brush = self._get_soft_brush(rs)
+                self._fog_surface.blit(brush, (sx - rs, sy - rs),
+                                       special_flags=pygame.BLEND_RGBA_SUB)
+        else:
+            # Hard fog (spectator) — full viewport resolution, no blur.
+            self._fog_surface.fill((0, 0, 0, FOG_ALPHA))
+            for sx, sy, rs in snapped:
+                brush = self._los_brushes.get(rs)
+                if brush is None:
+                    size = rs * 2
+                    brush = pygame.Surface((size, size), pygame.SRCALPHA)
+                    pygame.draw.circle(brush, (0, 0, 0, 255), (rs, rs), rs)
+                    self._los_brushes[rs] = brush
+                self._fog_surface.blit(brush, (sx - rs, sy - rs),
+                                       special_flags=pygame.BLEND_RGBA_SUB)
 
-        # Border at fog edge (skip when soft fog_of_war hides entities — blur is enough)
-        if not self._fog_of_war or spectator_fog:
+        # Border ring (hard fog only). Two-pass: gray then inner black so
+        # overlapping circles produce one ring around their union.
+        if draw_border:
             self._fog_border.fill((0, 0, 0))
-            for ex, ey, r in los_circles:
-                pygame.draw.circle(self._fog_border, (160, 160, 160), (ex, ey), r)
-            for ex, ey, r in los_circles:
-                pygame.draw.circle(self._fog_border, (0, 0, 0), (ex, ey), max(r - 1, 0))
-            ws.blit(self._fog_border, (0, 0))
+            for sx, sy, rs in snapped:
+                pygame.draw.circle(self._fog_border, (160, 160, 160),
+                                   (sx, sy), rs)
+            for sx, sy, rs in snapped:
+                pygame.draw.circle(self._fog_border, (0, 0, 0),
+                                   (sx, sy), max(rs - 1, 0))
+            # Composite border into fog_surface so a single final blit covers
+            # both. Colorkey on _fog_border makes black transparent.
+            self._fog_surface.blit(self._fog_border, (0, 0))
+
+        self._fog_cache_key = cache_key
+        self._fog_ready = True
+        # Surface was rebuilt — the GPU texture (if any) needs re-uploading.
+        self._fog_tex_dirty = True

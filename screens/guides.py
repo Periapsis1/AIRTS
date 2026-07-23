@@ -179,7 +179,7 @@ class GuidesScreen(BaseScreen):
                 self.screen.blit(surf, (content_x, y))
                 y += surf.get_height() + 4
 
-        pygame.display.flip()
+        self.present()
 
     @staticmethod
     def _wrap_text(font: pygame.font.Font, text: str, max_width: int) -> list[str]:

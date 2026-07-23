@@ -250,7 +250,26 @@ class ReplayPlaybackScreen(BaseScreen):
         self._world_surface = pygame.Surface((mw, mh))
         # SRCALPHA scratch for transient effects (death bursts)
         self._anim_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
+        # Shared SRCALPHA buffer for laser flashes — single fill + blit per
+        # frame regardless of flash count.
+        self._fx_surface = pygame.Surface((mw, mh), pygame.SRCALPHA)
         self._bg_surface, self._bg_tile = self._build_background(mw, mh)
+
+        # Obstacles are static for the replay — bake them into the bg
+        # surface once so the per-frame bg pass is a single cached blit.
+        for _obs in self._reader.obstacles:
+            _c = tuple(_obs.get("c", [120, 120, 120]))
+            if _obs["shape"] == "rect":
+                _x, _y, _w, _h = _obs["x"], _obs["y"], _obs["w"], _obs["h"]
+                pygame.draw.rect(self._bg_surface, _c, (_x, _y, _w, _h))
+                pygame.draw.rect(self._bg_surface, OBSTACLE_OUTLINE,
+                                 (_x, _y, _w, _h), 1)
+            elif _obs["shape"] == "circle":
+                _cx, _cy, _r = int(_obs["x"]), int(_obs["y"]), int(_obs["r"])
+                pygame.draw.circle(self._bg_surface, _c, (_cx, _cy), _r)
+                pygame.draw.circle(self._bg_surface, OBSTACLE_OUTLINE,
+                                   (_cx, _cy), _r, 1)
+
         self._camera = Camera(self._game_area.w, self._game_area.h,
                               mw, mh, max_zoom=CAMERA_MAX_ZOOM)
         self._mid_dragging = False
@@ -684,20 +703,13 @@ class ReplayPlaybackScreen(BaseScreen):
         mh = self._reader.map_height
         ws = self._world_surface
 
-        # Tiled space background
-        ws.blit(self._bg_surface, (0, 0))
-
-        # Draw obstacles (static) — no gy offset on world surface
-        for obs in self._reader.obstacles:
-            c = tuple(obs.get("c", [120, 120, 120]))
-            if obs["shape"] == "rect":
-                x, y, w, h = obs["x"], obs["y"], obs["w"], obs["h"]
-                pygame.draw.rect(ws, c, (x, y, w, h))
-                pygame.draw.rect(ws, OBSTACLE_OUTLINE, (x, y, w, h), 1)
-            elif obs["shape"] == "circle":
-                cx, cy, r = int(obs["x"]), int(obs["y"]), int(obs["r"])
-                pygame.draw.circle(ws, c, (cx, cy), r)
-                pygame.draw.circle(ws, OBSTACLE_OUTLINE, (cx, cy), r, 1)
+        # Tiled space background + pre-baked obstacles. Only the camera's
+        # viewport region is restored — `camera.apply` never reads outside
+        # it, so stale pixels off-viewport are harmless.
+        vp = self._camera.get_world_viewport_rect()
+        clipped = vp.clip(self._bg_surface.get_rect())
+        if clipped.w > 0 and clipped.h > 0:
+            ws.blit(self._bg_surface, (clipped.x, clipped.y), area=clipped)
 
         entities = self._get_interpolated_entities()
 
@@ -734,9 +746,25 @@ class ReplayPlaybackScreen(BaseScreen):
                     pygame.draw.circle(ws, SELECTED_COLOR,
                                        (int(ex), int(ey)), int(r), 1)
 
-        # Draw laser flashes
-        for lf in self._cur_lasers:
-            self._draw_laser(lf)
+        # Draw laser flashes — one shared SRCALPHA buffer, filled+blitted once
+        # regardless of flash count (was allocating a full-screen surface per
+        # flash, which tanked playback of heavy chain-lightning battles).
+        if self._cur_lasers:
+            drew_any = False
+            for lf in self._cur_lasers:
+                if len(lf) < 6:
+                    continue
+                if not drew_any:
+                    self._fx_surface.fill((0, 0, 0, 0))
+                    drew_any = True
+                color = lf[4]
+                pygame.draw.line(
+                    self._fx_surface,
+                    (color[0], color[1], color[2], 200),
+                    (lf[0], lf[1]), (lf[2], lf[3]), lf[5],
+                )
+            if drew_any:
+                ws.blit(self._fx_surface, (0, 0))
 
         # Death-burst particles
         if self._death_bursts:
@@ -865,7 +893,7 @@ class ReplayPlaybackScreen(BaseScreen):
         if self._stat_mode > 0:
             self._draw_stat_dropdown()
 
-        pygame.display.flip()
+        self.present()
 
     # -- chat overlay -----------------------------------------------------------
 
@@ -1134,7 +1162,7 @@ class ReplayPlaybackScreen(BaseScreen):
 
         self._stat_close_btn.draw(self.screen)
         self._stat_debug_btn.draw(self.screen)
-        pygame.display.flip()
+        self.present()
 
     def _draw_build_order_tab(self):
         """Draw multi-column scrollable build order within the graph area.
@@ -1646,18 +1674,6 @@ class ReplayPlaybackScreen(BaseScreen):
         if hp < METAL_EXTRACTOR_HP:
             self._draw_health_bar(x, y, r + HEALTH_BAR_OFFSET,
                                   hp, METAL_EXTRACTOR_HP)
-
-    def _draw_laser(self, lf: list):
-        if len(lf) < 6:
-            return
-        ws = self._world_surface
-        x1, y1, x2, y2 = lf[0], lf[1], lf[2], lf[3]
-        color = tuple(lf[4])
-        width = lf[5]
-        temp = pygame.Surface(ws.get_size(), pygame.SRCALPHA)
-        c = (*color[:3], 200)
-        pygame.draw.line(temp, c, (x1, y1), (x2, y2), width)
-        ws.blit(temp, (0, 0))
 
     def _draw_health_bar(self, cx: float, cy: float, offset_y: float,
                          hp: float, max_hp: float,

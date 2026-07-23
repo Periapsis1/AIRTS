@@ -30,6 +30,12 @@ class Camera:
         self.cy = world_h / 2.0
         self._clamp()
 
+        # Reusable scale buffer — avoids the ~viewport-sized per-frame surface
+        # allocation that `pygame.transform.scale` does implicitly when no
+        # dest_surface is passed. Re-created only when the scaled dimensions
+        # change (zoom change, or edge panning that clips the viewport).
+        self._scale_buffer: pygame.Surface | None = None
+
     # -- mutators -----------------------------------------------------------
 
     def pan(self, dx_screen: float, dy_screen: float) -> None:
@@ -96,20 +102,32 @@ class Camera:
               target_surface: pygame.Surface,
               dest: tuple[int, int] = (0, 0)) -> None:
         """Extract the visible viewport from *world_surface*, scale it, and
-        blit to *target_surface* at *dest*."""
+        blit to *target_surface* at *dest*.
+
+        At zoom == 1.0 (the most common case) the scale step is a no-op pixel
+        copy — skip it and blit the subsurface directly.
+        """
         vp = self.get_world_viewport_rect()
         clipped = vp.clip(world_surface.get_rect())
         if clipped.w <= 0 or clipped.h <= 0:
             return
         sub = world_surface.subsurface(clipped)
+        if self.zoom == 1.0:
+            target_surface.blit(sub, (dest[0] + clipped.x - vp.x,
+                                      dest[1] + clipped.y - vp.y))
+            return
         scaled_w = int(clipped.w * self.zoom)
         scaled_h = int(clipped.h * self.zoom)
         if scaled_w <= 0 or scaled_h <= 0:
             return
-        scaled = pygame.transform.scale(sub, (scaled_w, scaled_h))
+        buf = self._scale_buffer
+        if buf is None or buf.get_size() != (scaled_w, scaled_h):
+            buf = pygame.Surface((scaled_w, scaled_h))
+            self._scale_buffer = buf
+        pygame.transform.scale(sub, (scaled_w, scaled_h), buf)
         offset_x = int((clipped.x - vp.x) * self.zoom)
         offset_y = int((clipped.y - vp.y) * self.zoom)
-        target_surface.blit(scaled, (dest[0] + offset_x, dest[1] + offset_y))
+        target_surface.blit(buf, (dest[0] + offset_x, dest[1] + offset_y))
 
     # -- internal -----------------------------------------------------------
 

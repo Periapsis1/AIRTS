@@ -73,4 +73,4 @@ class CrashNoticeScreen(BaseScreen):
             y += 24
 
         self._btn.draw(self.screen)
-        pygame.display.flip()
+        self.present()

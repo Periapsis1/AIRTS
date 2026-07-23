@@ -11,6 +11,7 @@ import struct
 import zlib
 
 DEFAULT_PORT = 7777
+DEFAULT_WS_PORT = 7778  # WebSocket listener (browser clients); separate from TCP
 COMPRESS_THRESHOLD = 1024  # bytes — compress payloads larger than this
 
 _HEADER = struct.Struct("!I")  # 4 bytes, big-endian unsigned int
