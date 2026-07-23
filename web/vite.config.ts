@@ -6,6 +6,9 @@ import { defineConfig } from "vite";
 // bundle served behind the same reverse proxy that fronts the WS endpoint.
 export default defineConfig({
   root: ".",
+  // Relative asset URLs so the built bundle works from any mount point
+  // (subdomain root, a /path/ on an existing site, or a bare port).
+  base: "./",
   server: {
     host: true,
     port: 4444,

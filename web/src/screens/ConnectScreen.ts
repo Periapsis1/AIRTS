@@ -16,9 +16,18 @@ import {
 import { drawText } from "../ui/Text";
 
 function defaultWsUrl(): string {
-  const host = window.location.hostname || "127.0.0.1";
+  // Explicit override baked in at build time, if provided.
+  const env = (import.meta as { env?: Record<string, string> }).env;
+  if (env?.VITE_WS_URL) return env.VITE_WS_URL;
+  const { protocol, hostname, port } = window.location;
+  // Served over TLS: the game WS must be wss:// and browsers block plain
+  // ws:// (mixed content) — assume the same origin proxies /ws to the
+  // GameHost (see the nginx location block in the deploy notes).
+  if (protocol === "https:") {
+    return `wss://${hostname}${port ? `:${port}` : ""}/ws`;
+  }
   // Dev/default: the GameHost WS listener is on 7778.
-  return `ws://${host}:7778`;
+  return `ws://${hostname || "127.0.0.1"}:7778`;
 }
 
 export class ConnectScreen extends Screen {
