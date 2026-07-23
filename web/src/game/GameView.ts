@@ -29,6 +29,7 @@ import type {
   FogMode,
   FragmentFx,
   RenderFrame,
+  WorldLabelFx,
   WorldRenderer,
 } from "../render/WorldRenderer";
 import { Extrapolation } from "./Extrapolation";
@@ -108,6 +109,9 @@ export class GameView {
   t2Upgrades = new Map<number, Set<string>>();
   t2Researching = new Map<number, Set<string>>();
 
+  // team id -> display name (from game_start), for CC labels
+  private teamNames = new Map<number, string>();
+
   // Client-side VFX state
   private phase: "warp_in" | "playing" | "explode" = "warp_in";
   private animTimer = 0;
@@ -146,6 +150,13 @@ export class GameView {
     this.fogOfWar = gs.fog_of_war;
     this.enableT2 = gs.enable_t2;
     this.myTeam = gs.player_team?.[String(conn.playerId)] ?? 0;
+
+    // team -> player name for the CC labels (client_game.py _draw_team_labels)
+    const pteam = gs.player_team ?? {};
+    for (const [pid, name] of Object.entries(gs.player_names ?? {})) {
+      const tm = pteam[pid] ?? Number(pid);
+      if (!this.teamNames.has(tm)) this.teamNames.set(tm, name);
+    }
 
     this.camera = new Camera(area.w, area.h, this.mapW, this.mapH, cfg.maxZoom);
     this.extrap = new Extrapolation(cfg);
@@ -785,6 +796,31 @@ export class GameView {
         });
       }
     }
+    // Team names above CCs + ME spawn-bonus labels
+    const labels: WorldLabelFx[] = [];
+    for (const e of entities) {
+      if (e.ghost) continue;
+      if (e.t === "CC") {
+        const cc = e as CCEntity;
+        let text = this.teamNames.get(cc.tm) ?? `Team ${cc.tm}`;
+        const bp = cc.bp ?? 0;
+        if (bp > 0) text += ` (+${bp}%)`;
+        labels.push({ x: cc.x, y: cc.y - 40, text, color: cc.c ?? [255, 255, 255], size: 20 });
+      } else if (e.t === "ME") {
+        const me = e as MEEntity;
+        const meb = me.meb ?? 0;
+        if (meb > 0) {
+          labels.push({
+            x: me.x,
+            y: me.y - (me.r ?? 10) - this.cfg.healthBarOffset - 12,
+            text: `+${meb}%`,
+            color: [255, 255, 255],
+            size: 14,
+          });
+        }
+      }
+    }
+
     let chatsFx: FloatingChatFx[] | undefined;
     if (this.floatingChats.length) {
       chatsFx = this.floatingChats.map((fc) => {
@@ -818,6 +854,7 @@ export class GameView {
       bursts: burstsFx,
       fragments: fragmentsFx,
       floatingChats: chatsFx,
+      labels: labels.length ? labels : undefined,
     };
     this.renderer.draw(frame);
   }

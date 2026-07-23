@@ -30,6 +30,16 @@ export interface FloatingChatFx {
   alpha: number; // 0..1
 }
 
+/** Fixed world-anchored text (team names above CCs, ME bonus %). Drawn in
+ *  screen space above the fog; `size` is the base font px at zoom 1. */
+export interface WorldLabelFx {
+  x: number;
+  y: number;
+  text: string;
+  color: RGBTuple;
+  size: number;
+}
+
 export interface CameraView {
   cx: number;
   cy: number;
@@ -68,6 +78,8 @@ export interface RenderFrame {
   fragments?: FragmentFx[];
   /** Floating chat texts above sender CCs. */
   floatingChats?: FloatingChatFx[];
+  /** Team names above CCs + ME bonus labels. */
+  labels?: WorldLabelFx[];
 }
 
 export interface WorldRenderer {

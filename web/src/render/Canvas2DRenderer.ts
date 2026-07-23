@@ -95,8 +95,31 @@ export class Canvas2DRenderer implements WorldRenderer {
     ctx.restore();
     if (frame.fogMode !== "none") this.drawFog(frame);
 
-    // Floating chat text sits above the fog (screen space).
+    // Fixed labels + floating chat text sit above the fog (screen space).
+    if (frame.labels?.length) this.drawWorldLabels(frame);
     if (frame.floatingChats?.length) this.drawFloatingChats(frame);
+  }
+
+  /** Team names above CCs and ME bonus % labels — screen space so the text
+   *  stays crisp at any zoom (client_game.py _draw_team_labels_screen). */
+  private drawWorldLabels(frame: RenderFrame): void {
+    const ctx = this.ctx;
+    const { cam, dpr } = frame;
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.beginPath();
+    ctx.rect(cam.gx, cam.gy, cam.vpW, cam.vpH);
+    ctx.clip();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (const lb of frame.labels ?? []) {
+      const [sx, sy] = this.w2s(cam, lb.x, lb.y);
+      if (sx < -100 || sx > cam.vpW + 100 || sy < -40 || sy > cam.vpH + 40) continue;
+      ctx.font = `${Math.max(8, Math.round(lb.size * cam.zoom))}px system-ui, sans-serif`;
+      ctx.fillStyle = rgb(lb.color);
+      ctx.fillText(lb.text, cam.gx + sx, cam.gy + sy);
+    }
+    ctx.restore();
   }
 
   /** Warp-in animation: CC polygon scales in with an expanding glow ring. */
