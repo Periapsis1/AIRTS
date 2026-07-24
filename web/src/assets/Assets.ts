@@ -2,7 +2,14 @@
 // background; the renderer uses it once `complete`, falling back to a flat
 // fill until then (so first frames never block).
 
-const NEBULA_URLS = ["/tiles/nebula1.png", "/tiles/nebula2.png", "/tiles/nebula3.png"];
+// Base-relative so tiles resolve at any mount point (see `base` in vite.config.ts).
+const BASE = (import.meta as { env?: Record<string, string> }).env?.BASE_URL ?? "/";
+
+const NEBULA_URLS = [
+  `${BASE}tiles/nebula1.png`,
+  `${BASE}tiles/nebula2.png`,
+  `${BASE}tiles/nebula3.png`,
+];
 
 class AssetStore {
   nebula: HTMLImageElement | null = null;

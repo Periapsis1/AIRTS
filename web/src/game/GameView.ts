@@ -55,6 +55,7 @@ const MAX_DEATH_BURSTS = 200;
 const BURST_DURATION = 0.55;
 const FLOAT_TEXT_DURATION = 4.0;
 const FLOAT_TEXT_RISE = 30;
+const ACTION_FLASH_DURATION = 0.25;
 
 interface DeathBurst {
   x: number;
@@ -121,6 +122,12 @@ export class GameView {
   // Last-seen CC visuals so the explosion can fragment CCs that died in the
   // same frame the winner was decided (they may be gone from `entities`).
   private ccCache = new Map<number, { x: number; y: number; pts: [number, number][]; c: RGBTuple; tm: number }>();
+  // CCs that fragmented in the explosion — filtered out of `entities` so the
+  // intact hull doesn't keep rendering underneath its own debris.
+  private explodedCCIds = new Set<number>();
+  // HUD action buttons briefly highlight after their command fires (keyed by
+  // action name -> clock time of the press).
+  private actionFlashes = new Map<string, number>();
 
   // selection + command state
   selectedIds = new Set<number>();
@@ -167,7 +174,9 @@ export class GameView {
   }
 
   onState(frame: StateFrame): void {
-    this.entities = frame.entities;
+    this.entities = this.explodedCCIds.size
+      ? frame.entities.filter((e) => !this.explodedCCIds.has(e.id))
+      : frame.entities;
     this.lasers = frame.lasers ?? [];
     this.splashes = frame.splashes ?? [];
     this.tick = frame.tick;
@@ -234,8 +243,9 @@ export class GameView {
     if (this.phase === "explode") return;
     this.phase = "explode";
     this.animTimer = 0;
-    for (const cc of this.ccCache.values()) {
+    for (const [ccId, cc] of this.ccCache) {
       if (winner !== -1 && cc.tm === winner) continue;
+      this.explodedCCIds.add(ccId);
       const pts = cc.pts;
       for (let i = 0; i < pts.length; i++) {
         const p1 = pts[i];
@@ -258,6 +268,9 @@ export class GameView {
           color: cc.c,
         });
       }
+    }
+    if (this.explodedCCIds.size) {
+      this.entities = this.entities.filter((e) => !this.explodedCCIds.has(e.id));
     }
   }
 
@@ -320,7 +333,7 @@ export class GameView {
 
   // -- camera + command input -------------------------------------------
 
-  update(dt: number, input: Input, area: GameArea, blockWorld: boolean): void {
+  update(dt: number, input: Input, area: GameArea, blockWorld: boolean, winH?: number): void {
     this.clock += dt;
     this.camera.setViewport(area.w, area.h);
     const mx = input.mouseX - area.x;
@@ -343,16 +356,18 @@ export class GameView {
       this.panActive = false;
     }
 
-    // Edge pan (screen edges)
+    // Edge pan (window edges — the bottom threshold sits at the window edge,
+    // NOT the game-area edge, so hovering the HUD doesn't drag the camera).
     if (!input.middleDown) {
       const m = this.cfg.edgePanMargin;
       const s = this.cfg.edgePanSpeed * dt;
+      const bottom = (winH ?? area.y + area.h) - m;
       let dx = 0;
       let dy = 0;
       if (input.mouseX <= m) dx = s;
       else if (input.mouseX >= area.x + area.w - m) dx = -s;
       if (input.mouseY <= m) dy = s;
-      else if (input.mouseY >= area.y + area.h - m) dy = -s;
+      else if (input.mouseY >= bottom) dy = -s;
       if (dx !== 0 || dy !== 0) this.camera.pan(dx, dy);
     }
 
@@ -546,7 +561,16 @@ export class GameView {
 
   private cmdStop(): void {
     const ids = this.selectedUnits().map((u) => u.id);
-    if (ids.length) this.commander.stop(ids);
+    if (ids.length) {
+      this.commander.stop(ids);
+      this.actionFlashes.set("stop", this.clock);
+    }
+  }
+
+  /** True while an action button should show its brief "command fired" flash. */
+  actionFlashing(action: string): boolean {
+    const t = this.actionFlashes.get(action);
+    return t !== undefined && this.clock - t < ACTION_FLASH_DURATION;
   }
 
   private cmdToggleHoldFire(): void {

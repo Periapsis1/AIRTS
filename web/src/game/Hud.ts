@@ -19,6 +19,8 @@ const STAT_VALUE: RGB = [200, 200, 220];
 const BTN_NORMAL: RGB = [45, 45, 55];
 const BTN_HOVER: RGB = [60, 60, 80];
 const BTN_SELECTED: RGB = [60, 200, 120];
+const BTN_PRESSED: RGB = [32, 82, 56];
+const HOTKEY_COLOR: RGB = [255, 255, 255];
 const BTN_DISABLED_BG: RGB = [38, 38, 48];
 const BTN_DISABLED_TEXT: RGB = [110, 110, 125];
 const OBSTACLE_MM: RGB = [80, 80, 80];
@@ -39,13 +41,20 @@ const UPGRADE_BTN_GAP = 6;
 const TT_PAD = 8;
 const TT_LINE_H = 18;
 const BUILD_HOTKEY_LETTERS = ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"];
-const ACTIONS: [string, string][] = [
-  ["stop", "S"],
-  ["attack", "A"],
-  ["move", "M"],
-  ["fight", "F"],
-  ["hold_fire", "H"],
+const ACTIONS: [string, string, string][] = [
+  ["stop", "S", "Stop"],
+  ["attack", "A", "Attack"],
+  ["move", "M", "Move"],
+  ["fight", "F", "Fight"],
+  ["hold_fire", "H", "Hold Fire"],
 ];
+const ACTION_DESCRIPTIONS: Record<string, string> = {
+  stop: "Halt the selected units immediately and clear their current orders.",
+  attack: "Attack: right-click an enemy to attack it, or a point to attack-move — advancing and engaging anything met on the way.",
+  move: "Move: plain move order — units travel to the point without stopping to engage.",
+  fight: "Fight: move toward a point, pausing to engage enemies that come into range along the way.",
+  hold_fire: "Hold Fire: toggle — units will not shoot until hold fire is released.",
+};
 
 interface Rect {
   x: number;
@@ -102,8 +111,8 @@ export class Hud {
     return out;
   }
 
-  private actionBtnRects(ar: Rect): { rect: Rect; action: string; key: string }[] {
-    return ACTIONS.map(([action, key], i) => ({
+  private actionBtnRects(ar: Rect): { rect: Rect; action: string; key: string; label: string }[] {
+    return ACTIONS.map(([action, key, label], i) => ({
       rect: {
         x: ar.x + PAD + i * (ACTION_BTN_SIZE + ACTION_BTN_GAP),
         y: ar.y + PAD + HDR,
@@ -112,6 +121,7 @@ export class Hud {
       },
       action,
       key,
+      label,
     }));
   }
 
@@ -427,7 +437,15 @@ export class Hud {
         const selected = ut === current;
         const hover = !ui.pressConsumed && this.inRect(ui, rect);
         if (hover) hoveredType = ut;
-        this.drawButton(ui, rect, this.displayName(ut).slice(0, 3), BUILD_HOTKEY_LETTERS[i] ?? "", selected);
+        this.drawButton(ui, rect, "", BUILD_HOTKEY_LETTERS[i] ?? "", false);
+        this.drawUnitSymbol(ui, rect, ut, cc.c ?? this.cfg.teamColor(cc.tm));
+        if (selected) {
+          // Producing: green border instead of a filled button, so the unit
+          // icon keeps its team color rather than turning into a cutout.
+          ctx.strokeStyle = rgb(BTN_SELECTED);
+          ctx.lineWidth = 2;
+          ctx.strokeRect(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+        }
         if (teamT2.has(ut)) this.drawT2Chevron(ui, rect.x + rect.w - 7, rect.y + 7);
       }
       if (hoveredType) this.drawUnitTooltip(ui, ar, hoveredType, teamT2.has(hoveredType));
@@ -436,18 +454,26 @@ export class Hud {
     } else {
       drawText(ctx, "Actions", ar.x + PAD, ar.y + 4, { size: 14, color: TITLE_COLOR });
       let btnBottom = ar.y + PAD + HDR;
-      for (const { rect, action, key } of this.actionBtnRects(ar)) {
+      const units = this.view.selectedUnits();
+      let hoveredAction: { action: string; key: string; label: string } | null = null;
+      for (const btn of this.actionBtnRects(ar)) {
+        const { rect, action, key, label } = btn;
         const active =
-          (action === "attack" && this.view.attackMode) || (action === "fight" && this.view.fightMode);
-        this.drawButton(ui, rect, action[0].toUpperCase(), key, active);
+          (action === "attack" && this.view.attackMode) ||
+          (action === "fight" && this.view.fightMode) ||
+          this.view.actionFlashing(action);
+        // Hold fire renders as a held-down toggle while the selection has it on.
+        const pressed = action === "hold_fire" && units.length > 0 && units.every((u) => u.hf);
+        if (!ui.pressConsumed && this.inRect(ui, rect)) hoveredAction = btn;
+        this.drawButton(ui, rect, label, key, active, pressed, 9);
         btnBottom = Math.max(btnBottom, rect.y + rect.h);
       }
       // Abilities panel for a single selected unit
-      const units = this.view.selectedUnits();
       const sel = this.view.selectedIds;
       if (units.length === 1 && sel.size === 1) {
         this.drawAbilitiesPanel(ui, ar, units[0], btnBottom + 8);
       }
+      if (hoveredAction) this.drawActionTooltip(ui, ar, hoveredAction);
     }
   }
 
@@ -761,20 +787,65 @@ export class Hud {
     }
   }
 
-  private drawButton(ui: UI, rect: Rect, label: string, key: string, selected: boolean): void {
+  private drawButton(
+    ui: UI,
+    rect: Rect,
+    label: string,
+    key: string,
+    selected: boolean,
+    pressed = false,
+    labelSize = 13,
+  ): void {
     const ctx = ui.ctx;
     const hover = !ui.pressConsumed && this.inRect(ui, rect);
-    ui.fillRect(rect.x, rect.y, rect.w, rect.h, selected ? BTN_SELECTED : hover ? BTN_HOVER : BTN_NORMAL);
-    ctx.strokeStyle = rgb(DIVIDER);
+    const bg = selected ? BTN_SELECTED : pressed ? BTN_PRESSED : hover ? BTN_HOVER : BTN_NORMAL;
+    ui.fillRect(rect.x, rect.y, rect.w, rect.h, bg);
+    ctx.strokeStyle = rgb(pressed ? BTN_SELECTED : DIVIDER);
     ctx.lineWidth = 1;
     ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
-    drawText(ctx, label, rect.x + rect.w / 2, rect.y + rect.h / 2, {
-      size: 13,
+    drawText(ctx, this.ellipsize(ctx, label, labelSize, rect.w - 4), rect.x + rect.w / 2, rect.y + rect.h / 2, {
+      size: labelSize,
       color: selected ? [20, 20, 20] : TITLE_COLOR,
       align: "center",
       baseline: "middle",
     });
-    if (key) drawText(ctx, key, rect.x + 3, rect.y + 2, { size: 10, color: STAT_LABEL });
+    if (key) drawText(ctx, key, rect.x + 3, rect.y + 2, { size: 10, color: HOTKEY_COLOR });
+  }
+
+  private ellipsize(ctx: CanvasRenderingContext2D, text: string, size: number, maxW: number): string {
+    if (!text || measure(ctx, text, size) <= maxW) return text;
+    let t = text;
+    while (t.length > 1 && measure(ctx, t + "…", size) > maxW) t = t.slice(0, -1);
+    return t.trimEnd() + "…";
+  }
+
+  /** Hover tooltip for an action button: full command name, hotkey, and a
+   *  brief description of what the command does. */
+  private drawActionTooltip(ui: UI, ar: Rect, btn: { action: string; key: string; label: string }): void {
+    const ctx = ui.ctx;
+    const desc = ACTION_DESCRIPTIONS[btn.action] ?? "";
+    const ttW = 240;
+    const innerW = ttW - TT_PAD * 2;
+    const descLines = desc ? this.wrapText(ctx, desc, 12, innerW) : [];
+    const ttH = TT_PAD + TT_LINE_H + 4 + descLines.length * (TT_LINE_H - 2) + TT_PAD;
+    const ttX = ar.x + 10;
+    const ttY = ar.y - ttH - 6;
+
+    ui.fillRect(ttX, ttY, ttW, ttH, TT_BG);
+    ctx.strokeStyle = rgb(TT_BORDER);
+    ctx.lineWidth = 1;
+    ctx.strokeRect(ttX + 0.5, ttY + 0.5, ttW - 1, ttH - 1);
+
+    drawText(ctx, btn.label, ttX + TT_PAD, ttY + TT_PAD, { size: 15, color: [220, 220, 240] });
+    drawText(ctx, `[${btn.key}]`, ttX + TT_PAD + measure(ctx, btn.label, 15) + 8, ttY + TT_PAD + 2, {
+      size: 12,
+      color: STAT_LABEL,
+    });
+    let y = ttY + TT_PAD + TT_LINE_H + 4;
+    for (const line of descLines) {
+      drawText(ctx, line, ttX + TT_PAD, y, { size: 12, color: [160, 160, 180] });
+      y += TT_LINE_H - 2;
+    }
   }
 
   private inRect(ui: UI, r: Rect): boolean {

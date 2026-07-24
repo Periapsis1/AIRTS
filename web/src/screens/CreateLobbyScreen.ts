@@ -69,7 +69,8 @@ const MAP_SIZES: Record<string, [number, number]> = {
   medium: [1200, 800],
   large: [1800, 1200],
 };
-const TEAM_CHOICES: Choice[] = Array.from({ length: 8 }, (_, i) => [String(i + 1), `Team ${i + 1}`]);
+// Label is just the number — the dropdown is narrow and "Team N" gets clipped.
+const TEAM_CHOICES: Choice[] = Array.from({ length: 8 }, (_, i) => [String(i + 1), String(i + 1)]);
 
 const MAX_SLOTS = 8;
 const MIN_SLOTS = 2;
@@ -79,8 +80,8 @@ const SYNC_MIN_INTERVAL = 0.2; // seconds between host lobby_settings broadcasts
 const HANDICAP_STEPS = [-100, -75, -50, -25, 0, 25, 50, 75, 100, 150, 200];
 
 function handicapLabel(pct: number): string {
-  if (pct === 0) return "Hcp";
-  return `${pct > 0 ? "+" : ""}${pct}%`;
+  if (pct === 0) return "Handicap";
+  return `Handicap ${pct > 0 ? "+" : ""}${pct}%`;
 }
 
 function cycleHandicap(current: number): number {
@@ -434,17 +435,16 @@ export class CreateLobbyScreen extends Screen {
     const aiX = labelX + 44;
     const aiW = 155;
     const teamX = aiX + aiW + 8;
-    const teamW = 72;
+    const teamW = 56;
     const hcpX = teamX + teamW + 6;
-    const hcpW = 56;
+    const hcpW = 112;
     const specX = hcpX + hcpW + 6;
-    const specW = 52;
+    const specW = 106;
     const removeX = specX + specW + 6;
     const slotYStart = 104;
     const aiChoices = this.activeChoices();
 
-    drawText(ctx, "Team", teamX + 14, 86, { size: 13, color: HDR_COLOR });
-    drawText(ctx, "Hcp", hcpX + 14, 86, { size: 13, color: HDR_COLOR });
+    drawText(ctx, "Team", teamX + 6, 86, { size: 13, color: HDR_COLOR });
 
     let removeRequest = -1;
     for (let i = 0; i < this.slots.length; i++) {
@@ -524,7 +524,7 @@ export class CreateLobbyScreen extends Screen {
         if (host) s.team = newTeam;
         else if (newTeam !== s.team) this.sendRequest(newTeam, s.spectator);
       } else {
-        drawText(ctx, s.spectator ? "—" : `Team ${s.team}`, teamX + 4, dotCy, {
+        drawText(ctx, s.spectator ? "—" : String(s.team), teamX + 6, dotCy, {
           size: 15,
           color: CONTENT_TEXT,
           baseline: "middle",
@@ -548,8 +548,8 @@ export class CreateLobbyScreen extends Screen {
 
       // spectator toggle: host for anyone, guests for themselves
       if (s.isHuman && (host || isYou)) {
-        const specLabel = s.spectator ? "Play" : "Spec";
-        if (ui.button(`lobby.spec.${i}`, specX, y, specW, DD_HEIGHT, specLabel, { fontSize: 12 })) {
+        const specLabel = s.spectator ? "Join Game" : "Join Spectator";
+        if (ui.button(`lobby.spec.${i}`, specX, y, specW, DD_HEIGHT, specLabel, { fontSize: 11 })) {
           if (host) s.spectator = !s.spectator;
           else this.sendRequest(s.team, !s.spectator);
         }

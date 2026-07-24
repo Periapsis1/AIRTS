@@ -35,8 +35,8 @@ _PASSIVES: dict[str, list[dict[str, str]]] = {
     ],
     "tank": [
         {"name": "Reactive Armor",
-         "desc": (f"Every {REACTIVE_ARMOR_INTERVAL:.0f}s gain a charge "
-                  f"(max {REACTIVE_ARMOR_MAX_STACKS}). Each charge reduces "
+         "desc": (f"Every {REACTIVE_ARMOR_INTERVAL:.0f}s gain a charge, "
+                  f"up to {REACTIVE_ARMOR_MAX_STACKS}. Each charge reduces "
                   f"incoming damage by {REACTIVE_ARMOR_REDUCTION * 100:.0f}%. "
                   "All charges consumed when hit.")},
     ],

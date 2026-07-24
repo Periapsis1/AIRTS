@@ -81,10 +81,10 @@ UNIT_TYPES = {
         "weapon": {"name": "Laser", "damage": 8, "range": 45, "cooldown": 2.0},
     },
     "sniper": {
-        "hp": 50, "speed": 30, "radius": 5,
+        "hp": 50, "speed": 35, "radius": 5,
         "symbol": SNIPER_SYMBOL, "can_attack": True,
         "fov": 35, "turn_rate": 50, "los": 125,
-        "weapon": {"name": "Heavy Laser", "damage": 30, "range": 140, "cooldown": 6.0,
+        "weapon": {"name": "Heavy Laser", "damage": 40, "range": 140, "cooldown": 6.0,
                    "laser_width": 3, "sound": "laser"},
     },
     "machine_gunner": {
@@ -135,8 +135,8 @@ UNIT_TYPES = {
     "sweeper": {
         "hp": 30, "speed": 30, "radius": 3,
         "symbol": None, "can_attack": False, "hollow": True,
-        "fov": 360, "turn_rate": 90, "los": 50,
-        "weapon": {"name": "Laser", "damage": 0, "range": 50, "cooldown": 1.0},
+        "fov": 360, "turn_rate": 90, "los": 0,
+        "weapon": {"name": "Laser", "damage": 0, "range": 60, "cooldown": 1.0},
     },
     "command_center": {
         "hp": 1000, "speed": 0, "radius": 10,
@@ -179,10 +179,10 @@ UNIT_TYPES = {
         "is_t2": True,
     },
     "sniper_t2": {
-        "hp": 65, "speed": 35, "radius": 6,
+        "hp": 75, "speed": 40, "radius": 6,
         "symbol": SNIPER_SYMBOL, "can_attack": True,
         "fov": 35, "turn_rate": 50, "los": 135,
-        "weapon": {"name": "Heavy Laser", "damage": 45, "range": 150, "cooldown": 6.0,
+        "weapon": {"name": "Heavy Laser", "damage": 55, "range": 150, "cooldown": 5.0,
                    "laser_width": 3, "sound": "laser"},
         "is_t2": True,
     },

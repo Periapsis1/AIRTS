@@ -44,8 +44,8 @@ await host.screenshot({ path: "shots/mp_02_host_sees_guest.png" });
 await guest.screenshot({ path: "shots/mp_03_guest_view.png" });
 
 // Host: remove the AI slot (row 3 after humans-first sort) -> clean 1v1.
-// The × sits after the team/hcp/spec columns: x = 457..483, row 3 y ≈ 197.
-await host.mouse.click(470, 197);
+// The × sits after the team/handicap/spectator columns: x = 551..577, y ≈ 197.
+await host.mouse.click(564, 197);
 await host.waitForTimeout(500);
 await host.screenshot({ path: "shots/mp_04_host_1v1.png" });
 await guest.screenshot({ path: "shots/mp_05_guest_1v1.png" });
