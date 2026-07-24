@@ -154,7 +154,7 @@ class Unit(CircleEntity, Damageable):
             self.abilities = [Overclock(regen=OVERCLOCK_REGEN, bonus=OVERCLOCK_BONUS)]
         elif unit_type == "engineer_t2":
             self.abilities = [Overclock(regen=OVERCLOCK_REGEN_T2, bonus=OVERCLOCK_BONUS_T2)]
-        elif unit_type == "sweeper":
+        elif unit_type in ("sweeper", "sweeper_t2"):
             self.abilities = [Detection()]
 
         # -- detection aura receive state ---------------------------------------

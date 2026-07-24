@@ -536,7 +536,7 @@ class Game:
         )
         # Sweeper detection aura needs live sweeper + ally-target lists.
         Detection.all_sweepers = tuple(
-            u for u in self.units if u.alive and u.unit_type == "sweeper"
+            u for u in self.units if u.alive and u.unit_type in ("sweeper", "sweeper_t2")
         )
         Detection.all_units = tuple(u for u in self.units if u.alive)
 
