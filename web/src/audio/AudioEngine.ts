@@ -3,11 +3,15 @@
 // client's runtime pitch-shift). Browsers block audio until a user gesture, so
 // resume() must be called from a click/keypress before anything plays.
 
+// Base-relative so assets resolve at any mount point (see `base` in
+// vite.config.ts); with base "./" this yields e.g. "./sounds/laser.mp3".
+const BASE = (import.meta as { env?: Record<string, string> }).env?.BASE_URL ?? "/";
+
 const SOUND_URLS: Record<string, string> = {
-  laser: "/sounds/laser.mp3",
-  fast_laser: "/sounds/fast_laser.mp3",
+  laser: `${BASE}sounds/laser.mp3`,
+  fast_laser: `${BASE}sounds/fast_laser.mp3`,
 };
-const MUSIC_URLS = ["/music/ambient1.mp3", "/music/ambient2.mp3"];
+const MUSIC_URLS = [`${BASE}music/ambient1.mp3`, `${BASE}music/ambient2.mp3`];
 
 export class AudioEngine {
   private ctx: AudioContext | null = null;

@@ -140,7 +140,7 @@ export class ClientGameScreen extends Screen {
 
     // -- update + render world --
     if (ready && this.view && this.hud) {
-      this.view.update(dt, ui.input, area, blockWorld);
+      this.view.update(dt, ui.input, area, blockWorld, ui.h);
       this.view.render(ui.dpr, area);
       this.hud.render(ui);
       if (!blockWorld) this.hud.handleClick(ui);

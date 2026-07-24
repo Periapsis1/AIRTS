@@ -30,9 +30,29 @@ function defaultWsUrl(): string {
   return `ws://${hostname || "127.0.0.1"}:7778`;
 }
 
+function loadSaved(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null; // storage blocked (private mode etc.)
+  }
+}
+
+function save(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* best-effort */
+  }
+}
+
+// The WS url is saved per page origin so a dev-server value never leaks into
+// the deployed site (each origin has its own correct default).
+const WS_URL_KEY = `airts.wsUrl:${window.location.origin}`;
+
 export class ConnectScreen extends Screen {
-  private urlText = defaultWsUrl();
-  private nameText = "Player";
+  private urlText = loadSaved(WS_URL_KEY) ?? defaultWsUrl();
+  private nameText = loadSaved("airts.playerName") ?? "Player";
   private connecting = false;
   private status = "";
 
@@ -71,6 +91,8 @@ export class ConnectScreen extends Screen {
     if (!this.connecting) {
       if (ui.button("connect.go", fx, y, fieldW, BTN_HEIGHT, "Connect")) {
         const name = this.nameText.trim() || "Player";
+        save("airts.playerName", name);
+        save(WS_URL_KEY, this.urlText.trim());
         const c = new Connection(this.urlText.trim(), name);
         c.connect();
         this.app.conn = c;

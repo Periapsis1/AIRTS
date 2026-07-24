@@ -26,6 +26,10 @@ const HB_BG: RGB = [60, 0, 0];
 const HB_FG: RGB = [0, 220, 0];
 const HB_LOW: RGB = [220, 0, 0];
 const CAPTURE_RANGE_FILL = "rgba(180,180,60,0.12)";
+// Command-line colors (desktop client parity: client_game.py _*_CMD_COLOR).
+const MOVE_CMD: RGB = [0, 140, 40];
+const ATTACK_CMD: RGB = [180, 30, 30];
+const FIGHT_CMD: RGB = [180, 50, 180];
 const ABILITY_COLORS: Record<string, RGB> = {
   reactive_armor: [200, 180, 60],
   electric_armor: [80, 180, 255],
@@ -76,6 +80,8 @@ export class Canvas2DRenderer implements WorldRenderer {
     for (const e of frame.entities) {
       if (e.t === "MS") this.drawMetalSpot(e as MSEntity);
     }
+    // Selection rings + FOV arcs go under the entity sprites.
+    this.drawSelectionUnderlay(frame);
     for (const e of frame.entities) {
       if (e.t === "CC") {
         if (warping) this.drawWarpInCC(e as CCEntity, frame.warpT!);
@@ -85,6 +91,7 @@ export class Canvas2DRenderer implements WorldRenderer {
     for (const e of frame.entities) {
       if (e.t === "U") this.drawUnit(e as UnitEntity);
     }
+    this.drawChargeBeams(frame.entities);
     this.drawSplashes(frame.splashes);
     this.drawLasers(frame.lasers);
     if (frame.bursts) this.drawBursts(frame.bursts);
@@ -507,30 +514,48 @@ export class Canvas2DRenderer implements WorldRenderer {
     }
   }
 
+  /** Selection rings + FOV arcs, drawn beneath the entity sprites. */
+  private drawSelectionUnderlay(frame: RenderFrame): void {
+    const ctx = this.ctx;
+    const sel = frame.selectedIds;
+    if (!sel.size) return;
+    this.drawFovArcs(frame);
+    ctx.strokeStyle = rgb(this.selColor);
+    ctx.lineWidth = 1;
+    for (const e of frame.entities) {
+      if (!sel.has(e.id)) continue;
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, (e.r ?? 5) + 3, 0, TAU);
+      ctx.stroke();
+    }
+  }
+
   private drawSelectionAndCommands(frame: RenderFrame): void {
     const ctx = this.ctx;
     const sel = frame.selectedIds;
-    if (sel.size) this.drawFovArcs(frame);
-    // Selection rings + command feedback lines for selected own units.
+    // Command feedback lines for selected own units, colored by command type
+    // (attack red, fight purple, move green — desktop client parity).
     if (sel.size) {
-      ctx.strokeStyle = rgb(this.selColor);
       ctx.lineWidth = 1;
       for (const e of frame.entities) {
         if (!sel.has(e.id)) continue;
-        ctx.beginPath();
-        ctx.arc(e.x, e.y, (e.r ?? 5) + 3, 0, TAU);
-        ctx.stroke();
-        // Move/attack destination line
         const u = e as UnitEntity;
-        let tx = u.tx;
-        let ty = u.ty;
-        if (tx === undefined || ty === undefined) {
+        let tx: number | undefined;
+        let ty: number | undefined;
+        let color: RGB;
+        if (u.atx !== undefined && u.aty !== undefined) {
           tx = u.atx;
           ty = u.aty;
+          color = ATTACK_CMD;
+        } else {
+          tx = u.tx;
+          ty = u.ty;
+          color = u.am ? ATTACK_CMD : u.fm ? FIGHT_CMD : MOVE_CMD;
         }
         if (tx !== undefined && ty !== undefined) {
           ctx.save();
           ctx.globalAlpha = 0.5;
+          ctx.strokeStyle = rgb(color);
           ctx.beginPath();
           ctx.moveTo(e.x, e.y);
           ctx.lineTo(tx, ty);
@@ -586,6 +611,32 @@ export class Canvas2DRenderer implements WorldRenderer {
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
       ctx.stroke();
+    }
+  }
+
+  /** Artillery charge preview: orange beam to the locked target plus the
+   *  growing splash-radius ring (client_game.py "charge beams"). */
+  private drawChargeBeams(entities: AnyEntity[]): void {
+    const ctx = this.ctx;
+    for (const e of entities) {
+      if (e.t !== "U") continue;
+      const u = e as UnitEntity;
+      if (u.chx === undefined || u.chy === undefined) continue;
+      const chp = u.chp ?? 0;
+      ctx.strokeStyle = `rgba(255,140,0,${(100 + 100 * chp) / 255})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(u.x, u.y);
+      ctx.lineTo(u.chx, u.chy);
+      ctx.stroke();
+      const ringR = 30 * chp;
+      if (ringR > 0) {
+        ctx.strokeStyle = `rgba(255,100,0,${(60 * chp) / 255})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(u.chx, u.chy, ringR, 0, TAU);
+        ctx.stroke();
+      }
     }
   }
 

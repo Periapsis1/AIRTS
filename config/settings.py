@@ -85,11 +85,11 @@ REACTIVE_ARMOR_REDUCTION = 0.5      # damage reduction per stack (50%)
 REACTIVE_ARMOR_COLOR = (200, 180, 60)
 
 # -- electric armor (T2 tank passive) -----------------------------------------
-ELECTRIC_ARMOR_INTERVAL = 2.0           # seconds per stack
-ELECTRIC_ARMOR_MAX_STACKS = 6
+ELECTRIC_ARMOR_INTERVAL = 3.0           # seconds per stack
+ELECTRIC_ARMOR_MAX_STACKS = 5
 ELECTRIC_ARMOR_REDUCTION = 0.60         # damage reduction per stack (60%)
 ELECTRIC_ARMOR_REGEN_PER_STACK = 0.25    # HP/s per stack
-ELECTRIC_ARMOR_SPEED_BONUS = 0.10       # +20% speed per stack
+ELECTRIC_ARMOR_SPEED_BONUS = 0.15       # +10% speed per stack
 ELECTRIC_ARMOR_COLOR = (80, 180, 255)
 
 # -- overclock (engineer passive) ---------------------------------------------
