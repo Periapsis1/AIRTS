@@ -235,6 +235,13 @@ UNIT_TYPES = {
                    "laser_flash_duration": 0.1},
         "is_t2": True,
     },
+    "sweeper_t2": {
+        "hp": 30, "speed": 30, "radius": 3,
+        "symbol": None, "can_attack": False, "hollow": True,
+        "fov": 360, "turn_rate": 90, "los": 0,
+        "weapon": {"name": "Laser", "damage": 0, "range": 60, "cooldown": 1.0},
+        "is_t2": True,
+    },
 }
 
 
